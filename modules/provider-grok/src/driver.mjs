@@ -45,6 +45,23 @@ function firstString(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
 }
 
+/**
+ * Classify a failed `grok ...` command as an OAuth credential failure.
+ *
+ * `runCliCommand` wraps CLI failures in a fixed message ("grok CLI failed (1)")
+ * and puts the actual stderr text on `error.detail`, so auth signals must be
+ * read from both fields. A missing CLI (spawn ENOENT) must not be classified as
+ * expired OAuth, and neither should an unrelated command failure.
+ */
+export function isGrokCliAuthFailure(error) {
+  if (!error || typeof error !== "object") return false;
+  if (error.code === 401 || error.status === 401) return true;
+  const text = `${String(error.message ?? "")} ${String(error.detail ?? "")}`
+    .replace(/\s+/g, " ")
+    .trim();
+  return /auth|login|expired|credential|access token.{0,80}(?:valid|invalid|expired|revok)/i.test(text);
+}
+
 function grokHomePath({ env = process.env, home = homedir(), grokHome } = {}) {
   return grokHome ?? env.GROK_HOME ?? join(home, ".grok");
 }
@@ -784,7 +801,7 @@ export class GrokOAuthDriver {
         providerId: PROVIDER_ID,
       });
     } catch (error) {
-      error.authExpired = error.code === 401 || /auth|login|expired|credential|access token.{0,80}(?:valid|invalid|expired|revok)/i.test(String(error.message));
+      error.authExpired = isGrokCliAuthFailure(error);
       commandError = error;
     }
     let finishError = null;
