@@ -13,16 +13,22 @@ function shouldFailover(error, accountPool, context) {
     && (error?.rateLimited || error?.quotaExhausted || error?.authExpired || error?.emptyOutput);
 }
 
-function quotaResetAt(account) {
+function quotaResetAt(account, now = new Date()) {
+  const nowMs = now instanceof Date ? now.getTime() : Date.now();
   const candidates = [
     account?.quota?.resetAt,
     ...(Array.isArray(account?.quota?.windows) ? account.quota.windows.map((window) => window?.resetAt) : []),
   ]
     .filter(Boolean)
     .map((value) => new Date(value))
-    .filter((value) => !Number.isNaN(value.getTime()) && value.getTime() > Date.now())
+    .filter((value) => !Number.isNaN(value.getTime()))
     .sort((left, right) => left.getTime() - right.getTime());
-  return candidates[0]?.toISOString() ?? null;
+  if (candidates.length === 0) return null;
+  // A reset point that has already passed means the quota window has reset, so
+  // the account must become eligible again instead of staying excluded forever.
+  // Future reset points still act as a cooldown until that moment.
+  const next = candidates.find((candidate) => candidate.getTime() > nowMs);
+  return (next ?? candidates[0]).toISOString();
 }
 
 function failureStatus(error) {
@@ -32,8 +38,8 @@ function failureStatus(error) {
   return "error";
 }
 
-function failureCooldown(error, account) {
-  return error?.cooldownUntil ?? quotaResetAt(account);
+function failureCooldown(error, account, now) {
+  return error?.cooldownUntil ?? quotaResetAt(account, now);
 }
 
 function reportAccount(accountPool, accountId, result, { opToken } = {}) {
@@ -149,7 +155,7 @@ export function createProviderRoute({ providerModule, accountPool, contextWindow
         } catch (error) {
           reportAccount(accountPool, account.accountId, {
             status: failureStatus(error),
-            cooldownUntil: failureCooldown(error, selectedAccount),
+            cooldownUntil: failureCooldown(error, selectedAccount, accountPool.clock()),
             message: error?.message,
           }, { opToken: account.opToken });
           if (!shouldFailover(error, accountPool, context)) throw error;
@@ -208,7 +214,7 @@ export function createProviderRoute({ providerModule, accountPool, contextWindow
           } catch (error) {
             reportAccount(accountPool, account.accountId, {
               status: failureStatus(error),
-              cooldownUntil: failureCooldown(error, selectedAccount),
+              cooldownUntil: failureCooldown(error, selectedAccount, accountPool.clock()),
               message: error?.message,
             }, { opToken: account.opToken });
             if (!hasOutput && shouldFailover(error, accountPool, context)) {
