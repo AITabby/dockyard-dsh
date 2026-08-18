@@ -309,6 +309,77 @@ test("provider route fails over an empty stream before exposing a blank response
   assert.equal(pool.get("account-good").health.status, "healthy");
 });
 
+test("provider route re-pools an exhausted account after its quota window has reset", async () => {
+  const pool = new AccountPool({
+    providerId: "test-provider",
+    policy: ACCOUNT_SELECTION_POLICY.MANUAL,
+    clock: fixedNow,
+  });
+  // resetAt is already in the past relative to the pool clock (fixedNow).
+  addAccount(pool, "account-a", {
+    remaining: 0,
+    limit: 10,
+    unit: "requests",
+    resetAt: "2020-01-01T00:00:00.000Z",
+  });
+  let calls = 0;
+  const providerModule = {
+    manifest: { id: "test-provider" },
+    async invoke() {
+      calls += 1;
+      const error = new Error("quota exhausted");
+      error.quotaExhausted = true;
+      throw error;
+    },
+  };
+  const route = createProviderRoute({ providerModule, accountPool: pool });
+
+  await assert.rejects(() => route.invoke({}), /quota exhausted/);
+  const after = pool.get("account-a");
+  assert.equal(after.health.status, "exhausted");
+  // The already-passed reset point is kept as the recovery signal instead of
+  // being dropped, so the account is selectable again on the next request.
+  assert.equal(after.health.cooldownUntil, "2020-01-01T00:00:00.000Z");
+  assert.equal(pool.select().accountId, "account-a");
+  await assert.rejects(() => route.invoke({}), /quota exhausted/);
+  assert.equal(calls, 2);
+});
+
+test("provider route keeps an exhausted account out until its quota window resets", async () => {
+  const pool = new AccountPool({
+    providerId: "test-provider",
+    policy: ACCOUNT_SELECTION_POLICY.MANUAL,
+    clock: fixedNow,
+  });
+  // resetAt is in the future relative to the pool clock (fixedNow).
+  addAccount(pool, "account-a", {
+    remaining: 0,
+    limit: 10,
+    unit: "requests",
+    resetAt: "2026-08-15T18:00:00.000Z",
+  });
+  let calls = 0;
+  const providerModule = {
+    manifest: { id: "test-provider" },
+    async invoke() {
+      calls += 1;
+      const error = new Error("quota exhausted");
+      error.quotaExhausted = true;
+      throw error;
+    },
+  };
+  const route = createProviderRoute({ providerModule, accountPool: pool });
+
+  await assert.rejects(() => route.invoke({}), /quota exhausted/);
+  const after = pool.get("account-a");
+  assert.equal(after.health.status, "exhausted");
+  assert.equal(after.health.cooldownUntil, "2026-08-15T18:00:00.000Z");
+  // The future reset point keeps the account excluded until that moment.
+  assert.throws(() => pool.select(), /No eligible accounts/);
+  await assert.rejects(() => route.invoke({}), /No eligible accounts/);
+  assert.equal(calls, 1);
+});
+
 test("DSH LLM adapter delegates provider-neutral streaming to the selected route", async () => {
   const emitted = [];
   const fakeRuntime = {

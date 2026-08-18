@@ -30,6 +30,7 @@ import {
   createGrokCliExecutor,
   createGrokDriver,
   grokRequestPromptBlocks,
+  isGrokCliAuthFailure,
   parseGrokAuth,
   parseGrokCreditsConfig,
   parseGrokModelCatalog,
@@ -1145,6 +1146,96 @@ test("Grok credits authorization failures remain quota errors", async () => {
       auth: { credentialRef },
     }, { secretStore }),
     (error) => error.quotaUnavailable === true && error.authExpired !== true,
+  );
+});
+
+test("Grok CLI auth classification reads the stderr detail, not the fixed wrapper message", () => {
+  // runCliCommand wraps CLI failures in a fixed message and puts stderr on
+  // error.detail, so the classifier must inspect both fields.
+  assert.equal(isGrokCliAuthFailure(null), false);
+  const cliFailure = (code, detail) => {
+    const error = new Error(`grok CLI failed (${code})`);
+    error.code = code;
+    error.detail = detail;
+    return error;
+  };
+  assert.equal(
+    isGrokCliAuthFailure(cliFailure(1, "Error: 401 Unauthorized: access token is invalid or expired")),
+    true,
+  );
+  assert.equal(isGrokCliAuthFailure(cliFailure(1, "login required; run `grok login` first")), true);
+  assert.equal(isGrokCliAuthFailure(cliFailure(1, "invalid credentials for account")), true);
+  assert.equal(isGrokCliAuthFailure(cliFailure(1, "model listing returned no models")), false);
+  assert.equal(isGrokCliAuthFailure(cliFailure(1, "network timeout while fetching models")), false);
+  // A spawn failure for a missing CLI must not be classified as expired OAuth.
+  const missingCli = new Error("spawn grok ENOENT");
+  missingCli.code = "ENOENT";
+  assert.equal(isGrokCliAuthFailure(missingCli), false);
+  // An HTTP-shaped error from a custom runner still signals auth expiry.
+  const httpError = new Error("upstream rejected the request");
+  httpError.status = 401;
+  assert.equal(isGrokCliAuthFailure(httpError), true);
+});
+
+test("Grok refreshAccount marks a failed official CLI auth check as expired OAuth", async () => {
+  const secretStore = new MemorySecretStore();
+  const credentialRef = "keychain://grok/auth-expired";
+  await secretStore.write(credentialRef, {
+    access: "grok-access",
+    refresh: "grok-refresh",
+    accountId: "grok-account",
+    email: "grok@example.test",
+  });
+  // Simulate the real runCliCommand failure shape: stderr text lives in
+  // error.detail while error.message stays the generic wrapper.
+  const commandRunner = async () => {
+    const error = new Error("grok CLI failed (1)");
+    error.code = 1;
+    error.detail = "Error: 401 Unauthorized: access token is invalid or expired";
+    throw error;
+  };
+  const driver = createGrokDriver({
+    cliPath: "grok",
+    commandRunner,
+    catalogLoader: async () => ({ models: [] }),
+  });
+  await assert.rejects(
+    () => driver.refreshAccount({
+      accountId: "grok-account",
+      auth: { credentialRef },
+      refresh: {},
+    }, { secretStore }),
+    (error) => error.authExpired === true,
+  );
+});
+
+test("Grok refreshAccount does not mark an unrelated CLI failure as expired OAuth", async () => {
+  const secretStore = new MemorySecretStore();
+  const credentialRef = "keychain://grok/command-failed";
+  await secretStore.write(credentialRef, {
+    access: "grok-access",
+    refresh: "grok-refresh",
+    accountId: "grok-account",
+    email: "grok@example.test",
+  });
+  const commandRunner = async () => {
+    const error = new Error("grok CLI failed (2)");
+    error.code = 2;
+    error.detail = "model listing returned no models";
+    throw error;
+  };
+  const driver = createGrokDriver({
+    cliPath: "grok",
+    commandRunner,
+    catalogLoader: async () => ({ models: [] }),
+  });
+  await assert.rejects(
+    () => driver.refreshAccount({
+      accountId: "grok-account",
+      auth: { credentialRef },
+      refresh: {},
+    }, { secretStore }),
+    (error) => error.authExpired !== true,
   );
 });
 
