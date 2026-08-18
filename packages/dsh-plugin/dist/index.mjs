@@ -524,12 +524,15 @@ function selectionContext(context, excludedIds) {
 function shouldFailover(error, accountPool, context) {
   return accountPool.policy === ACCOUNT_SELECTION_POLICY.FAILOVER && !context.accountId && (error?.rateLimited || error?.quotaExhausted || error?.authExpired || error?.emptyOutput);
 }
-function quotaResetAt(account) {
+function quotaResetAt(account, now = /* @__PURE__ */ new Date()) {
+  const nowMs = now instanceof Date ? now.getTime() : Date.now();
   const candidates = [
     account?.quota?.resetAt,
     ...Array.isArray(account?.quota?.windows) ? account.quota.windows.map((window) => window?.resetAt) : []
-  ].filter(Boolean).map((value) => new Date(value)).filter((value) => !Number.isNaN(value.getTime()) && value.getTime() > Date.now()).sort((left, right) => left.getTime() - right.getTime());
-  return candidates[0]?.toISOString() ?? null;
+  ].filter(Boolean).map((value) => new Date(value)).filter((value) => !Number.isNaN(value.getTime())).sort((left, right) => left.getTime() - right.getTime());
+  if (candidates.length === 0) return null;
+  const next = candidates.find((candidate2) => candidate2.getTime() > nowMs);
+  return (next ?? candidates[0]).toISOString();
 }
 function failureStatus(error) {
   if (error?.authExpired) return "auth_expired";
@@ -537,8 +540,8 @@ function failureStatus(error) {
   if (error?.rateLimited) return "rate_limited";
   return "error";
 }
-function failureCooldown(error, account) {
-  return error?.cooldownUntil ?? quotaResetAt(account);
+function failureCooldown(error, account, now) {
+  return error?.cooldownUntil ?? quotaResetAt(account, now);
 }
 function hasSubstantiveStreamOutput(chunk) {
   if (!chunk || typeof chunk !== "object") return true;
@@ -597,7 +600,7 @@ function createProviderRoute({ providerModule, accountPool }) {
         } catch (error) {
           accountPool.report(account.accountId, {
             status: failureStatus(error),
-            cooldownUntil: failureCooldown(error, selectedAccount),
+            cooldownUntil: failureCooldown(error, selectedAccount, accountPool.clock()),
             message: error?.message
           });
           if (!shouldFailover(error, accountPool, context)) throw error;
@@ -645,7 +648,7 @@ function createProviderRoute({ providerModule, accountPool }) {
           } catch (error) {
             accountPool.report(account.accountId, {
               status: failureStatus(error),
-              cooldownUntil: failureCooldown(error, selectedAccount),
+              cooldownUntil: failureCooldown(error, selectedAccount, accountPool.clock()),
               message: error?.message
             });
             if (!hasOutput && shouldFailover(error, accountPool, context)) {
@@ -4756,6 +4759,12 @@ function hash3(value) {
 function firstString2(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
 }
+function isGrokCliAuthFailure(error) {
+  if (!error || typeof error !== "object") return false;
+  if (error.code === 401 || error.status === 401) return true;
+  const text2 = `${String(error.message ?? "")} ${String(error.detail ?? "")}`.replace(/\s+/g, " ").trim();
+  return /auth|login|expired|credential|access token.{0,80}(?:valid|invalid|expired|revok)/i.test(text2);
+}
 function grokHomePath({ env = process.env, home = homedir5(), grokHome } = {}) {
   return grokHome ?? env.GROK_HOME ?? join7(home, ".grok");
 }
@@ -5316,7 +5325,7 @@ var GrokOAuthDriver = class {
         providerId: PROVIDER_ID4
       });
     } catch (error) {
-      error.authExpired = error.code === 401 || /auth|login|expired|credential|access token.{0,80}(?:valid|invalid|expired|revok)/i.test(String(error.message));
+      error.authExpired = isGrokCliAuthFailure(error);
       commandError2 = error;
     }
     let finishError = null;
