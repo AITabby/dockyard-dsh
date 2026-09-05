@@ -147,6 +147,14 @@ export function apply(ctx, config = {}) {
     const service = config.service ?? new DockyardDshService({
       runtime,
       ...(config.serviceOptions ?? {}),
+      catalogAdapter: adapter,
+      onCatalogUpdated: () => {
+        try {
+          ctx.emit?.("llm/adapters-updated");
+        } catch {
+          // Catalog refresh must still succeed if the host event bus is unavailable.
+        }
+      },
       logger: config.serviceOptions?.logger ?? contextLogger(ctx, "dockyard-dsh"),
     });
     if (typeof ctx.provide === "function") ctx.provide("dockyard", service);

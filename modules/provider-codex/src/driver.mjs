@@ -29,12 +29,18 @@ const DEFAULT_USAGE_URLS = Object.freeze([
   "https://chatgpt.com/backend-api/wham/usage",
   "https://chatgpt.com/backend-api/codex/usage",
 ]);
+const DEFAULT_MODELS_URL = `${DEFAULT_CODEX_BASE_URL}/codex/models?client_version=1.0.0`;
+const CODEX_CAPACITY_FALLBACKS = Object.freeze(["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]);
 // This is the public Codex OAuth application identity, not a model or provider version.
 const DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CREDENTIAL_SLOT = Symbol("dockyard-codex-credential");
 
 function hash(value) {
   return createHash("sha256").update(String(value)).digest("hex");
+}
+
+function firstString(...values) {
+  return values.find((value) => typeof value === "string" && value.trim().length > 0)?.trim() ?? null;
 }
 
 function codexAuthPath({ env = process.env, home = homedir(), authFilePath } = {}) {
@@ -173,7 +179,100 @@ function isExpiring(tokens, now, leewaySeconds) {
   return new Date(tokens.expiresAt).getTime() <= now.getTime() + leewaySeconds * 1000;
 }
 
+function humanizeCodexSlug(slug) {
+  return String(slug ?? "")
+    .replace(/^gpt-/i, "GPT-")
+    .replace(/[-_]+/g, " ")
+    .replace(/\b([a-z])/g, (character) => character.toUpperCase());
+}
+
+function hasCodexCapacities(model) {
+  return Number.isInteger(model?.contextWindow) && model.contextWindow > 0
+    && Number.isInteger(model?.maxTokens) && model.maxTokens > 0;
+}
+
+export function pickCodexCapacityTemplate(registryModels = []) {
+  const models = Array.isArray(registryModels) ? registryModels.filter(hasCodexCapacities) : [];
+  for (const id of CODEX_CAPACITY_FALLBACKS) {
+    const match = models.find((model) => model.id === id);
+    if (match) return match;
+  }
+  return models[0] ?? null;
+}
+
+export function synthesizeCodexPiAiModel(modelId, registryModels = []) {
+  const id = String(modelId ?? "").trim();
+  const exact = (Array.isArray(registryModels) ? registryModels : []).find((model) => model?.id === id);
+  const template = hasCodexCapacities(exact) ? exact : pickCodexCapacityTemplate(registryModels);
+  const thinkingLevelMap = template?.thinkingLevelMap && typeof template.thinkingLevelMap === "object"
+    ? { ...template.thinkingLevelMap }
+    : { xhigh: "xhigh", minimal: "low" };
+  return {
+    id,
+    name: typeof exact?.name === "string" && exact.name.length > 0
+      ? exact.name
+      : humanizeCodexSlug(id),
+    api: "openai-codex-responses",
+    provider: PROVIDER_ID,
+    baseUrl: DEFAULT_CODEX_BASE_URL,
+    reasoning: typeof template?.reasoning === "boolean" ? template.reasoning : true,
+    thinkingLevelMap,
+    input: Array.isArray(template?.input) && template.input.length > 0 ? [...template.input] : ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: hasCodexCapacities(template) ? template.contextWindow : 272_000,
+    maxTokens: hasCodexCapacities(template) ? template.maxTokens : 128_000,
+  };
+}
+
+export function parseCodexLiveModelCatalog(body) {
+  const entries = Array.isArray(body?.models) ? body.models : Array.isArray(body) ? body : [];
+  const sortable = [];
+  for (const item of entries) {
+    if (!item || typeof item !== "object") continue;
+    const slug = firstString(item.slug, item.id);
+    if (!slug) continue;
+    const visibility = String(item.visibility ?? "").trim().toLowerCase();
+    if (visibility === "hide" || visibility === "hidden") continue;
+    const priority = Number.isFinite(Number(item.priority)) ? Number(item.priority) : 10_000;
+    sortable.push({
+      priority,
+      model: {
+        id: slug,
+        name: firstString(item.title, item.display_name, item.displayName, item.name) ?? humanizeCodexSlug(slug),
+      },
+    });
+  }
+  sortable.sort((left, right) => left.priority - right.priority || left.model.id.localeCompare(right.model.id));
+  const models = [];
+  const seen = new Set();
+  for (const { model } of sortable) {
+    if (seen.has(model.id)) continue;
+    seen.add(model.id);
+    models.push(model);
+  }
+  return models;
+}
+
+export function mergeCodexLiveCatalog(liveModels, registryModels = []) {
+  const registry = Array.isArray(registryModels) ? registryModels : [];
+  const merged = [];
+  const seen = new Set();
+  for (const live of Array.isArray(liveModels) ? liveModels : []) {
+    const id = typeof live?.id === "string" ? live.id.trim() : "";
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const synthesized = synthesizeCodexPiAiModel(id, registry);
+    merged.push({
+      ...synthesized,
+      ...(typeof live.name === "string" && live.name.length > 0 ? { name: live.name } : {}),
+    });
+  }
+  return merged;
+}
+
 export class CodexOAuthDriver {
+  #catalogCache;
+
   constructor({
     authFilePath,
     env = process.env,
@@ -182,6 +281,7 @@ export class CodexOAuthDriver {
     usageUrls = env.DOCKYARD_CODEX_USAGE_URL
       ? [env.DOCKYARD_CODEX_USAGE_URL]
       : [...DEFAULT_USAGE_URLS],
+    modelsUrl = env.DOCKYARD_CODEX_MODELS_URL || DEFAULT_MODELS_URL,
     clientId = env.DOCKYARD_CODEX_CLIENT_ID || DEFAULT_CLIENT_ID,
     fetchImpl = fetch,
     requestExecutor = null,
@@ -201,10 +301,12 @@ export class CodexOAuthDriver {
     this.tokenUrl = assertSecureEndpointUrl(tokenUrl, "DOCKYARD_CODEX_TOKEN_URL");
     assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_CODEX_AUTHORIZATION_URL");
     this.usageUrls = usageUrls.map((url) => assertSecureEndpointUrl(url, "DOCKYARD_CODEX_USAGE_URL"));
+    this.modelsUrl = assertSecureEndpointUrl(modelsUrl, "DOCKYARD_CODEX_MODELS_URL");
     this.clientId = clientId;
     this.fetchImpl = fetchImpl;
     this.requestExecutor = requestExecutor;
     this.catalogLoader = catalogLoader;
+    this.#catalogCache = null;
     this.refreshLeewaySeconds = refreshLeewaySeconds;
     this.cliAuthorizer = createCliOAuthAuthorizer({
       providerId: PROVIDER_ID,
@@ -529,21 +631,61 @@ export class CodexOAuthDriver {
     throw wrapped;
   }
 
-  async getCatalog() {
-    if (this.catalogLoader) {
-      try {
-        const catalog = await this.catalogLoader();
-        if (Array.isArray(catalog?.models) && catalog.models.length > 0) return catalog;
-      } catch {
-        // A catalog is advisory; native invocation can still accept an exact
-        // model supplied by DSH even when discovery is temporarily unavailable.
-      }
+  async #registryCatalog(context = {}) {
+    if (!this.catalogLoader) return null;
+    try {
+      const catalog = await this.catalogLoader({
+        force: Boolean(context.force),
+        accounts: context.accounts,
+        secretStore: context.secretStore,
+        signal: context.signal,
+      });
+      if (Array.isArray(catalog?.models) && catalog.models.length > 0) return catalog;
+    } catch {
+      // A catalog is advisory; native invocation can still accept an exact
+      // model supplied by DSH even when discovery is temporarily unavailable.
     }
-    return {
-      models: [],
-      source: "no_live_catalog_endpoint",
-      diagnostic: "Codex model identifiers are accepted from the active DSH configuration; this module does not invent a model list.",
-    };
+    return null;
+  }
+
+  async #loadLiveCatalog(context = {}) {
+    const accounts = Array.isArray(context.accounts) ? context.accounts : [];
+    const account = accounts[0];
+    if (!account || !context.secretStore) return [];
+    try {
+      const credential = await this.#liveCredential(account, context);
+      const accountId = credential.accountId ?? account.accountId;
+      const headers = {
+        authorization: `Bearer ${credential.access}`,
+      };
+      if (accountId) headers["chatgpt-account-id"] = accountId;
+      const { body } = await fetchJson(this.modelsUrl, {
+        headers,
+        ...(context.signal ? { signal: context.signal } : {}),
+      }, { fetchImpl: this.fetchImpl });
+      return parseCodexLiveModelCatalog(body);
+    } catch {
+      return [];
+    }
+  }
+
+  async getCatalog(context = {}) {
+    const force = Boolean(context.force);
+    if (!force && this.#catalogCache) return this.#catalogCache;
+    const registry = await this.#registryCatalog(context);
+    const live = await this.#loadLiveCatalog(context);
+    const catalog = live.length > 0
+      ? {
+        models: mergeCodexLiveCatalog(live, registry?.models ?? []),
+        source: "official_codex_models_api",
+      }
+      : registry ?? {
+        models: [],
+        source: "no_live_catalog_endpoint",
+        diagnostic: "Codex model identifiers are accepted from the active DSH configuration; this module does not invent a model list.",
+      };
+    if (catalog.models.length > 0) this.#catalogCache = catalog;
+    return catalog;
   }
 
   async invoke(request, invocation, context = {}) {
@@ -562,6 +704,7 @@ export function createCodexPiAiExecutor({
   createProvider,
   openAICodexResponsesApi,
   modelResolver = null,
+  registryModels = [],
 }) {
   if (!PiAiAdapter || !createProvider || !openAICodexResponsesApi) {
     throw new Error("Codex DSH transport dependencies are incomplete");
@@ -569,7 +712,13 @@ export function createCodexPiAiExecutor({
   return async function executeCodex({ request, credential, context = {} }) {
     const modelId = String(request.model);
     const requestedEffort = typeof request.reasoningEffort === "string" ? request.reasoningEffort : undefined;
-    const catalogModel = typeof modelResolver === "function" ? modelResolver(modelId) : null;
+    const resolved = typeof modelResolver === "function" ? modelResolver(modelId) : null;
+    const catalogModel = hasCodexCapacities(resolved)
+      ? resolved
+      : synthesizeCodexPiAiModel(modelId, [
+        ...(resolved ? [resolved] : []),
+        ...(Array.isArray(registryModels) ? registryModels : []),
+      ]);
     const contextWindow = catalogModel?.contextWindow;
     const maxTokens = catalogModel?.maxTokens;
     if (!Number.isInteger(contextWindow) || contextWindow <= 0 || !Number.isInteger(maxTokens) || maxTokens <= 0) {
@@ -653,4 +802,5 @@ export const codexDriverConstants = Object.freeze({
   providerId: PROVIDER_ID,
   defaultUsageUrls: DEFAULT_USAGE_URLS,
   defaultBaseUrl: DEFAULT_CODEX_BASE_URL,
+  defaultModelsUrl: DEFAULT_MODELS_URL,
 });

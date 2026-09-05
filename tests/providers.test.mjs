@@ -10,7 +10,13 @@ import { createBrowserOAuthAuthorizer } from "../packages/oauth/src/browser-oaut
 import { createCliOAuthAuthorizer } from "../packages/oauth/src/cli-oauth-authorizer.mjs";
 import { createCliStatusAuthorizer } from "../packages/oauth/src/cli-status-authorizer.mjs";
 import { createOfficialSessionAuthorizer } from "../packages/oauth/src/official-session-authorizer.mjs";
-import { createCodexDriver, createCodexPiAiExecutor } from "../modules/provider-codex/src/index.mjs";
+import {
+  createCodexDriver,
+  createCodexPiAiExecutor,
+  mergeCodexLiveCatalog,
+  parseCodexLiveModelCatalog,
+  synthesizeCodexPiAiModel,
+} from "../modules/provider-codex/src/index.mjs";
 import {
   createAntigravityCatalogLoader,
   createAntigravityCliExecutor,
@@ -116,8 +122,128 @@ test("Codex driver imports local OAuth and parses live multi-window quota", asyn
   }
 });
 
-test("Codex PiAI transport forwards DSH durable attachments", async () => {
-  let adapterOptions;
+test("Codex live model catalog parse hides entries and sorts by priority", () => {
+  const models = parseCodexLiveModelCatalog({
+    models: [
+      { slug: "gpt-5.4", priority: 20 },
+      { slug: "secret", visibility: "hidden", priority: 1 },
+      { slug: "gpt-6", priority: 10, display_name: "GPT-6" },
+      { slug: "gpt-6" },
+    ],
+  });
+  assert.deepEqual(models.map((model) => model.id), ["gpt-6", "gpt-5.4"]);
+  assert.equal(models[0].name, "GPT-6");
+});
+
+test("Codex live merge synthesizes registry-backed capacities for unknown slugs", () => {
+  const registry = [{
+    id: "gpt-5.6-luna",
+    name: "GPT-5.6 Luna",
+    contextWindow: 272_000,
+    maxTokens: 128_000,
+    input: ["text", "image"],
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", minimal: "low" },
+  }];
+  const merged = mergeCodexLiveCatalog([{ id: "gpt-6", name: "GPT-6" }, { id: "gpt-5.6-luna" }], registry);
+  const gpt6 = merged.find((model) => model.id === "gpt-6");
+  assert.equal(gpt6.name, "GPT-6");
+  assert.equal(gpt6.contextWindow, 272_000);
+  assert.equal(gpt6.maxTokens, 128_000);
+  assert.deepEqual(gpt6.thinkingLevelMap, { xhigh: "xhigh", minimal: "low" });
+  assert.equal(gpt6.api, "openai-codex-responses");
+  const known = merged.find((model) => model.id === "gpt-5.6-luna");
+  assert.equal(known.name, "GPT-5.6 Luna");
+});
+
+test("Codex driver fetches the official live model catalog with account headers", async () => {
+  let seen;
+  const registry = [{
+    id: "gpt-5.4",
+    name: "GPT-5.4",
+    contextWindow: 272_000,
+    maxTokens: 128_000,
+    input: ["text", "image"],
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", minimal: "low" },
+  }];
+  const driver = createCodexDriver({
+    fetchImpl: async (url, init = {}) => {
+      seen = { url, headers: init.headers ?? {} };
+      return response(200, { models: [
+        { slug: "gpt-5.4", priority: 20 },
+        { slug: "gpt-6", priority: 10, display_name: "GPT-6" },
+        { slug: "secret", visibility: "hidden", priority: 1 },
+      ] });
+    },
+    catalogLoader: async () => ({ models: registry, source: "dsh_pi_ai_provider_catalog" }),
+  });
+  const secretStore = new MemorySecretStore();
+  const access = jwt({
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    "https://api.openai.com/auth": { chatgpt_account_id: "acct-live", chatgpt_plan_type: "pro" },
+  });
+  const [account] = await driver.importSource({
+    content: JSON.stringify({
+      tokens: { access_token: access, refresh_token: "refresh-live", account_id: "acct-live" },
+    }),
+  }, { secretStore });
+  const catalog = await driver.getCatalog({ accounts: [account], secretStore });
+  assert.match(seen.url, /chatgpt\.com\/backend-api\/codex\/models/);
+  assert.equal(seen.headers.authorization, `Bearer ${access}`);
+  assert.equal(seen.headers["chatgpt-account-id"], "acct-live");
+  assert.equal(catalog.source, "official_codex_models_api");
+  assert.deepEqual(catalog.models.map((model) => model.id), ["gpt-6", "gpt-5.4"]);
+  const gpt6 = catalog.models[0];
+  assert.equal(gpt6.name, "GPT-6");
+  assert.equal(gpt6.contextWindow, 272_000);
+  assert.equal(gpt6.maxTokens, 128_000);
+});
+
+test("Codex driver falls back to the registry catalog when the live endpoint fails", async () => {
+  const registry = [{ id: "gpt-5.4", name: "GPT-5.4", contextWindow: 272_000, maxTokens: 128_000 }];
+  const driver = createCodexDriver({
+    fetchImpl: async () => response(500, {}),
+    catalogLoader: async () => ({ models: registry, source: "dsh_pi_ai_provider_catalog" }),
+  });
+  const secretStore = new MemorySecretStore();
+  const access = jwt({
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    "https://api.openai.com/auth": { chatgpt_account_id: "acct-live" },
+  });
+  const [account] = await driver.importSource({
+    content: JSON.stringify({
+      tokens: { access_token: access, refresh_token: "refresh-live", account_id: "acct-live" },
+    }),
+  }, { secretStore });
+  const catalog = await driver.getCatalog({ accounts: [account], secretStore });
+  assert.equal(catalog.source, "dsh_pi_ai_provider_catalog");
+  assert.deepEqual(catalog.models.map((model) => model.id), ["gpt-5.4"]);
+});
+
+test("Codex executor synthesizes capacities for slugs missing from the registry", async () => {
+  class StubPiAiAdapter {
+    stream(request) { return "stream-result"; }
+  }
+  const executor = createCodexPiAiExecutor({
+    PiAiAdapter: StubPiAiAdapter,
+    createProvider: (options) => options,
+    openAICodexResponsesApi: () => ({}),
+    modelResolver: () => null,
+    registryModels: [],
+  });
+  await executor({
+    request: { model: "gpt-6", input: [{ type: "text", text: "hello" }] },
+    credential: { access: "oauth-access" },
+    context: {},
+  });
+  const synthesized = synthesizeCodexPiAiModel("gpt-6", []);
+  assert.equal(synthesized.contextWindow, 272_000);
+  assert.equal(synthesized.maxTokens, 128_000);
+  assert.equal(synthesized.api, "openai-codex-responses");
+});
+
+test("Codex PiAI transport forwards DSH durable attachments", async () => {  let adapterOptions;
   let streamedRequest;
   class StubPiAiAdapter {
     constructor(options) {
@@ -1416,6 +1542,37 @@ test("Grok catalog loader caches a local provider response", async () => {
   assert.deepEqual(first.models, [{ id: "grok-live", name: "grok-live" }]);
   assert.strictEqual(first, second);
   assert.equal(reads, 1);
+  const forced = await loader({ force: true });
+  assert.equal(reads, 2);
+  assert.deepEqual(forced.models, [{ id: "grok-live", name: "grok-live" }]);
+});
+
+test("Grok catalog loader force refresh does not join an in-flight request", async () => {
+  let calls = 0;
+  let releaseFirst;
+  let enteredFirst;
+  const firstStarted = new Promise((resolve) => { releaseFirst = resolve; });
+  const firstEntered = new Promise((resolve) => { enteredFirst = resolve; });
+  const loader = createGrokCatalogLoader({
+    grokHome: "/provider/grok",
+    readJson: async () => {
+      const call = ++calls;
+      if (call === 1) {
+        enteredFirst();
+        await firstStarted;
+      }
+      return { models: { [`grok-${call}`]: { info: { model: `grok-${call}` } } } };
+    },
+    cacheTtlMs: 60_000,
+  });
+  const firstPromise = loader();
+  await firstEntered;
+  const forced = await loader({ force: true });
+  releaseFirst();
+  const first = await firstPromise;
+  assert.equal(calls, 2);
+  assert.deepEqual(forced.models, [{ id: "grok-2", name: "grok-2" }]);
+  assert.deepEqual(first.models, [{ id: "grok-1", name: "grok-1" }]);
 });
 
 test("Claude subscription status rejects API keys and maps live registry metadata", async () => {
@@ -1981,6 +2138,38 @@ test("Cursor status/catalog are sourced from the official CLI response", async (
     contextWindow: 128_000,
     maxTokens: 16_000,
   }]);
+});
+
+test("Cursor catalog loader force refresh does not join an in-flight request", async () => {
+  let calls = 0;
+  let releaseFirst;
+  let enteredFirst;
+  const firstStarted = new Promise((resolve) => { releaseFirst = resolve; });
+  const firstEntered = new Promise((resolve) => { enteredFirst = resolve; });
+  const loader = createCursorCatalogLoader({
+    commandRunner: async () => {
+      const call = ++calls;
+      if (call === 1) {
+        enteredFirst();
+        await firstStarted;
+      }
+      return {
+        output: JSON.stringify({
+          loggedIn: true,
+          models: [{ id: `cursor-${call}`, name: `Cursor ${call}` }],
+        }),
+        errorOutput: "",
+      };
+    },
+  });
+  const firstPromise = loader();
+  await firstEntered;
+  const forced = await loader({ force: true });
+  releaseFirst();
+  const first = await firstPromise;
+  assert.equal(calls, 2);
+  assert.equal(forced.models[0].id, "cursor-2");
+  assert.equal(first.models[0].id, "cursor-1");
 });
 
 test("Cursor Connect trailers expose upstream quota errors instead of an empty success", () => {

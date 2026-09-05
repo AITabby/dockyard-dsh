@@ -22,5 +22,9 @@ export {
   CodexOAuthDriver,
   createCodexDriver,
   createCodexPiAiExecutor,
+  mergeCodexLiveCatalog,
+  parseCodexLiveModelCatalog,
+  pickCodexCapacityTemplate,
   summarizeCodexCandidate,
+  synthesizeCodexPiAiModel,
 } from "./driver.mjs";

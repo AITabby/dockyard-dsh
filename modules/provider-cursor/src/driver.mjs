@@ -450,7 +450,7 @@ export function createCursorCatalogLoader({
         : cached.source !== "official_cursor_browser_oauth_api"
     )) return cached;
     const pending = pendingBuckets.get(bucketKey);
-    if (pending) return pending;
+    if (!force && pending) return pending;
     const promise = (async () => {
       try {
         const browser = await loadBrowserCatalog({ accounts, secretStore, signal });
@@ -492,7 +492,9 @@ export function createCursorCatalogLoader({
         cachedBuckets.delete(bucketKey);
         return catalog;
       }
-    })().finally(() => { pendingBuckets.delete(bucketKey); });
+    })().finally(() => {
+      if (pendingBuckets.get(bucketKey) === promise) pendingBuckets.delete(bucketKey);
+    });
     pendingBuckets.set(bucketKey, promise);
     return promise;
   };

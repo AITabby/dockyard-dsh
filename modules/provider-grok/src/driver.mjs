@@ -348,8 +348,8 @@ export function createGrokCatalogLoader({
   return async function loadCatalog({ force = false } = {}) {
     const now = Date.now();
     if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
-    if (pending) return pending;
-    pending = (async () => {
+    if (!force && pending) return pending;
+    const request = (async () => {
       const cache = await readJson(join(resolvedHome, "models_cache.json"));
       let value;
       if (typeof commandRunner === "function") {
@@ -383,9 +383,10 @@ export function createGrokCatalogLoader({
       cachedAt = Date.now();
       return value;
     })().finally(() => {
-      pending = null;
+      if (pending === request) pending = null;
     });
-    return pending;
+    pending = request;
+    return request;
   };
 }
 

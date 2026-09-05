@@ -237,18 +237,33 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
     });
   }
 
-  async function providerCatalog(provider, signal) {
+  const catalogGenerations = new Map();
+
+  function bumpCatalogGeneration(provider) {
+    const next = (catalogGenerations.get(provider) ?? 0) + 1;
+    catalogGenerations.set(provider, next);
+    return next;
+  }
+
+  async function providerCatalog(provider, signal, { force = false } = {}) {
     // The catalog is provider-scoped shared state. Binding the single
     // in-flight fetch to the FIRST caller's AbortSignal meant one cancelled
     // request killed the catalog for everyone else while later callers'
     // signals were silently ignored. Fetch without a caller signal instead;
     // each caller races its own signal against the shared result.
+    if (force) {
+      catalogCache.delete(provider);
+      catalogPromises.delete(provider);
+    }
     let promise = catalogPromises.get(provider);
     if (!promise) {
+      const generation = force ? bumpCatalogGeneration(provider) : (catalogGenerations.get(provider) ?? 0);
       promise = Promise.resolve()
-        .then(() => runtime.getCatalog(provider, {}))
+        .then(() => runtime.getCatalog(provider, force ? { force: true } : {}))
         .then((catalog) => {
-          catalogCache.set(provider, { value: catalog, fetchedAt: Date.now() });
+          if ((catalogGenerations.get(provider) ?? 0) === generation) {
+            catalogCache.set(provider, { value: catalog, fetchedAt: Date.now() });
+          }
           return catalog;
         })
         .finally(() => {
@@ -257,6 +272,30 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
       catalogPromises.set(provider, promise);
     }
     return raceCallerSignal(promise, signal);
+  }
+
+  function invalidateCatalog(providerId = null) {
+    if (providerId) {
+      bumpCatalogGeneration(providerId);
+      catalogCache.delete(providerId);
+      catalogPromises.delete(providerId);
+      return;
+    }
+    for (const provider of owned) bumpCatalogGeneration(provider);
+    catalogCache.clear();
+    catalogPromises.clear();
+  }
+
+  async function refreshCatalog(providerId = null) {
+    const ids = providerId ? [providerId] : [...owned];
+    const catalogs = [];
+    for (const id of ids) {
+      catalogs.push({
+        providerId: id,
+        catalog: await providerCatalog(id, undefined, { force: true }),
+      });
+    }
+    return catalogs;
   }
 
   function cachedProviderCatalog(provider) {
@@ -297,6 +336,9 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
     providerRetryPolicy() {
       return undefined;
     },
+
+    invalidateCatalog,
+    refreshCatalog,
 
     async listModels(provider, signal) {
       await ensureRuntimeReady();

@@ -131,6 +131,8 @@ export class DockyardDshService {
     autoRefresh = true,
     openBrowser = openDefaultBrowser,
     logger = console,
+    catalogAdapter = null,
+    onCatalogUpdated = null,
   } = {}) {
     if (!runtime) throw new Error("Dockyard DSH service requires a runtime");
     this.runtime = runtime;
@@ -138,6 +140,8 @@ export class DockyardDshService {
     this.autoRefresh = autoRefresh;
     this.openBrowser = openBrowser;
     this.logger = logger;
+    this.catalogAdapter = catalogAdapter;
+    this.onCatalogUpdated = typeof onCatalogUpdated === "function" ? onCatalogUpdated : null;
     this.ready = runtime.init();
   }
 
@@ -218,6 +222,10 @@ export class DockyardDshService {
     if (candidateId && imports.length === 0 && diagnostics.length === 0) {
       throw new Error(`没有找到未添加的 OAuth 候选：${candidateId}`);
     }
+    if (imports.length > 0) {
+      const catalogProviderId = providerInput ? providerIdFor(this.runtime, providerInput) : null;
+      await this.refreshCatalog(catalogProviderId).catch((error) => this.#warn("post-add catalog refresh failed", error));
+    }
     return { accounts: imports, diagnostics, scan };
   }
 
@@ -235,11 +243,61 @@ export class DockyardDshService {
     return promise;
   }
 
-  async catalog(providerInput) {
+  async catalog(providerInput, { force = false } = {}) {
     await this.ready;
     const providerId = providerIdFor(this.runtime, providerInput);
     if (!providerId) throw new Error(`未知 provider：${providerInput}`);
-    return { providerId, manifest: manifestFor(this.runtime, providerInput), catalog: await this.runtime.getCatalog(providerId) };
+    if (force && typeof this.catalogAdapter?.invalidateCatalog === "function") {
+      this.catalogAdapter.invalidateCatalog(providerId);
+    }
+    const catalog = await this.runtime.getCatalog(providerId, force ? { force: true } : {});
+    if (force && typeof this.catalogAdapter?.invalidateCatalog === "function") {
+      this.catalogAdapter.invalidateCatalog(providerId);
+    }
+    return { providerId, manifest: manifestFor(this.runtime, providerInput), catalog };
+  }
+
+  catalogProviderIds(providerId = null) {
+    if (providerId) return [providerId];
+    const snapshot = typeof this.runtime.snapshot === "function" ? this.runtime.snapshot() : null;
+    const connected = Array.isArray(snapshot?.providers)
+      ? snapshot.providers
+        .filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length > 0)
+        .map((provider) => provider.providerId)
+      : [];
+    if (connected.length > 0) return connected;
+    return this.runtime.listProviderIds?.() ?? [];
+  }
+
+  async refreshCatalog(providerInput = null) {
+    await this.ready;
+    const providerId = providerInput ? providerIdFor(this.runtime, providerInput) : null;
+    if (providerInput && !providerId) throw new Error(`未知 provider：${providerInput}`);
+    const providerIds = this.catalogProviderIds(providerId);
+    const catalogs = [];
+    for (const id of providerIds) {
+      if (typeof this.catalogAdapter?.invalidateCatalog === "function") {
+        this.catalogAdapter.invalidateCatalog(id);
+      }
+      const catalog = await this.runtime.getCatalog(id, { force: true });
+      if (typeof this.catalogAdapter?.invalidateCatalog === "function") {
+        this.catalogAdapter.invalidateCatalog(id);
+      }
+      catalogs.push({
+        providerId: id,
+        manifest: manifestFor(this.runtime, id),
+        catalog,
+        modelCount: Array.isArray(catalog?.models) ? catalog.models.length : 0,
+        source: catalog?.source ?? null,
+        diagnostics: Array.isArray(catalog?.diagnostics) ? catalog.diagnostics : [],
+      });
+    }
+    try {
+      this.onCatalogUpdated?.({ providerId, providerIds });
+    } catch (error) {
+      this.#warn("catalog update notification failed", error);
+    }
+    return { providerId, providerIds, catalogs };
   }
 
   async setPolicy(providerInput, policyInput, defaultAccountId = undefined) {
@@ -348,6 +406,7 @@ export class DockyardDshService {
     else if (result.status === "completed") {
       this.#authSessions.delete(started.sessionId);
       await this.refresh(manifest.id).catch((error) => this.#warn("post-login quota refresh failed", error));
+      await this.refreshCatalog(manifest.id).catch((error) => this.#warn("post-login catalog refresh failed", error));
     }
     return result;
   }
@@ -363,6 +422,7 @@ export class DockyardDshService {
     if (result.status === "completed") {
       this.#authSessions.delete(sessionId);
       await this.refresh(providerId).catch((error) => this.#warn("post-login quota refresh failed", error));
+      await this.refreshCatalog(providerId).catch((error) => this.#warn("post-login catalog refresh failed", error));
     } else if (!["pending", "processing"].includes(result.status)) {
       this.#authSessions.delete(sessionId);
     }
@@ -394,6 +454,7 @@ export class DockyardDshService {
     else if (result.status === "completed") {
       this.#authSessions.delete(sessionId);
       await this.refresh(providerId).catch((error) => this.#warn("post-login quota refresh failed", error));
+      await this.refreshCatalog(providerId).catch((error) => this.#warn("post-login catalog refresh failed", error));
     } else if (result.status !== "pending" && result.status !== "processing") {
       this.#authSessions.delete(sessionId);
     }
@@ -409,7 +470,7 @@ export class DockyardDshService {
       "/dockyard add [provider] [candidateId]   添加扫描到的 OAuth 账号",
       "/dockyard login <provider>               启动 provider 官方授权流程并登录",
       "/dockyard refresh [provider]             强制读取实时额度",
-      "/dockyard models <provider>              读取 provider 实时模型/档位",
+      "/dockyard models <provider>              强制读取 provider 实时模型/档位",
       "/dockyard policy <provider> <policy>     设置 manual/sticky_session/round_robin/failover",
       "/dockyard use <provider> <accountId>      手动指定账号",
       "/dockyard remove <provider> <accountId>   从账号池移除账号并清理本机 Keychain 引用",
@@ -541,7 +602,7 @@ export function createDockyardCommand(service) {
           }
           case "models": {
             if (!args[0]) return commandError("用法：/dockyard models <provider>");
-            const { providerId, manifest, catalog } = await service.catalog(args[0]);
+            const { providerId, manifest, catalog } = await service.catalog(args[0], { force: true });
             const lines = [`${providerName(manifest)} [${providerId}] 实时模型目录：`];
             for (const model of catalog.models ?? []) {
               const efforts = model.reasoning?.efforts?.map((effort) => effort.id).join(", ");

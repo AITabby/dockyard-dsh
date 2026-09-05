@@ -15,8 +15,8 @@
   "exports": {
     ".": "./packages/dsh-plugin/dist/index.mjs",
     "./client": "./packages/dsh-plugin/lib/client.js",
-    "./remote": "./packages/dsh-plugin/src/dockyard-typert.remote.mjs",
-    "./typert": "./packages/dsh-plugin/src/dockyard-typert.host.mjs",
+    "./remote": "./packages/dsh-plugin/dist/dockyard-typert.remote.mjs",
+    "./typert": "./packages/dsh-plugin/dist/dockyard-typert.host.mjs",
     "./package.json": "./package.json"
   },
   "files": [
@@ -24,9 +24,9 @@
     "packages/dsh-plugin/lib/client.js",
     "packages/dsh-plugin/cordis.patch.yml",
     "SECURITY.md",
-    "packages/dsh-plugin/src/dockyard-typert-shared.mjs",
-    "packages/dsh-plugin/src/dockyard-typert.remote.mjs",
-    "packages/dsh-plugin/src/dockyard-typert.host.mjs"
+    "packages/dsh-plugin/dist/dockyard-typert-shared.mjs",
+    "packages/dsh-plugin/dist/dockyard-typert.remote.mjs",
+    "packages/dsh-plugin/dist/dockyard-typert.host.mjs"
   ],
   "scripts": {
     "build": "node scripts/build.mjs && node packages/dsh-plugin/scripts/build-package.mjs",

@@ -681,6 +681,54 @@ test("DSH LLM adapter hides live catalogs for providers without imported account
   assert.deepEqual(catalogCalls, ["grok"]);
 });
 
+test("DSH LLM adapter force-refreshes a cached provider catalog", async () => {
+  const catalogCalls = [];
+  const adapter = createDockyardLlmAdapter({
+    runtime: {
+      listProviderIds: () => ["grok"],
+      listProviderManifests: () => [{ id: "grok", displayName: "Grok" }],
+      snapshot: () => ({ providers: [{ providerId: "grok", accounts: [{ accountId: "grok:active" }] }] }),
+      async getCatalog(provider, context = {}) {
+        catalogCalls.push({ provider, force: Boolean(context.force) });
+        return { models: [{ id: `${provider}-${catalogCalls.length}`, name: `${provider} ${catalogCalls.length}` }] };
+      },
+    },
+  });
+  assert.equal((await adapter.listModels("grok"))[0].id, "grok-1");
+  const refreshed = await adapter.refreshCatalog("grok");
+  assert.equal(refreshed[0].catalog.models[0].id, "grok-2");
+  assert.deepEqual(catalogCalls, [
+    { provider: "grok", force: false },
+    { provider: "grok", force: true },
+  ]);
+});
+
+test("Dockyard service force-refreshes connected provider catalogs", async () => {
+  const catalogCalls = [];
+  const catalogUpdates = [];
+  const runtime = createCommandRuntime();
+  runtime.state.imported = true;
+  runtime.getCatalog = async (provider, context = {}) => {
+    catalogCalls.push({ provider, force: Boolean(context.force) });
+    return {
+      models: [{ id: "live-model", name: "Live model" }],
+      source: "official_test",
+    };
+  };
+  const service = new DockyardDshService({
+    runtime,
+    autoRefresh: false,
+    onCatalogUpdated: (payload) => catalogUpdates.push(payload),
+  });
+  const result = await service.refreshCatalog("live-provider");
+  assert.equal(result.providerIds[0], "live-provider");
+  assert.equal(result.catalogs[0].modelCount, 1);
+  assert.equal(result.catalogs[0].source, "official_test");
+  assert.deepEqual(catalogCalls, [{ provider: "live-provider", force: true }]);
+  assert.deepEqual(catalogUpdates, [{ providerId: "live-provider", providerIds: ["live-provider"] }]);
+  await service.dispose();
+});
+
 test("DSH Cordis plugin registers the modular provider set", () => {
   const registrations = [];
   const fakeRuntime = {

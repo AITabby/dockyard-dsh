@@ -324,6 +324,37 @@ function refreshResultMessage(result, t) {
   });
 }
 
+function catalogRefreshMessage(result, t) {
+  const catalogs = Array.isArray(result?.catalogs) ? result.catalogs : [];
+  const failures = catalogs.filter((entry) => Array.isArray(entry?.diagnostics) && entry.diagnostics.length > 0).length;
+  const count = catalogs.reduce((total, entry) => total + (Number(entry?.modelCount) || 0), 0);
+  if (failures > 0) return text(t, "status.catalogPartial", { failures });
+  if (catalogs.length === 1) {
+    const entry = catalogs[0];
+    if (!count) return text(t, "status.catalogEmpty");
+    return text(t, "status.catalogRefreshed", {
+      count,
+      source: entry.source ?? text(t, "subscription.liveCatalog"),
+    });
+  }
+  if (catalogs.length === 0) return text(t, "status.catalogEmpty");
+  return text(t, "status.catalogRefreshedAll", {
+    providers: catalogs.length,
+    count,
+  });
+}
+
+function reloadModelDirectory(directory) {
+  if (!directory) return Promise.resolve();
+  const catalog = directory.catalog;
+  if (catalog && typeof catalog.refresh === "function") {
+    catalog.refresh();
+    return typeof directory.load === "function" ? directory.load().catch(() => {}) : Promise.resolve();
+  }
+  if (catalog && typeof catalog.invalidate === "function") catalog.invalidate();
+  return typeof directory.load === "function" ? directory.load().catch(() => {}) : Promise.resolve();
+}
+
 function unwrapRemote(response, t) {
   if (response?.ok === true) return response.value;
   if (response?.ok === false) {
@@ -627,6 +658,32 @@ class DockyardClientController {
       return await promise;
     } finally {
       if (this.refreshPromises.get("*") === promise) this.refreshPromises.delete("*");
+    }
+  }
+
+  async refreshCatalog(providerId = null, directory = null) {
+    const key = `catalog:${providerId ?? "*"}`;
+    const existing = this.refreshPromises.get(key);
+    if (existing) return existing;
+
+    const promise = (async () => {
+      this.setState({ action: "refreshCatalog", status: "loading", providerId, error: null, message: null });
+      try {
+        const value = await this.call("refreshCatalog", providerId ? { providerId } : {});
+        const result = this.applyValue(value, providerId);
+        await reloadModelDirectory(directory);
+        this.setState({ message: catalogRefreshMessage(result, this.t) });
+        return result;
+      } catch (error) {
+        this.setState({ action: null, status: "error", providerId, error: errorText(error, this.t) });
+        return null;
+      }
+    })();
+    this.refreshPromises.set(key, promise);
+    try {
+      return await promise;
+    } finally {
+      if (this.refreshPromises.get(key) === promise) this.refreshPromises.delete(key);
     }
   }
 
@@ -1337,7 +1394,7 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
         nativeQuotaView(native, t))));
 }
 
-function SubscriptionOverviewPopup({ providers, directoryState, controlState, controller, selectedProviderId, onSelect, onClose, t }) {
+function SubscriptionOverviewPopup({ providers, directoryState, controlState, controller, modelDirectory, selectedProviderId, onSelect, onClose, t }) {
   const busy = controlState.action !== null;
   return h("div", {
     className: "dockyard-dsh-popup",
@@ -1367,7 +1424,13 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
           className: "dockyard-dsh-action dockyard-dsh-action-primary",
           disabled: busy,
           onClick: () => controller.refreshAll(),
-        }, controlState.action === "refresh" ? text(t, "status.refreshing") : text(t, "subscription.refreshAll"))),
+        }, controlState.action === "refresh" ? text(t, "status.refreshing") : text(t, "subscription.refreshAll")),
+        h("button", {
+          type: "button",
+          className: "dockyard-dsh-action",
+          disabled: busy,
+          onClick: () => controller.refreshCatalog(null, modelDirectory),
+        }, controlState.action === "refreshCatalog" ? text(t, "status.refreshingCatalog") : text(t, "subscription.refreshCatalogAll"))),
       h("div", { className: "dockyard-dsh-section" },
         h("div", { className: "dockyard-dsh-section-title" },
           h("span", null, text(t, "subscription.providers")),
@@ -1501,6 +1564,12 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
       h("div", { className: "dockyard-dsh-toolbar" },
         h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy, onClick: onOpenOverview }, text(t, "subscription.all")),
         h("button", { type: "button", className: "dockyard-dsh-action dockyard-dsh-action-primary", disabled: busy, onClick: () => controller.refresh(providerId) }, controlState.action === "refresh" ? text(t, "status.refreshing") : text(t, "native.refresh")),
+        h("button", {
+          type: "button",
+          className: "dockyard-dsh-action",
+          disabled: busy,
+          onClick: () => controller.refreshCatalog(providerId, directory),
+        }, controlState.action === "refreshCatalog" ? text(t, "status.refreshingCatalog") : text(t, "subscription.refreshCatalog")),
         h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy || authInProgress, onClick: () => controller.login(providerId) }, controlState.action === "login"
           ? (supportsOAuthLogin ? text(t, "status.waitingVerification") : text(t, "status.readingInstructions"))
           : authInProgress ? text(t, "status.verificationInProgress")
@@ -1651,8 +1720,7 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
     // optional providers are not left at "model catalog pending" forever.
     if (!accountSignature || (previous !== undefined && previous === accountSignature)) return undefined;
     const timer = setTimeout(() => {
-      const loading = modelDirectory.load();
-      loading?.catch?.(() => {});
+      void reloadModelDirectory(modelDirectory);
     }, 0);
     return () => clearTimeout(timer);
   }, [accountSignature, modelDirectory]);
@@ -1832,6 +1900,7 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
       directoryState,
       controlState,
       controller,
+      modelDirectory,
       selectedProviderId: currentProviderId,
        t,
       onSelect: (selectedProviderId) => {

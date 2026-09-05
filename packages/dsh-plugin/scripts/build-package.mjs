@@ -33,4 +33,11 @@ await build({
 
 await import("./build-client.mjs");
 await copyFile(keychainHelperSource, keychainHelperOutput);
+for (const name of [
+  "dockyard-typert-shared.mjs",
+  "dockyard-typert.host.mjs",
+  "dockyard-typert.remote.mjs",
+]) {
+  await copyFile(resolve(packageRoot, "src", name), resolve(packageRoot, "dist", name));
+}
 console.log(`Dockyard DSH plugin bundle written: ${outputPath}`);

@@ -737,6 +737,9 @@ test("runtime passes opaque account references to provider catalog loading", asy
     assert.equal(catalogContext.accounts[0].accountId, "catalog-account");
     assert.equal(catalogContext.accounts[0].auth.credentialRef, "keychain://catalog-account");
     assert.equal(catalogContext.accounts[0].email, "catalog@example.test");
+    await runtime.getCatalog("test-provider", { force: true });
+    assert.equal(catalogContext.force, true);
+    assert.equal(catalogContext.accounts[0].accountId, "catalog-account");
   } finally {
     await rm(home, { recursive: true, force: true });
   }

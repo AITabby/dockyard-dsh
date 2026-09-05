@@ -104,6 +104,7 @@ function descriptor(method, schema, typeName) {
 export const TYPERT_DESCRIPTORS = Object.freeze([
   descriptor("snapshot", undefined, "DockyardSnapshot"),
   descriptor("refresh", requestParameter(providerRequest, "DockyardProviderRequest"), "DockyardRefreshResult"),
+  descriptor("refreshCatalog", requestParameter(providerRequest, "DockyardProviderRequest"), "DockyardRefreshCatalogResult"),
   descriptor("scan", requestParameter(providerRequest, "DockyardProviderRequest"), "DockyardScanResult"),
   descriptor("add", requestParameter(addRequest, "DockyardAddRequest"), "DockyardAddResult"),
   descriptor("login", requestParameter(loginRequest, "DockyardLoginRequest"), "DockyardLoginResult"),

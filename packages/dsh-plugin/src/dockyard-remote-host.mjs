@@ -47,6 +47,12 @@ export class DockyardRemoteService extends TypertRemoteService {
     return envelope(result, await this.dockyard.snapshot());
   }
 
+  async refreshCatalog(request = {}) {
+    const providerId = request?.providerId ?? null;
+    const result = await this.dockyard.refreshCatalog(providerId);
+    return envelope(result, await this.dockyard.snapshot());
+  }
+
   async scan(request = {}) {
     const result = await this.dockyard.scan(request?.providerId ?? null);
     return envelope(result, await this.dockyard.snapshot());
@@ -135,7 +141,7 @@ export class DockyardRemoteService extends TypertRemoteService {
 function markRemoteMethods() {
   const target = Object.create(DockyardRemoteService.prototype);
   for (const name of [
-    "snapshot", "refresh", "scan", "add", "login", "poll", "submitAuthorizationCode", "cancel", "setPolicy", "use", "removeAccount",
+    "snapshot", "refresh", "refreshCatalog", "scan", "add", "login", "poll", "submitAuthorizationCode", "cancel", "setPolicy", "use", "removeAccount",
     "nativeKeyStatus", "nativeKeyRefresh", "nativeKeyRegister", "nativeKeyUnregister", "nativeKeySetPolicy",
     "getContextWindowOverride", "setContextWindowOverride",
   ]) {

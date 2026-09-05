@@ -15,8 +15,8 @@
   "exports": {
     ".": "./dist/index.mjs",
     "./client": "./lib/client.js",
-    "./remote": "./src/dockyard-typert.remote.mjs",
-    "./typert": "./src/dockyard-typert.host.mjs",
+    "./remote": "./dist/dockyard-typert.remote.mjs",
+    "./typert": "./dist/dockyard-typert.host.mjs",
     "./package.json": "./package.json"
   },
   "files": [
@@ -24,9 +24,9 @@
     "lib/client.js",
     "cordis.patch.yml",
     "SECURITY.md",
-    "src/dockyard-typert-shared.mjs",
-    "src/dockyard-typert.remote.mjs",
-    "src/dockyard-typert.host.mjs"
+    "dist/dockyard-typert-shared.mjs",
+    "dist/dockyard-typert.remote.mjs",
+    "dist/dockyard-typert.host.mjs"
   ],
   "scripts": {
     "build": "node scripts/build-package.mjs",
