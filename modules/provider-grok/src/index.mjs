@@ -24,6 +24,7 @@ export {
   createGrokCatalogLoader,
   createGrokDriver,
   grokRequestPromptBlocks,
+  isGrokCliAuthFailure,
   parseGrokAuth,
   parseGrokCreditsConfig,
   parseGrokModelCatalog,
