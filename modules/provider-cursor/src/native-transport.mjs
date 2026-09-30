@@ -102,7 +102,11 @@ export function readCursorDesktopSession({
   if (process.platform !== "darwin") return null;
   const dbPath = join(home, "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb");
   try {
-    const quotedKeys = CURSOR_SESSION_KEYS.map((key) => `'${key}'`).join(",");
+    // Escape SQL string literals (doubling embedded single quotes) instead of
+    // raw interpolation, since the sqlite3 CLI offers no parameterized-query
+    // flag here. This keeps the pattern safe even if reused with non-constant keys.
+    const escapeSqlLiteral = (value) => `'${String(value).replace(/'/g, "''")}'`;
+    const quotedKeys = CURSOR_SESSION_KEYS.map(escapeSqlLiteral).join(",");
     const output = execFileSync("sqlite3", ["-json", dbPath, `SELECT key, CAST(value AS TEXT) AS value FROM ItemTable WHERE key IN (${quotedKeys});`], {
       encoding: "utf8",
       timeout: 5_000,
