@@ -1,0 +1,144 @@
+# Rakazo-like Persistent Bot Preset
+#
+# A DSH cordis patch that transforms a session into a persistent AI teammate:
+# - Fixed persona (always-on identity)
+# - Background subagent delegation
+# - Goal tracking across turns
+# - Scheduled reminders (per-session)
+# - Web + FS + Bash tool chain
+#
+# Usage:
+#   dsh --profile web --patch presets/rakazo-bot.cordis.yml
+
+- insert:
+    # -- Identity & Persona --
+    - id: persona-rakazo-bot
+      name: '@deepseek-ai/dsh-persona'
+      config:
+        text: |
+          You are 「小智」 (XiaoZhi), a persistent AI teammate.
+          You remember past conversations, track unfinished goals, and
+          check scheduled reminders every time you resume.
+          Be concise, friendly, and proactive about follow-ups.
+          Do not end the conversation unless the user explicitly says so.
+        complete: true
+        includeRuntimeContext: true
+
+    # -- LLM Adapter --
+    - id: llm-deepseek
+      name: '@deepseek-ai/dsh-llm-deepseek'
+      config:
+        thinking: enabled
+        reasoningEffort: max
+        models:
+          - id: deepseek-v4-pro
+            contextWindow: 128000
+          - id: deepseek-v4-flash
+            contextWindow: 128000
+
+    # -- Dockyard DSH Plugin (uncomment to enable) --
+    # - id: dockyard-dsh
+    #   name: '@dockyard-dsh/plugin'
+
+    # -- Subprocess / Bash (sandboxed) --
+    - id: subprocess
+      name: '@deepseek-ai/dsh-subprocess-local'
+    - id: bash
+      name: '@deepseek-ai/dsh-bash-sandbox'
+      config:
+        timeoutMs: 120000
+
+    # -- Filesystem (sandboxed) --
+    - id: fs-sandbox
+      name: '@deepseek-ai/dsh-fs-sandbox'
+      config:
+        cwd: !!js "process.env.DSH_WORKSPACE_ROOT ?? '.'"
+    - id: fs-observation-policy
+      name: '@deepseek-ai/dsh-fs-observation-policy'
+    - id: tool-fs
+      name: '@deepseek-ai/dsh-tool-fs'
+
+    # -- Session Persistence --
+    - id: persistence
+      name: '@deepseek-ai/dsh-session-persistence-jsonl'
+      config:
+        root: !!js "process.env.DSH_SESSION_ROOT ?? './.sessions'"
+        compression: !!js "process.env.DSH_SNAPSHOT === undefined ? 'zstd' : 'none'
+
+    # -- Context Compaction --
+    - id: token-meter
+      name: '@deepseek-ai/dsh-token-meter'
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+      config:
+        thresholdRatio: 0.8
+        retainRatio: 0.16
+        maxTokens: 8192
+        compactionRetries: 1
+
+    # -- Subagent Delegation --
+    - id: subagent
+      name: '@deepseek-ai/dsh-subagent'
+    - id: subagent-spawn-in-process
+      name: '@deepseek-ai/dsh-subagent-spawn-in-process'
+      config:
+        providerName: spawn
+    - id: subagent-fork-in-process
+      name: '@deepseek-ai/dsh-subagent-fork-in-process'
+      config:
+        providerName: fork
+    - id: tool-subagent-control
+      name: '@deepseek-ai/dsh-tool-subagent-control'
+    - id: tool-subagent-report
+      name: '@deepseek-ai/dsh-tool-subagent-report'
+    - id: tool-subagent
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent
+        backgroundMode: continuable
+        maxDepth: 1
+    - id: tool-subagent-fork
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: fork
+        toolName: subagent_fork
+        backgroundMode: one-shot
+        enableRunInBackground: false
+        maxDepth: 1
+
+    # -- Workflow & Ralph --
+    - id: workflow-worker-thread
+      name: '@deepseek-ai/dsh-workflow-worker-thread'
+      config:
+        provider: spawn
+    - id: tool-workflow
+      name: '@deepseek-ai/dsh-tool-workflow'
+    - id: tool-ralph
+      name: '@deepseek-ai/dsh-tool-ralph'
+
+    # -- Goal Tracking --
+    - id: tool-goal
+      name: '@deepseek-ai/dsh-tool-goal'
+    - id: goal-round-driver
+      name: '@deepseek-ai/dsh-goal-round-driver'
+
+    # -- Todo List --
+    - id: tool-todo
+      name: '@deepseek-ai/dsh-tool-todo'
+      config:
+        allowParallelInProgress: true
+
+    # -- Web Tools --
+    - id: tool-web
+      name: '@deepseek-ai/dsh-tool-web'
+
+    # -- Time Context & Schedule --
+    - id: time-context
+      name: '@deepseek-ai/dsh-time-context'
+    - id: schedule
+      name: '@deepseek-ai/dsh-schedule'
+
+    # -- Session Projection --
+    - id: session-projection
+      name: '@deepseek-ai/dsh-session-projection'
