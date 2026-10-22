@@ -45,6 +45,51 @@ export function stringValue(value) {
   return value === undefined || value === null || value === "" ? null : String(value);
 }
 
+const EXTENDED_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+export function resolveReasoningFromModel(model) {
+  if (!model) return undefined;
+  if (model.reasoning === false) return undefined;
+
+  if (Array.isArray(model.reasoning?.efforts) && model.reasoning.efforts.length > 0) {
+    return model.reasoning;
+  }
+
+  if (model.thinkingLevelMap && typeof model.thinkingLevelMap === "object") {
+    const supported = EXTENDED_THINKING_LEVELS.filter((level) => {
+      const mapped = model.thinkingLevelMap[level];
+      if (mapped === null) return false;
+      if (level === "xhigh" || level === "max") return mapped !== undefined && mapped !== null;
+      return true;
+    });
+
+    if (supported.length === 0) return undefined;
+
+    const efforts = supported.map((id) => ({
+      id,
+      name: id.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+    }));
+
+    const defaultEffort = supported.includes("medium")
+      ? "medium"
+      : supported.includes("high")
+        ? "high"
+        : supported[0];
+
+    return { efforts, defaultEffort };
+  }
+
+  if (model.reasoning === true) {
+    const supported = ["minimal", "low", "medium", "high"];
+    return {
+      efforts: supported.map((id) => ({ id, name: id.charAt(0).toUpperCase() + id.slice(1) })),
+      defaultEffort: "medium",
+    };
+  }
+
+  return undefined;
+}
+
 export async function fetchJson(url, init = {}, { timeoutMs = 20_000, fetchImpl = fetch } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);

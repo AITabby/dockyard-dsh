@@ -20,7 +20,11 @@ export function createCodexModule({ driver = {} } = {}) {
 
 export {
   CodexOAuthDriver,
+  createCodexCatalogLoader,
   createCodexDriver,
   createCodexPiAiExecutor,
+  codexModelToDshCatalog,
+  parseCodexModelCatalog,
+  parseCodexReasoning,
   summarizeCodexCandidate,
 } from "./driver.mjs";

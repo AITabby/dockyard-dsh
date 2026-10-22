@@ -4,6 +4,7 @@ import { DshInjectionBridge } from "../../dsh-bridge/src/index.mjs";
 import { createDefaultSecretStore } from "../../vault/src/index.mjs";
 import { JsonStateStore } from "./state-store.mjs";
 import { ContextWindowOverrideStore } from "./context-window-overrides.mjs";
+import { ModelSelectionStore } from "./model-selection-store.mjs";
 import { createCodexDriver, createCodexModule, summarizeCodexCandidate } from "../../../modules/provider-codex/src/index.mjs";
 import {
   createAntigravityDriver,
@@ -13,6 +14,7 @@ import {
 import { createGrokDriver, createGrokModule, summarizeGrokCandidate } from "../../../modules/provider-grok/src/index.mjs";
 import { createClaudeDriver, createClaudeModule, summarizeClaudeCandidate } from "../../../modules/provider-claude/src/index.mjs";
 import { createCursorDriver, createCursorModule, summarizeCursorCandidate } from "../../../modules/provider-cursor/src/index.mjs";
+import { createOpencodeDriver, createOpencodeModule, summarizeOpencodeCandidate } from "../../../modules/provider-opencode/src/index.mjs";
 import { redactError } from "../../providers/src/provider-utils.mjs";
 
 const candidateSummarizers = new Map([
@@ -21,6 +23,7 @@ const candidateSummarizers = new Map([
   ["grok", summarizeGrokCandidate],
   ["claude", summarizeClaudeCandidate],
   ["cursor", summarizeCursorCandidate],
+  ["opencode", summarizeOpencodeCandidate],
 ]);
 
 // Official provider CLIs may need a network round-trip to rotate OAuth
@@ -221,6 +224,15 @@ export function createDefaultProviderEntries(options = {}) {
       }),
       driver: options.cursorDriver,
     },
+    {
+      module: createOpencodeModule({
+        driver: options.opencodeDriver ?? createOpencodeDriver({
+          ...withRequestExecutor("opencode", options.opencode, requestExecutors),
+          ...(catalogLoaders.opencode ? { catalogLoader: catalogLoaders.opencode } : {}),
+        }),
+      }),
+      driver: options.opencodeDriver,
+    },
   ];
 }
 
@@ -283,10 +295,12 @@ export class DockyardRuntime {
     this.stateStore = stateStore;
     this.secretStore = secretStore;
     this.contextWindowOverrides = new ContextWindowOverrideStore({ stateStore });
+    this.modelSelection = new ModelSelectionStore({ stateStore });
     this.bridge = new DshInjectionBridge({
       runtime,
       adapter: dshAdapter,
       contextWindowOverrides: this.contextWindowOverrides,
+      modelSelection: this.modelSelection,
     });
     this.providers = providers;
     this.refreshTimeoutMs = refreshTimeoutMs;
@@ -306,6 +320,8 @@ export class DockyardRuntime {
     this.#initPromise = (async () => {
       const state = await this.stateStore.load();
       await this.contextWindowOverrides.ready();
+      await this.modelSelection.ready();
+      const autoImported = new Set();
       for (const entry of this.providers) {
         const providerId = entry.module.manifest.id;
         const stored = state.pools?.[providerId] ?? {};
@@ -326,12 +342,44 @@ export class DockyardRuntime {
         if (stored.defaultAccountId && pool.get(stored.defaultAccountId)) {
           pool.setDefaultAccount(stored.defaultAccountId);
         }
+        const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
+        const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
+        if ((providerId === "opencode" && pool.list().length === 0) || (hasExpiredOfficialSession && hasNoEligible)) {
+          try {
+            const discovery = await (entry.module?.discover?.(providerContext(this)) ?? entry.driver?.discover?.(providerContext(this)));
+            const candidate = Array.isArray(discovery?.candidates)
+              ? discovery.candidates[0]
+              : (Array.isArray(discovery) ? discovery[0] : null);
+            if (candidate && candidate.status !== "unavailable" && typeof entry.module?.importAccount === "function") {
+              const account = await entry.module.importAccount(candidate, providerContext(this));
+              const obsoleteOfficial = pool.list().find((a) => (
+                a.resources?.accountScope === "active_official_session"
+                && candidate.resources?.accountScope === "active_official_session"
+                && a.accountId !== account.accountId
+              ));
+              if (obsoleteOfficial) {
+                pool.remove(obsoleteOfficial.accountId);
+              }
+              pool.upsert(account, { resetHealth: true });
+              pool.setDefaultAccount(account.accountId);
+              autoImported.add(providerId);
+            }
+          } catch {
+            // best-effort auto-import
+          }
+        }
         this.#entries.set(providerId, { ...entry, pool });
         // A DSH host may already have mounted a provider module before the
         // Dockyard integration starts. Reuse that registration instead of
         // aborting the whole subscription snapshot with a module conflict.
         if (!this.runtime.has(providerId)) await this.runtime.register(entry.module);
         await this.bridge.mountProvider(entry.module, pool);
+      }
+      if (this.#entries.get("opencode")?.pool?.list()?.length > 0) {
+        autoImported.add("opencode");
+      }
+      if (autoImported.size > 0) {
+        await this.#saveState([...autoImported]).catch(() => {});
       }
       this.#initialized = true;
       return this;
@@ -379,7 +427,28 @@ export class DockyardRuntime {
         const existing = entry.pool.get(candidate.accountId);
         const candidateIdentity = candidate.resources ?? {};
         const existingIdentity = existing?.resources ?? {};
-        if (!existing) continue;
+        if (!existing) {
+          const obsoleteOfficial = entry.pool.list().find((a) => (
+            a.resources?.accountScope === "active_official_session"
+            && candidate.resources?.accountScope === "active_official_session"
+            && a.accountId !== candidate.accountId
+            && a.health?.status === ACCOUNT_HEALTH.EXPIRED
+          ));
+          if (obsoleteOfficial && typeof entry.module.importAccount === "function") {
+            try {
+              const imported = await entry.module.importAccount(candidate, providerContext(this));
+              entry.pool.remove(obsoleteOfficial.accountId);
+              entry.pool.upsert(imported, { resetHealth: true });
+              if (entry.pool.getDefaultAccountId() === obsoleteOfficial.accountId) {
+                entry.pool.setDefaultAccount(imported.accountId);
+              }
+              changedProviderIds.add(currentProviderId);
+            } catch {
+              // best-effort auto-import on official session switch
+            }
+          }
+          continue;
+        }
 
         const identityChanged = candidate.email !== existing.email
           || candidate.displayName !== existing.displayName
@@ -738,6 +807,15 @@ export class DockyardRuntime {
   async setContextWindowOverride(input, value) {
     await this.init();
     return this.contextWindowOverrides.set(input, value);
+  }
+
+  getModelSelection(providerId) {
+    return this.modelSelection.get(providerId);
+  }
+
+  async setModelSelection(providerId, enabledModelIds) {
+    await this.init();
+    return this.modelSelection.set(providerId, enabledModelIds);
   }
 
   async getCatalog(providerId, context = {}) {

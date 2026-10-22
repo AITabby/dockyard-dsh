@@ -3,7 +3,24 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { createCodexPiAiExecutor } from "../../../modules/provider-codex/src/index.mjs";
+import {
+  createCodexCatalogLoader,
+  createCodexPiAiExecutor,
+  codexModelToDshCatalog,
+  parseCodexReasoning,
+} from "../../../modules/provider-codex/src/index.mjs";
+
+export { codexModelToDshCatalog, parseCodexReasoning };
+
+const activeCodexModels = new Map();
+
+function recordCodexModels(models) {
+  if (Array.isArray(models)) {
+    for (const m of models) {
+      if (m?.id) activeCodexModels.set(m.id, m);
+    }
+  }
+}
 
 const DSH_LLM_PI_AI = "@deepseek-ai/dsh-llm-pi-ai";
 const PI_AI = "@earendil-works/pi-ai";
@@ -117,7 +134,7 @@ async function loadExecutor(moduleAnchor) {
     PiAiAdapter,
     createProvider,
     openAICodexResponsesApi,
-    modelResolver: (modelId) => modelById.get(modelId),
+    modelResolver: (modelId) => modelById.get(modelId) ?? activeCodexModels.get(modelId) ?? null,
   });
 }
 
@@ -156,34 +173,10 @@ export function createPiAiModelRegistryLoader({ moduleAnchor = null } = {}) {
   };
 }
 
-function reasoningFromThinkingLevelMap(thinkingLevelMap) {
-  if (!thinkingLevelMap || typeof thinkingLevelMap !== "object") return undefined;
-  const efforts = Object.entries(thinkingLevelMap)
-    .filter(([id, providerValue]) => id !== "off" && typeof providerValue === "string" && providerValue.length > 0)
-    .map(([id, providerValue]) => ({
-      id,
-      name: id.replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase()),
-      ...(providerValue === id ? {} : { description: `provider value: ${providerValue}` }),
-    }));
-  return efforts.length > 0 ? { efforts } : undefined;
-}
-
-export function codexModelToDshCatalog(model) {
-  const reasoning = reasoningFromThinkingLevelMap(model?.thinkingLevelMap);
-  return {
-    id: model.id,
-    name: model.name,
-    ...(Array.isArray(model.input) ? { inputModalities: [...model.input] } : {}),
-    ...(Number.isInteger(model.contextWindow) ? { contextWindow: model.contextWindow } : {}),
-    ...(Number.isInteger(model.maxTokens) ? { maxTokens: model.maxTokens } : {}),
-    ...(reasoning ? { reasoning } : {}),
-  };
-}
-
-/** Read the current Codex catalog shipped by the active DSH pi-ai install. */
-export function createCodexDshCatalogLoader({ moduleAnchor = null } = {}) {
+/** Read the current Codex catalog with live API, local cache, and pi-ai fallback. */
+export function createCodexDshCatalogLoader({ moduleAnchor = null, ...options } = {}) {
   let dependenciesPromise;
-  return async () => {
+  const fallbackLoader = async () => {
     dependenciesPromise ??= loadDependencies(moduleAnchor);
     const { openaiCodexProvider } = await dependenciesPromise;
     const models = openaiCodexProvider().getModels();
@@ -191,5 +184,16 @@ export function createCodexDshCatalogLoader({ moduleAnchor = null } = {}) {
       models: models.map(codexModelToDshCatalog),
       source: "dsh_pi_ai_provider_catalog",
     };
+  };
+
+  const loader = createCodexCatalogLoader({
+    fallbackLoader,
+    ...options,
+  });
+
+  return async (context = {}) => {
+    const result = await loader(context);
+    recordCodexModels(result?.models);
+    return result;
   };
 }

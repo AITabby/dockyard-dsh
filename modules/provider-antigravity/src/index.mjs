@@ -32,6 +32,7 @@ export {
   parseAntigravityNativeQuota,
   resolveAntigravityInvocationModel,
   resolveAntigravityNativeInvocationModel,
+  resolveAgyCliPath,
   summarizeAntigravityCandidate,
 } from "./driver.mjs";
 

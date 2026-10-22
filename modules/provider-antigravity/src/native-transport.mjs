@@ -715,7 +715,7 @@ export function resolveAntigravityThinkingConfig(request = {}) {
       ?? ""
   ).toLowerCase().trim();
 
-  if (effort === "none" || effort === "off" || request.thinking === false) {
+  if (request.purpose === "compaction" || effort === "none" || effort === "off" || request.thinking === false) {
     return {
       includeThoughts: false,
       thinkingBudget: 0,

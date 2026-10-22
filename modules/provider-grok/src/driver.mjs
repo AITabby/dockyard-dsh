@@ -22,6 +22,7 @@ import {
   finiteNumber,
   isoFromEpoch,
   readJsonFile,
+  resolveReasoningFromModel,
   stringValue,
 } from "../../../packages/providers/src/provider-utils.mjs";
 import { OFFICIAL_SESSION_SOURCE_KINDS } from "../../../packages/providers/src/session-source.mjs";
@@ -29,6 +30,8 @@ import { OFFICIAL_SESSION_SOURCE_KINDS } from "../../../packages/providers/src/s
 const PROVIDER_ID = "grok";
 const DEFAULT_AUTHORIZATION_URL = "https://auth.x.ai/oauth2/authorize";
 const DEFAULT_TOKEN_URL = "https://auth.x.ai/oauth2/token";
+const DEFAULT_USERINFO_URL = "https://auth.x.ai/oauth2/userinfo";
+const DEFAULT_GROK_MODELS_URL = "https://cli-chat-proxy.grok.com/v1/models";
 const DEFAULT_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
 const DEFAULT_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write workspaces:read workspaces:write";
 const DEFAULT_GROK_HOME = join(homedir(), ".grok");
@@ -40,7 +43,7 @@ const DEFAULT_GROK_TOKEN_HEADER = "xai-grok-cli";
 // version advertised by api.x.ai / cli-chat-proxy.grok.com). Bump this default
 // deliberately whenever the official CLI ships a new version; the value is
 // overridable at runtime through DOCKYARD_GROK_CLIENT_VERSION.
-const DEFAULT_GROK_CLIENT_VERSION = "0.2.112";
+const DEFAULT_GROK_CLIENT_VERSION = "1.0.13";
 const CREDENTIAL_SLOT = Symbol("dockyard-grok-credential");
 
 function hash(value) {
@@ -80,12 +83,23 @@ function authRecords(raw) {
     .map(([scopeKey, value]) => ({ scopeKey, value }));
 }
 
+export function grokPlanFromTier(tier) {
+  if (typeof tier === "string" && tier.length > 0) return tier;
+  if (tier === 3) return "Premium";
+  if (tier === 4) return "Premium+";
+  if (tier === 2) return "Basic";
+  if (tier === 1) return "Free";
+  if (tier === 5) return "Enterprise";
+  return null;
+}
+
 /** Parse local Grok OAuth metadata while keeping token values private. */
 export function parseGrokAuth(raw) {
   return authRecords(raw).map(({ scopeKey, value }) => {
     const access = firstString(value.key, value.access_token, value.accessToken);
     if (!access) return null;
     const accessPayload = decodeJwtPayload(access) ?? {};
+    const idPayload = decodeJwtPayload(value.id_token ?? value.idToken) ?? {};
     const expiresAt = grokTokenExpiresAt(value, accessPayload);
     const accountId = firstString(
       value.user_id,
@@ -97,15 +111,35 @@ export function parseGrokAuth(raw) {
       accessPayload.sub,
       accessPayload.user_id,
       accessPayload.userId,
+      idPayload.sub,
     ) ?? `${scopeKey}:${hash(access).slice(0, 20)}`;
-    const email = firstString(value.email, value.user_email, value.userEmail, accessPayload.email);
+    const email = firstString(value.email, value.user_email, value.userEmail, idPayload.email, accessPayload.email);
+    const displayName = firstString(
+      value.first_name,
+      value.firstName,
+      value.name,
+      idPayload.preferred_username,
+      idPayload.name,
+      idPayload.nickname,
+      accessPayload.name,
+      email,
+      accountId,
+    );
+    const plan = firstString(
+      value.subscription_level,
+      value.subscriptionLevel,
+      value.subscription_tier,
+      value.subscriptionTier,
+      grokPlanFromTier(accessPayload.tier),
+      grokPlanFromTier(idPayload.tier),
+    );
     return {
       access,
       refresh: firstString(value.refresh_token, value.refreshToken),
       accountId,
       email,
-      displayName: firstString(value.first_name, value.firstName, value.name, accessPayload.name, email, accountId),
-      plan: firstString(value.subscription_level, value.subscriptionLevel),
+      displayName,
+      plan,
       expiresAt,
       createdAt: firstString(value.create_time, value.createdAt),
       scopes: Array.isArray(value.scopes)
@@ -196,10 +230,12 @@ export function summarizeGrokCandidate(candidate) {
 }
 
 function cacheEntries(cache) {
-  if (!cache?.models || typeof cache.models !== "object") return [];
-  return Array.isArray(cache.models)
-    ? cache.models.map((value) => [value?.id, value]).filter(([id]) => id)
-    : Object.entries(cache.models);
+  if (!cache || typeof cache !== "object") return [];
+  const entries = cache.models ?? cache.data;
+  if (!entries || typeof entries !== "object") return [];
+  return Array.isArray(entries)
+    ? entries.map((value) => [value?.id, value]).filter(([id]) => id)
+    : Object.entries(entries);
 }
 
 function normalizeReasoning(info) {
@@ -237,7 +273,7 @@ export function parseGrokModelCatalog(output = "", cache = null) {
     const contextWindow = finiteNumber(info.context_window ?? info.contextWindow);
     const maxTokens = finiteNumber(info.max_completion_tokens ?? info.maxTokens);
     if (Number.isInteger(contextWindow)) model.contextWindow = contextWindow;
-    if (Number.isInteger(maxTokens)) model.maxTokens = maxTokens;
+    if (Number.isInteger(maxTokens)) model.maxTokens = Math.min(maxTokens, 16384);
     if (Array.isArray(info.input) && info.input.length > 0) model.inputModalities = [...info.input];
     return model;
   });
@@ -331,6 +367,127 @@ export function parseGrokCreditsConfig(body, { now = new Date() } = {}) {
   };
 }
 
+export const DEFAULT_GROK_REASONING_EFFORTS = Object.freeze([
+  { id: "low", name: "Low", description: "快速思考，保留基础推理" },
+  { id: "medium", name: "Medium", description: "标准思考，平衡推理深度与响应速度" },
+  { id: "high", name: "High", description: "深度思考，适合复杂逻辑与多步骤分析" },
+]);
+
+export const BUILTIN_GROK_MODELS = Object.freeze([
+  {
+    id: "grok-4.7",
+    name: "Grok 4.7",
+    contextWindow: 256000,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [
+        { id: "xhigh", name: "Extra High", description: "Maximum reasoning for the hardest tasks." },
+        { id: "high", name: "High", description: "Thorough reasoning and quality. Recommended.", default: true },
+        { id: "medium", name: "Medium", description: "Strong quality with a faster turnaround." },
+        { id: "low", name: "Low", description: "Fastest responses. Best for simple tasks." },
+      ],
+      defaultEffort: "high",
+    },
+    inputModalities: ["text", "image"],
+  },
+  {
+    id: "grok-4.7-build-fast",
+    name: "Grok 4.7 Fast",
+    contextWindow: 256000,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [
+        { id: "xhigh", name: "Extra High", description: "Maximum reasoning for the hardest tasks." },
+        { id: "high", name: "High", description: "Thorough reasoning and quality. Recommended.", default: true },
+        { id: "medium", name: "Medium", description: "Strong quality with a faster turnaround." },
+        { id: "low", name: "Low", description: "Fastest responses. Best for simple tasks." },
+      ],
+      defaultEffort: "high",
+    },
+    inputModalities: ["text", "image"],
+  },
+  {
+    id: "grok-4.6",
+    name: "Grok 4.6",
+    contextWindow: 256000,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [
+        { id: "xhigh", name: "Extra High", description: "Highest effort and reasoning level" },
+        { id: "high", name: "High", description: "Higher implementation quality with extensive reasoning", default: true },
+        { id: "medium", name: "Medium", description: "Balanced effort with standard implementation and testing" },
+        { id: "low", name: "Low", description: "Quick, fast implementations" },
+      ],
+      defaultEffort: "high",
+    },
+    inputModalities: ["text", "image"],
+  },
+  {
+    id: "grok-4.5",
+    name: "Grok 4.5",
+    contextWindow: 256000,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [
+        { id: "high", name: "High", description: "Highest implementation quality with extensive reasoning", default: true },
+        { id: "medium", name: "Medium", description: "Balanced effort with standard implementation and testing" },
+        { id: "low", name: "Low", description: "Quick, fast implementations" },
+      ],
+      defaultEffort: "high",
+    },
+    inputModalities: ["text", "image"],
+  },
+  {
+    id: "grok-build-0.1",
+    name: "Grok Build 0.1",
+    contextWindow: 131072,
+    maxTokens: 16384,
+    reasoning: {
+      efforts: [
+        { id: "high", name: "High", description: "Deep thinking mode", default: true },
+      ],
+      defaultEffort: "high",
+    },
+    inputModalities: ["text", "image"],
+  },
+  {
+    id: "grok-3",
+    name: "Grok 3",
+    contextWindow: 131072,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [...DEFAULT_GROK_REASONING_EFFORTS],
+      defaultEffort: "medium",
+    },
+    inputModalities: ["text"],
+  },
+  {
+    id: "grok-3-mini",
+    name: "Grok 3 Mini",
+    contextWindow: 131072,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [...DEFAULT_GROK_REASONING_EFFORTS],
+      defaultEffort: "medium",
+    },
+    inputModalities: ["text"],
+  },
+  {
+    id: "grok-2",
+    name: "Grok 2",
+    contextWindow: 131072,
+    maxTokens: 8192,
+    inputModalities: ["text"],
+  },
+  {
+    id: "grok-2-mini",
+    name: "Grok 2 Mini",
+    contextWindow: 131072,
+    maxTokens: 8192,
+    inputModalities: ["text"],
+  },
+]);
+
 export function createGrokCatalogLoader({
   env = process.env,
   home = homedir(),
@@ -340,48 +497,123 @@ export function createGrokCatalogLoader({
   timeoutMs = 30_000,
   readJson = readJsonFile,
   cacheTtlMs = Number(process.env.DOCKYARD_GROK_CATALOG_TTL_MS) || DEFAULT_CATALOG_TTL_MS,
+  registryLoader = null,
+  fetchImpl = fetch,
+  modelsUrl = env.DOCKYARD_GROK_MODELS_URL || DEFAULT_GROK_MODELS_URL,
+  tokenHeader = env.DOCKYARD_GROK_TOKEN_HEADER || DEFAULT_GROK_TOKEN_HEADER,
+  clientVersion = env.DOCKYARD_GROK_CLIENT_VERSION || DEFAULT_GROK_CLIENT_VERSION,
 } = {}) {
   const resolvedHome = grokHomePath({ env, home, grokHome });
   let cached = null;
   let cachedAt = 0;
   let pending = null;
-  return async function loadCatalog({ force = false } = {}) {
+  return async function loadCatalog({ force = false, credential = null } = {}) {
     const now = Date.now();
     if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
     if (pending) return pending;
     pending = (async () => {
       const cache = await readJson(join(resolvedHome, "models_cache.json"));
-      let value;
-      if (typeof commandRunner === "function") {
+      let discoveredModels = [];
+      let source = "official_grok_cli";
+      let cliError = null;
+
+      if (credential?.access) {
+        try {
+          const res = await fetchImpl(modelsUrl, {
+            method: "GET",
+            headers: {
+              authorization: `Bearer ${credential.access}`,
+              "x-xai-token-auth": tokenHeader,
+              "x-userid": credential.accountId,
+              "x-grok-client-version": clientVersion,
+              accept: "application/json",
+            },
+          });
+          if (res.ok) {
+            const json = await res.json().catch(() => ({}));
+            discoveredModels = parseGrokModelCatalog("", json);
+            if (discoveredModels.length > 0) {
+              source = "official_grok_models_api";
+            }
+          }
+        } catch (error) {
+          cliError = error;
+        }
+      }
+
+      if (discoveredModels.length === 0 && typeof commandRunner === "function") {
         try {
           const result = await commandRunner(cliPath, ["models"], {
             env,
             timeoutMs,
             providerId: PROVIDER_ID,
           });
-          const models = parseGrokModelCatalog(result.output, cache);
-          value = {
-            models,
-            source: "official_grok_cli",
-            ...(models.length ? {} : { diagnostics: ["Grok 官方 CLI 没有返回可用模型"] }),
-          };
+          discoveredModels = parseGrokModelCatalog(result.output, cache);
         } catch (error) {
-          value = {
-            models: parseGrokModelCatalog("", cache),
-            source: cache ? "official_grok_local_cache" : "official_grok_cli",
-            diagnostics: [`Grok 官方模型目录读取失败：${error.message}`],
-          };
+          cliError = error;
+          discoveredModels = parseGrokModelCatalog("", cache);
+          source = cache ? "official_grok_local_cache" : "official_grok_cli";
         }
-      } else {
-        value = {
-          models: parseGrokModelCatalog("", cache),
-          source: "official_grok_local_cache",
-          ...(cache ? {} : { diagnostics: [`未找到 Grok 实时模型缓存：${join(resolvedHome, "models_cache.json")}`] }),
-        };
+      } else if (discoveredModels.length === 0) {
+        discoveredModels = parseGrokModelCatalog("", cache);
+        source = "official_grok_local_cache";
       }
-      cached = value;
+
+      if (discoveredModels.length > 0) {
+        let finalModels = discoveredModels;
+        if (source === "official_grok_models_api") {
+          const modelsMap = new Map();
+          for (const m of discoveredModels) modelsMap.set(m.id, { ...m });
+          for (const m of BUILTIN_GROK_MODELS) {
+            if (!modelsMap.has(m.id)) modelsMap.set(m.id, { ...m });
+          }
+          finalModels = [...modelsMap.values()];
+        }
+        cached = {
+          models: finalModels,
+          source,
+          ...(cliError ? { diagnostics: [`Grok 官方模型目录提示：${cliError.message}`] } : {}),
+        };
+        cachedAt = Date.now();
+        return cached;
+      }
+
+      const modelsMap = new Map();
+      for (const m of BUILTIN_GROK_MODELS) {
+        modelsMap.set(m.id, { ...m });
+      }
+
+      if (typeof registryLoader === "function") {
+        try {
+          const registry = await registryLoader();
+          for (const item of (Array.isArray(registry) ? registry : [])) {
+            if (!item?.id) continue;
+            if (item.provider === "xai" || String(item.id).startsWith("grok-")) {
+              const previous = modelsMap.get(item.id);
+              if (!previous) {
+                const reasoning = resolveReasoningFromModel(item);
+                modelsMap.set(item.id, {
+                  id: item.id,
+                  name: item.name ?? item.id,
+                  ...(Number.isInteger(item.contextWindow) ? { contextWindow: item.contextWindow } : {}),
+                  ...(Number.isInteger(item.maxTokens) ? { maxTokens: Math.min(item.maxTokens, 16384) } : {}),
+                  ...(Array.isArray(item.input) ? { inputModalities: [...item.input] } : {}),
+                  ...(reasoning ? { reasoning } : {}),
+                });
+              }
+            }
+          }
+        } catch {}
+      }
+
+      const models = [...modelsMap.values()];
+      cached = {
+        models,
+        source: discoveredModels.length > 0 ? source : "official_grok_builtin",
+        ...(cliError ? { diagnostics: [`Grok 官方模型目录提示：${cliError.message}`] } : {}),
+      };
       cachedAt = Date.now();
-      return value;
+      return cached;
     })().finally(() => {
       pending = null;
     });
@@ -512,6 +744,8 @@ export class GrokOAuthDriver {
     browserOAuth = env.DOCKYARD_GROK_BROWSER_OAUTH !== "0",
     authorizationUrl = env.DOCKYARD_GROK_AUTHORIZATION_URL || DEFAULT_AUTHORIZATION_URL,
     tokenUrl = env.DOCKYARD_GROK_TOKEN_URL || DEFAULT_TOKEN_URL,
+    userinfoUrl = env.DOCKYARD_GROK_USERINFO_URL || DEFAULT_USERINFO_URL,
+    modelsUrl = env.DOCKYARD_GROK_MODELS_URL || DEFAULT_GROK_MODELS_URL,
     clientId = env.DOCKYARD_GROK_CLIENT_ID || DEFAULT_CLIENT_ID,
     oauthScope = env.DOCKYARD_GROK_OAUTH_SCOPE || DEFAULT_OAUTH_SCOPE,
     cliPath = env.DOCKYARD_GROK_CLI || "grok",
@@ -522,6 +756,7 @@ export class GrokOAuthDriver {
     tokenHeader = env.DOCKYARD_GROK_TOKEN_HEADER || DEFAULT_GROK_TOKEN_HEADER,
     clientVersion = env.DOCKYARD_GROK_CLIENT_VERSION || DEFAULT_GROK_CLIENT_VERSION,
     timeoutMs = 30_000,
+    registryLoader = null,
   } = {}) {
     this.env = env;
     this.grokHome = grokHomePath({ env, home, grokHome });
@@ -531,6 +766,7 @@ export class GrokOAuthDriver {
     this.requestExecutor = requestExecutor;
     this.fetchImpl = fetchImpl;
     this.creditsUrl = validateNativeEndpoint(creditsUrl, { providerId: PROVIDER_ID });
+    this.modelsUrl = validateNativeEndpoint(modelsUrl, { providerId: PROVIDER_ID });
     this.tokenHeader = String(tokenHeader || DEFAULT_GROK_TOKEN_HEADER);
     this.clientVersion = String(clientVersion || DEFAULT_GROK_CLIENT_VERSION);
     this.timeoutMs = timeoutMs;
@@ -538,6 +774,7 @@ export class GrokOAuthDriver {
     // they come from the environment.
     this.authorizationUrl = assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_GROK_AUTHORIZATION_URL");
     this.tokenUrl = assertSecureEndpointUrl(tokenUrl, "DOCKYARD_GROK_TOKEN_URL");
+    this.userinfoUrl = assertSecureEndpointUrl(userinfoUrl, "DOCKYARD_GROK_USERINFO_URL");
     this.clientId = clientId;
     this.oauthScope = oauthScope;
     this.catalogLoader = catalogLoader ?? createGrokCatalogLoader({
@@ -547,6 +784,11 @@ export class GrokOAuthDriver {
       cliPath,
       commandRunner,
       timeoutMs,
+      registryLoader,
+      fetchImpl: this.fetchImpl,
+      modelsUrl: this.modelsUrl,
+      tokenHeader: this.tokenHeader,
+      clientVersion: this.clientVersion,
     });
     this.cliAuthorizer = createCliOAuthAuthorizer({
       providerId: PROVIDER_ID,
@@ -600,6 +842,22 @@ export class GrokOAuthDriver {
             error.status = response.status;
             error.upstreamCode = body.error ?? body.error_code;
             throw error;
+          }
+          const access = firstString(body.access_token, body.accessToken, body.key);
+          if (access) {
+            try {
+              const userinfoRes = await this.fetchImpl(this.userinfoUrl, {
+                method: "GET",
+                headers: { authorization: `Bearer ${access}`, accept: "application/json" },
+                ...(context.signal ? { signal: context.signal } : {}),
+              });
+              if (userinfoRes.ok) {
+                const userinfo = await userinfoRes.json().catch(() => ({}));
+                if (userinfo?.name) body.name = userinfo.name;
+                if (userinfo?.email) body.email = userinfo.email;
+                if (userinfo?.sub) body.user_id = userinfo.sub;
+              }
+            } catch {}
           }
           return {
             ...body,
@@ -837,41 +1095,96 @@ export class GrokOAuthDriver {
     }
   }
 
+  #isBrowserAccount(account) {
+    return account?.resources?.authSource === "official_grok_browser_oauth"
+      || account?.resources?.sessionSource === "browser"
+      || (!account?.resources?.cliProfile && Boolean(account?.refresh?.refreshable));
+  }
+
   async refreshAccount(account, context = {}) {
-    await this.#refreshOAuthCredential(account, context);
-    const prepared = await this.#prepareCredentialEnvironment(account, context);
+    const credential = await this.#refreshOAuthCredential(account, context);
+    const isBrowser = this.#isBrowserAccount(account);
     let updated = null;
     let commandError = null;
-    try {
-      await this.commandRunner(this.cliPath, ["models"], {
-        env: prepared.env,
-        timeoutMs: this.timeoutMs,
-        providerId: PROVIDER_ID,
-      });
-    } catch (error) {
-      error.authExpired = error.code === 401 || /auth|login|expired|credential|access token.{0,80}(?:valid|invalid|expired|revok)/i.test(String(error.message));
-      commandError = error;
+
+    if (!isBrowser) {
+      const prepared = await this.#prepareCredentialEnvironment(account, context);
+      try {
+        await this.commandRunner(this.cliPath, ["models"], {
+          env: prepared.env,
+          timeoutMs: this.timeoutMs,
+          providerId: PROVIDER_ID,
+        });
+      } catch (error) {
+        if (error?.code !== "ENOENT" && !/ENOENT|not found/i.test(String(error?.message))) {
+          error.authExpired = error.code === 401 || /auth|login|expired|credential|access token.{0,80}(?:valid|invalid|expired|revok)/i.test(String(error.message));
+          commandError = error;
+        }
+      }
+      let finishError = null;
+      try {
+        updated = await this.#finishCredentialEnvironment(prepared, account, context);
+      } catch (error) {
+        finishError = error;
+      }
+      if (commandError) {
+        if (finishError && !commandError.cause) commandError.cause = finishError;
+        throw commandError;
+      }
+      if (finishError) throw finishError;
     }
-    let finishError = null;
-    try {
-      updated = await this.#finishCredentialEnvironment(prepared, account, context);
-    } catch (error) {
-      finishError = error;
-    }
-    if (commandError) {
-      if (finishError && !commandError.cause) commandError.cause = finishError;
-      throw commandError;
-    }
-    if (finishError) throw finishError;
+
     const now = context.now instanceof Date ? context.now : new Date();
+    const effective = updated ?? credential;
+    const accessPayload = decodeJwtPayload(effective.access) ?? {};
+    const plan = firstString(
+      effective.plan,
+      grokPlanFromTier(accessPayload.tier),
+      account.subscription?.plan,
+    );
+
+    let email = firstString(effective.email, account.email);
+    let displayName = firstString(effective.displayName, account.displayName);
+    const isUuidOrMissingName = !displayName
+      || displayName === account.accountId
+      || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(displayName);
+
+    if ((!email || isUuidOrMissingName) && effective.access) {
+      try {
+        const userinfoRes = await this.fetchImpl(this.userinfoUrl, {
+          method: "GET",
+          headers: { authorization: `Bearer ${effective.access}`, accept: "application/json" },
+          ...(context.signal ? { signal: context.signal } : {}),
+        });
+        if (userinfoRes?.ok) {
+          const userinfo = await userinfoRes.json().catch(() => ({}));
+          if (userinfo?.name) displayName = userinfo.name;
+          if (userinfo?.email) email = userinfo.email;
+          if (context.secretStore) {
+            const credentialRef = account.auth?.credentialRef ?? account.credentialRef;
+            await context.secretStore.write(credentialRef, {
+              ...effective,
+              ...(email ? { email } : {}),
+              ...(displayName ? { displayName } : {}),
+              ...(plan ? { plan } : {}),
+            });
+          }
+        }
+      } catch {}
+    }
+
     return {
-      ...(updated?.email ? { email: updated.email } : {}),
-      ...(updated?.displayName ? { displayName: updated.displayName } : {}),
+      ...(email ? { email } : {}),
+      ...(displayName ? { displayName } : {}),
+      subscription: {
+        ...account.subscription,
+        ...(plan ? { plan } : {}),
+      },
       refresh: {
-        accessTokenExpiresAt: updated?.expiresAt ?? account.refresh?.accessTokenExpiresAt ?? null,
+        accessTokenExpiresAt: effective?.expiresAt ?? account.refresh?.accessTokenExpiresAt ?? null,
         nextRefreshAt: null,
         lastRefreshedAt: now.toISOString(),
-        refreshable: Boolean(updated?.refresh ?? prepared.credential.refresh),
+        refreshable: Boolean(effective?.refresh ?? account.refresh?.refreshable),
       },
     };
   }
@@ -903,17 +1216,29 @@ export class GrokOAuthDriver {
       throw error;
     }
     const parsed = parseGrokCreditsConfig(body, { now });
+    const accessPayload = decodeJwtPayload(credential.access) ?? {};
+    const plan = firstString(
+      parsed.subscription?.plan,
+      grokPlanFromTier(accessPayload.tier),
+      account.subscription?.plan,
+    );
     return {
       ...parsed,
       subscription: {
         ...account.subscription,
-        ...(parsed.subscription.plan ? { plan: parsed.subscription.plan } : {}),
+        ...(plan ? { plan } : {}),
       },
     };
   }
 
   async getCatalog(context = {}) {
-    return this.catalogLoader({ force: Boolean(context.force) });
+    let credential = null;
+    if (context.accounts?.[0] && context.secretStore) {
+      try {
+        credential = await this.#readCredential(context.accounts[0], context);
+      } catch {}
+    }
+    return this.catalogLoader({ force: Boolean(context.force), credential });
   }
 
   async invoke(request, invocation, context = {}) {

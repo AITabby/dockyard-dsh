@@ -1,3 +1,11 @@
+- id: compaction-basic
+  name: '@deepseek-ai/dsh-compaction-basic'
+  config:
+    headroomTokens: 8192
+    maxTokens: 8192
+    thresholdRatio: 0.8
+    retainRatio: 0.16
+    auto: true
 - insert:
     - id: dockyard-dsh
       name: '@dockyard-dsh/plugin'

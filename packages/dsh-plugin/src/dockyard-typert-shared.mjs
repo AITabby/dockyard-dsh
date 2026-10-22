@@ -81,6 +81,15 @@ const contextWindowSetRequest = contextWindowRequest.extend({
   value: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable(),
 });
 
+const modelSelectionRequest = z.object({
+  providerId: z.string().min(1),
+});
+
+const modelSelectionSetRequest = z.object({
+  providerId: z.string().min(1),
+  enabledModelIds: z.array(z.string()).nullable(),
+});
+
 function requestParameter(schema, name) {
   return {
     name: "request",
@@ -121,6 +130,8 @@ export const TYPERT_DESCRIPTORS = Object.freeze([
   descriptor("nativeKeySetPolicy", requestParameter(nativeKeyPolicyRequest, "DockyardNativeKeyPolicyRequest"), "DockyardNativeKeySetPolicy"),
   descriptor("getContextWindowOverride", requestParameter(contextWindowRequest, "DockyardContextWindowRequest"), "DockyardContextWindowOverride"),
   descriptor("setContextWindowOverride", requestParameter(contextWindowSetRequest, "DockyardContextWindowSetRequest"), "DockyardContextWindowOverride"),
+  descriptor("getModelSelection", requestParameter(modelSelectionRequest, "DockyardModelSelectionRequest"), "DockyardModelSelectionResult"),
+  descriptor("setModelSelection", requestParameter(modelSelectionSetRequest, "DockyardModelSelectionSetRequest"), "DockyardModelSelectionResult"),
 ]);
 
 export const TYPERT_MODEL = Object.freeze({

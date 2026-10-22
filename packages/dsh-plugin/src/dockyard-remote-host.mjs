@@ -130,6 +130,14 @@ export class DockyardRemoteService extends TypertRemoteService {
   async setContextWindowOverride(request = {}) {
     return this.dockyard.setContextWindowOverride(request, request.value);
   }
+
+  async getModelSelection(request = {}) {
+    return this.dockyard.getModelSelection(request.providerId);
+  }
+
+  async setModelSelection(request = {}) {
+    return this.dockyard.setModelSelection(request.providerId, request.enabledModelIds);
+  }
 }
 
 function markRemoteMethods() {
@@ -138,6 +146,7 @@ function markRemoteMethods() {
     "snapshot", "refresh", "scan", "add", "login", "poll", "submitAuthorizationCode", "cancel", "setPolicy", "use", "removeAccount",
     "nativeKeyStatus", "nativeKeyRefresh", "nativeKeyRegister", "nativeKeyUnregister", "nativeKeySetPolicy",
     "getContextWindowOverride", "setContextWindowOverride",
+    "getModelSelection", "setModelSelection",
   ]) {
     let initializer;
     Remote(name)(undefined, {

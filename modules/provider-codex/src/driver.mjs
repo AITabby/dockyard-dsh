@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { createCredentialRef } from "../../../packages/vault/src/index.mjs";
 import { createBrowserOAuthAuthorizer } from "../../../packages/oauth/src/browser-oauth-authorizer.mjs";
@@ -25,6 +25,9 @@ const DEFAULT_AUTHORIZATION_URL = `${AUTH_BASE_URL}/oauth/authorize`;
 const DEFAULT_TOKEN_URL = `${AUTH_BASE_URL}/oauth/token`;
 const DEFAULT_REDIRECT_URI = "http://localhost:1455/auth/callback";
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
+const DEFAULT_CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models";
+const DEFAULT_CODEX_CLIENT_VERSION = "0.163.0";
+const DEFAULT_CODEX_CATALOG_TTL_MS = 60_000;
 const DEFAULT_USAGE_URLS = Object.freeze([
   "https://chatgpt.com/backend-api/wham/usage",
   "https://chatgpt.com/backend-api/codex/usage",
@@ -37,9 +40,16 @@ function hash(value) {
   return createHash("sha256").update(String(value)).digest("hex");
 }
 
-function codexAuthPath({ env = process.env, home = homedir(), authFilePath } = {}) {
+function codexHomePath({ env = process.env, home = homedir(), codexHome, authFilePath } = {}) {
+  if (codexHome) return codexHome;
+  if (authFilePath) return dirname(authFilePath);
+  return env.CODEX_HOME || join(home, ".codex");
+}
+
+function codexAuthPath({ env = process.env, home = homedir(), authFilePath, codexHome } = {}) {
   if (authFilePath) return authFilePath;
-  return join(env.CODEX_HOME || join(home, ".codex"), "auth.json");
+  const baseHome = codexHomePath({ env, home, codexHome, authFilePath });
+  return join(baseHome, "auth.json");
 }
 
 function profileClaims(payload) {
@@ -173,15 +183,200 @@ function isExpiring(tokens, now, leewaySeconds) {
   return new Date(tokens.expiresAt).getTime() <= now.getTime() + leewaySeconds * 1000;
 }
 
+function reasoningFromThinkingLevelMap(thinkingLevelMap) {
+  if (!thinkingLevelMap || typeof thinkingLevelMap !== "object") return undefined;
+  const efforts = Object.entries(thinkingLevelMap)
+    .filter(([id, providerValue]) => id !== "off" && typeof providerValue === "string" && providerValue.length > 0)
+    .map(([id, providerValue]) => ({
+      id,
+      name: id.replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase()),
+      ...(providerValue === id ? {} : { description: `provider value: ${providerValue}` }),
+    }));
+  return efforts.length > 0 ? { efforts } : undefined;
+}
+
+export function parseCodexReasoning(model) {
+  if (Array.isArray(model?.supported_reasoning_levels) && model.supported_reasoning_levels.length > 0) {
+    const efforts = model.supported_reasoning_levels.map((lvl) => {
+      const id = typeof lvl === "string" ? lvl : lvl.effort;
+      const name = id.replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+      const description = typeof lvl?.description === "string" ? lvl.description : undefined;
+      return {
+        id,
+        name,
+        ...(description ? { description } : {}),
+      };
+    });
+    const defaultEffort = typeof model.default_reasoning_level === "string" ? model.default_reasoning_level : undefined;
+    return {
+      efforts,
+      ...(defaultEffort && efforts.some((effort) => effort.id === defaultEffort) ? { defaultEffort } : {}),
+    };
+  }
+  return reasoningFromThinkingLevelMap(model?.thinkingLevelMap);
+}
+
+export function codexModelToDshCatalog(model) {
+  const id = model.slug ?? model.id;
+  const name = model.display_name ?? model.name ?? id;
+  const reasoning = parseCodexReasoning(model);
+  const input = Array.isArray(model.input_modalities)
+    ? model.input_modalities
+    : (Array.isArray(model.input) ? model.input : undefined);
+  const contextWindow = Number.isInteger(model.context_window)
+    ? model.context_window
+    : (Number.isInteger(model.contextWindow) ? model.contextWindow : undefined);
+  const maxTokens = Number.isInteger(model.max_output_tokens)
+    ? Math.min(model.max_output_tokens, 16384)
+    : (Number.isInteger(model.maxTokens) ? Math.min(model.maxTokens, 16384) : 8192);
+
+  return {
+    id,
+    name,
+    ...(input ? { inputModalities: [...input] } : {}),
+    ...(contextWindow ? { contextWindow } : {}),
+    ...(maxTokens ? { maxTokens } : {}),
+    ...(reasoning ? { reasoning } : {}),
+  };
+}
+
+export function parseCodexModelCatalog(raw) {
+  const modelsList = Array.isArray(raw?.models)
+    ? raw.models
+    : (Array.isArray(raw) ? raw : []);
+  if (modelsList.length === 0) return [];
+
+  const visible = modelsList.filter((m) => m?.visibility !== "hide");
+  const candidates = visible.length > 0 ? visible : modelsList;
+  const sorted = [...candidates].sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
+
+  return sorted.map(codexModelToDshCatalog);
+}
+
+export function createCodexCatalogLoader({
+  env = process.env,
+  home = homedir(),
+  codexHome,
+  authFilePath,
+  modelsCachePath,
+  modelsUrl = env.DOCKYARD_CODEX_MODELS_URL || DEFAULT_CODEX_MODELS_URL,
+  clientVersion = env.DOCKYARD_CODEX_CLIENT_VERSION || DEFAULT_CODEX_CLIENT_VERSION,
+  fetchImpl = fetch,
+  cacheTtlMs = Number(process.env.DOCKYARD_CODEX_CATALOG_TTL_MS) || DEFAULT_CODEX_CATALOG_TTL_MS,
+  fallbackLoader = null,
+} = {}) {
+  const resolvedHome = codexHomePath({ env, home, codexHome, authFilePath });
+  const resolvedAuthPath = codexAuthPath({ env, home, authFilePath, codexHome: resolvedHome });
+  const resolvedCachePath = modelsCachePath || join(resolvedHome, "models_cache.json");
+
+  let cached = null;
+  let cachedAt = 0;
+  let pending = null;
+
+  return async function loadCatalog({ force = false, credential = null, signal = null } = {}) {
+    const now = Date.now();
+    if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
+    if (pending) return pending;
+
+    pending = (async () => {
+      let discoveredModels = [];
+      let source = "official_codex_models_api";
+      let liveToken = credential?.access ?? null;
+      let liveAccountId = credential?.accountId ?? null;
+
+      if (!liveToken) {
+        try {
+          const authRaw = await readJsonFile(resolvedAuthPath);
+          if (authRaw) {
+            const tokens = normalizeTokens(authRaw);
+            if (tokens?.access) {
+              liveToken = tokens.access;
+              liveAccountId = tokens.accountId;
+            }
+          }
+        } catch {}
+      }
+
+      if (liveToken) {
+        try {
+          const url = new URL(modelsUrl);
+          url.searchParams.set("client_version", clientVersion);
+          const headers = {
+            authorization: `Bearer ${liveToken}`,
+            "user-agent": `Codex/${clientVersion}`,
+            accept: "application/json",
+          };
+          if (liveAccountId) {
+            headers["chatgpt-account-id"] = liveAccountId;
+          }
+          const res = await fetchImpl(url.href, {
+            method: "GET",
+            headers,
+            ...(signal ? { signal } : {}),
+          });
+          if (res.ok) {
+            const data = await res.json().catch(() => ({}));
+            discoveredModels = parseCodexModelCatalog(data);
+            if (discoveredModels.length > 0) {
+              source = "official_codex_models_api";
+            }
+          }
+        } catch {}
+      }
+
+      if (discoveredModels.length === 0) {
+        try {
+          const cacheData = await readJsonFile(resolvedCachePath);
+          if (cacheData) {
+            discoveredModels = parseCodexModelCatalog(cacheData);
+            if (discoveredModels.length > 0) {
+              source = "official_codex_models_cache";
+            }
+          }
+        } catch {}
+      }
+
+      if (discoveredModels.length === 0 && typeof fallbackLoader === "function") {
+        try {
+          const fallback = await fallbackLoader();
+          if (Array.isArray(fallback?.models) && fallback.models.length > 0) {
+            discoveredModels = fallback.models;
+            source = fallback.source ?? "dsh_pi_ai_provider_catalog";
+          }
+        } catch {}
+      }
+
+      const result = {
+        models: discoveredModels,
+        source,
+      };
+
+      if (discoveredModels.length > 0) {
+        cached = result;
+        cachedAt = Date.now();
+      }
+      return result;
+    })().finally(() => {
+      pending = null;
+    });
+
+    return pending;
+  };
+}
+
 export class CodexOAuthDriver {
   constructor({
     authFilePath,
+    codexHome,
+    modelsCachePath,
     env = process.env,
     home = homedir(),
     tokenUrl = env.DOCKYARD_CODEX_TOKEN_URL || DEFAULT_TOKEN_URL,
     usageUrls = env.DOCKYARD_CODEX_USAGE_URL
       ? [env.DOCKYARD_CODEX_USAGE_URL]
       : [...DEFAULT_USAGE_URLS],
+    modelsUrl = env.DOCKYARD_CODEX_MODELS_URL || DEFAULT_CODEX_MODELS_URL,
+    clientVersion = env.DOCKYARD_CODEX_CLIENT_VERSION || DEFAULT_CODEX_CLIENT_VERSION,
     clientId = env.DOCKYARD_CODEX_CLIENT_ID || DEFAULT_CLIENT_ID,
     fetchImpl = fetch,
     requestExecutor = null,
@@ -195,7 +390,7 @@ export class CodexOAuthDriver {
     browserCallbackPort = Number(env.DOCKYARD_CODEX_CALLBACK_PORT || 1455),
     cliPath = env.DOCKYARD_CODEX_CLI || "codex",
   } = {}) {
-    this.authFilePath = codexAuthPath({ env, home, authFilePath });
+    this.authFilePath = codexAuthPath({ env, home, authFilePath, codexHome });
     // SECURITY.md: OAuth endpoints must be https (or loopback http) even when
     // they come from the environment.
     this.tokenUrl = assertSecureEndpointUrl(tokenUrl, "DOCKYARD_CODEX_TOKEN_URL");
@@ -204,7 +399,16 @@ export class CodexOAuthDriver {
     this.clientId = clientId;
     this.fetchImpl = fetchImpl;
     this.requestExecutor = requestExecutor;
-    this.catalogLoader = catalogLoader;
+    this.catalogLoader = catalogLoader ?? createCodexCatalogLoader({
+      env,
+      home,
+      codexHome,
+      authFilePath: this.authFilePath,
+      modelsCachePath,
+      modelsUrl,
+      clientVersion,
+      fetchImpl,
+    });
     this.refreshLeewaySeconds = refreshLeewaySeconds;
     this.cliAuthorizer = createCliOAuthAuthorizer({
       providerId: PROVIDER_ID,
@@ -529,10 +733,20 @@ export class CodexOAuthDriver {
     throw wrapped;
   }
 
-  async getCatalog() {
+  async getCatalog(context = {}) {
+    let credential = null;
+    if (context.accounts?.[0] && context.secretStore) {
+      try {
+        credential = await this.#liveCredential(context.accounts[0], context);
+      } catch {}
+    }
     if (this.catalogLoader) {
       try {
-        const catalog = await this.catalogLoader();
+        const catalog = await this.catalogLoader({
+          force: Boolean(context.force),
+          credential,
+          accounts: context.accounts,
+        });
         if (Array.isArray(catalog?.models) && catalog.models.length > 0) return catalog;
       } catch {
         // A catalog is advisory; native invocation can still accept an exact
@@ -570,12 +784,20 @@ export function createCodexPiAiExecutor({
     const modelId = String(request.model);
     const requestedEffort = typeof request.reasoningEffort === "string" ? request.reasoningEffort : undefined;
     const catalogModel = typeof modelResolver === "function" ? modelResolver(modelId) : null;
-    const contextWindow = catalogModel?.contextWindow;
-    const maxTokens = catalogModel?.maxTokens;
-    if (!Number.isInteger(contextWindow) || contextWindow <= 0 || !Number.isInteger(maxTokens) || maxTokens <= 0) {
-      throw new Error(`Codex live model catalog did not return context/output capacities for "${modelId}"`);
-    }
-    const thinkingLevelMap = catalogModel?.thinkingLevelMap;
+    const contextWindow = Number.isInteger(catalogModel?.contextWindow) && catalogModel.contextWindow > 0
+      ? catalogModel.contextWindow
+      : 272_000;
+    const maxTokens = Number.isInteger(catalogModel?.maxTokens) && catalogModel.maxTokens > 0
+      ? Math.min(catalogModel.maxTokens, 16384)
+      : 16384;
+    const thinkingLevelMap = catalogModel?.thinkingLevelMap ?? {
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: "max",
+      ultra: "ultra",
+    };
     const model = {
       id: modelId,
       name: typeof catalogModel?.name === "string" && catalogModel.name.length > 0
@@ -590,7 +812,9 @@ export function createCodexPiAiExecutor({
       ...(thinkingLevelMap ? { thinkingLevelMap: { ...thinkingLevelMap } } : {}),
       input: Array.isArray(catalogModel?.input) && catalogModel.input.length > 0
         ? [...catalogModel.input]
-        : ["text"],
+        : (Array.isArray(catalogModel?.inputModalities) && catalogModel.inputModalities.length > 0
+          ? [...catalogModel.inputModalities]
+          : ["text", "image"]),
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow,
       maxTokens,
@@ -617,6 +841,7 @@ export function createCodexPiAiExecutor({
     provider: PROVIDER_ID,
     displayName: "OpenAI Codex",
     piProvider: provider,
+    modelErrors: new Map(),
     configuredMaxTokens: new Map(),
     streamIdleTimeoutMs: 300_000,
   };

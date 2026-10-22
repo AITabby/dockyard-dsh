@@ -19,10 +19,13 @@ export function createGrokModule({ driver = {} } = {}) {
 }
 
 export {
+  BUILTIN_GROK_MODELS,
+  DEFAULT_GROK_REASONING_EFFORTS,
   GrokOAuthDriver,
   createGrokCliExecutor,
   createGrokCatalogLoader,
   createGrokDriver,
+  grokPlanFromTier,
   grokRequestPromptBlocks,
   parseGrokAuth,
   parseGrokCreditsConfig,

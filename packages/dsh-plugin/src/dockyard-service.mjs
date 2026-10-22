@@ -131,6 +131,7 @@ export class DockyardDshService {
     autoRefresh = true,
     openBrowser = openDefaultBrowser,
     logger = console,
+    notifyAdaptersUpdated = null,
   } = {}) {
     if (!runtime) throw new Error("Dockyard DSH service requires a runtime");
     this.runtime = runtime;
@@ -138,6 +139,7 @@ export class DockyardDshService {
     this.autoRefresh = autoRefresh;
     this.openBrowser = openBrowser;
     this.logger = logger;
+    this.notifyAdaptersUpdated = notifyAdaptersUpdated;
     this.ready = runtime.init();
   }
 
@@ -274,6 +276,30 @@ export class DockyardDshService {
   async setContextWindowOverride(input, value) {
     await this.ready;
     return this.runtime.setContextWindowOverride(input, value);
+  }
+
+  async getModelSelection(providerId) {
+    await this.ready;
+    const catalog = await this.runtime.getCatalog(providerId).catch(() => ({ models: [] }));
+    const enabledModelIds = this.runtime.getModelSelection(providerId);
+    return {
+      providerId,
+      models: catalog?.models ?? [],
+      enabledModelIds,
+    };
+  }
+
+  async setModelSelection(providerId, enabledModelIds) {
+    await this.ready;
+    const saved = await this.runtime.setModelSelection(providerId, enabledModelIds);
+    try {
+      this.notifyAdaptersUpdated?.();
+    } catch {}
+    return {
+      providerId,
+      enabledModelIds: saved,
+      saved: true,
+    };
   }
 
   async startAuthorization(providerInput, { openBrowser = true } = {}) {

@@ -33,7 +33,7 @@
     "build:plugin": "node packages/dsh-plugin/scripts/build-package.mjs",
     "build:macos": "./apps/macos/build-dmg.sh",
     "prepack": "node packages/dsh-plugin/scripts/build-package.mjs",
-    "test": "node --test"
+    "test": "node --test 'tests/**/*.test.mjs'"
   },
   "dsh": {
     "bundle": {

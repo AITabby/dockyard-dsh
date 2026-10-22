@@ -42,6 +42,15 @@ const CSS = `
 /* The native model menu stays compact; live capacities remain in the Dockyard
    popup, where they belong with the provider/account state. */
 button[role="menuitemradio"] [class$="_description"]{display:none!important}
+/* Model and reasoning effort menu:
+   The selected item does not retain a persistent background color block (the checkmark indicates selection).
+   The highlight color block strictly follows the mouse hover so only one block is visible at a time. */
+[role="menu"] button[role="menuitemradio"],
+[class*="_menu"] button[role="menuitemradio"],
+button[role="menuitemradio"][class*="_option"]{background:transparent!important;outline:none!important;box-shadow:none!important;transition:background-color 60ms ease!important}
+[role="menu"] button[role="menuitemradio"]:hover:not(:disabled),
+[class*="_menu"] button[role="menuitemradio"]:hover:not(:disabled),
+button[role="menuitemradio"][class*="_option"]:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08))!important;color:var(--dsw-alias-label-primary,#fff)!important}
 .dockyard-dsh-model-group-toggle{display:flex!important;align-items:center;justify-content:space-between;gap:10px;min-height:26px;padding:4px 12px!important;border-radius:7px;cursor:pointer;user-select:none;outline:0}
 .dockyard-dsh-model-group-toggle:hover,.dockyard-dsh-model-group-toggle:focus-visible{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#fff)}
 .dockyard-dsh-model-group-toggle .dockyard-dsh-model-group-chevron{margin-left:auto}
@@ -68,34 +77,39 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-chevron{display:inline-flex;width:14px;height:14px;flex:none;align-items:center;justify-content:center;color:var(--dsw-alias-label-caption,#8b93a1);transition:transform 140ms ease;transform-origin:center}
 .dockyard-dsh-chevron[data-open=true]{transform:rotate(180deg)}
 .dockyard-dsh-chevron svg{display:block;width:14px;height:14px}
-.dockyard-dsh-popup{position:fixed;z-index:1000;left:var(--dockyard-dsh-popup-left,14px);top:var(--dockyard-dsh-popup-top,14px);right:auto;bottom:var(--dockyard-dsh-popup-bottom,auto);box-sizing:border-box;width:min(480px,calc(100vw - 28px));max-width:calc(100vw - 28px);min-width:0;max-height:var(--dockyard-dsh-popup-max-height,min(560px,calc(100vh - 28px)));max-height:var(--dockyard-dsh-popup-max-height,min(560px,calc(100dvh - 28px)));overflow:hidden;display:flex;flex-direction:column;gap:10px;padding:14px;border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.16));border-radius:14px;background:var(--dsw-specific-menu,#2d2d31);box-shadow:var(--dsw-shadow-lv3,0 16px 50px rgba(0,0,0,.4));color:var(--dsw-alias-label-primary,#f5f7fb);font:400 12px/18px Inter,var(--dsw-font-family,sans-serif);text-align:left}
-.dockyard-dsh-popup-scroll{min-height:0;overflow:auto;display:flex;flex-direction:column;gap:10px;padding-right:1px}
+.dockyard-dsh-popup{position:fixed;z-index:1000;left:var(--dockyard-dsh-popup-left,auto);top:var(--dockyard-dsh-popup-top,auto);right:var(--dockyard-dsh-popup-right,auto);bottom:var(--dockyard-dsh-popup-bottom,auto);box-sizing:border-box;width:min(480px,calc(100vw - 28px));max-width:calc(100vw - 28px);min-width:0;max-height:var(--dockyard-dsh-popup-max-height,min(560px,calc(100vh - 28px)));overflow:hidden;display:flex;flex-direction:column;gap:12px;padding:16px;border:.5px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));border-radius:var(--dsw-radius-panel,20px);background:var(--dsw-specific-menu,#26262a);box-shadow:var(--dsw-shadow-lv3,0 16px 50px rgba(0,0,0,.4));color:var(--dsw-alias-label-primary,#f5f7fb);font:400 13px/20px Inter,var(--dsw-font-family,sans-serif);text-align:left}
+.dockyard-dsh-popup-scroll{min-height:0;overflow:auto;display:flex;flex-direction:column;gap:12px;padding-right:4px}
 .dockyard-dsh-settings-section{box-sizing:border-box;width:100%;min-width:0;color:var(--dsw-alias-label-primary,#f5f7fb)}
-.dockyard-dsh-settings-section>.dockyard-dsh-popup{position:static;width:100%;max-width:none;max-height:none;overflow:visible;gap:14px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}
-.dockyard-dsh-settings-section .dockyard-dsh-popup-scroll{max-height:none;overflow:visible;gap:14px;padding-right:0}
-.dockyard-dsh-settings-section .dockyard-dsh-section{gap:8px}
+.dockyard-dsh-settings-section>.dockyard-dsh-popup{position:static;width:100%;max-width:none;max-height:none;overflow:visible;gap:16px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}
+.dockyard-dsh-settings-section .dockyard-dsh-popup-scroll{max-height:none;overflow:visible;gap:16px;padding-right:0}
+.dockyard-dsh-settings-section .dockyard-dsh-section{gap:10px}
 .dockyard-dsh-native-key-popup{min-width:0;max-width:calc(100vw - 28px)}
 .dockyard-dsh-native-key-popup>.dockyard-dsh-popup-scroll{display:flex!important;flex:1 1 auto!important;flex-direction:column!important;align-items:stretch!important;min-width:0!important;width:100%!important;max-width:100%!important;box-sizing:border-box;overflow-x:hidden!important}
 .dockyard-dsh-native-key-popup>.dockyard-dsh-popup-scroll>*{box-sizing:border-box;flex:0 0 auto!important;min-width:0!important;width:100%!important;max-width:100%!important}
 .dockyard-dsh-native-key-popup .dockyard-dsh-status{box-sizing:border-box;min-width:0;width:100%;max-width:100%}
 .dockyard-dsh-native-key-popup .dockyard-dsh-model-context{min-width:0;max-width:100%;overflow-wrap:anywhere;white-space:normal}
-.dockyard-dsh-native-key-popup .dockyard-dsh-field,.dockyard-dsh-native-key-popup .dockyard-dsh-key-form,.dockyard-dsh-native-key-popup .dockyard-dsh-section,.dockyard-dsh-native-key-popup .dockyard-dsh-account,.dockyard-dsh-native-key-popup .dockyard-dsh-quota,.dockyard-dsh-native-key-popup .dockyard-dsh-key-notice{box-sizing:border-box;min-width:0;width:100%;max-width:100%}
+.dockyard-dsh-native-key-popup .dockyard-dsh-field,.dockyard-dsh-native-key-popup .dockyard-dsh-key-form,.dockyard-dsh-native-key-popup .dockyard-dsh-section,.dockyard-dsh-native-key-popup .dockyard-dsh-account,.dockyard-dsh-native-key-popup .dockyard-dsh-context-window,.dockyard-dsh-native-key-popup .dockyard-dsh-quota,.dockyard-dsh-native-key-popup .dockyard-dsh-key-notice{box-sizing:border-box;min-width:0;width:100%;max-width:100%}
 .dockyard-dsh-native-key-popup .dockyard-dsh-field{flex-wrap:wrap}
 .dockyard-dsh-native-key-popup .dockyard-dsh-field-label{min-width:0}
-.dockyard-dsh-native-key-popup .dockyard-dsh-select{box-sizing:border-box;min-width:0;width:min(170px,100%);flex:0 1 auto}
+.dockyard-dsh-native-key-popup .dockyard-dsh-select{box-sizing:border-box;min-width:0;width:min(180px,100%);flex:0 1 auto}
 .dockyard-dsh-native-key-popup .dockyard-dsh-key-form-row{flex-wrap:wrap}
 .dockyard-dsh-native-key-popup .dockyard-dsh-key-form-row .dockyard-dsh-key-input{flex:1 1 220px}
 @media (max-width:420px){.dockyard-dsh-native-key-popup .dockyard-dsh-field{align-items:stretch;flex-direction:column;gap:6px}.dockyard-dsh-native-key-popup .dockyard-dsh-select{width:100%;max-width:none}.dockyard-dsh-native-key-popup .dockyard-dsh-key-form-row{flex-direction:column}.dockyard-dsh-native-key-popup .dockyard-dsh-key-form-row .dockyard-dsh-key-input,.dockyard-dsh-native-key-popup .dockyard-dsh-key-save{width:100%;flex:0 0 auto}}
-.dockyard-dsh-provider-list{display:flex;flex-direction:column;gap:10px}
-.dockyard-dsh-provider-row{display:flex;align-items:center;gap:12px;width:100%;min-height:58px;padding:11px 14px;border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.1));border-radius:12px;background:rgba(255,255,255,.035);color:inherit;cursor:pointer;font:inherit;text-align:left;transition:border-color 140ms ease,background 140ms ease,transform 140ms ease}
-.dockyard-dsh-provider-row:hover,.dockyard-dsh-provider-row[data-current=true]{border-color:rgba(121,214,200,.5);background:rgba(121,214,200,.08)}
-.dockyard-dsh-provider-row:hover{transform:translateY(-1px)}
-.dockyard-dsh-provider-row:focus-visible{outline:2px solid var(--dsw-alias-border-l3,#8fa3c7);outline-offset:1px}
-.dockyard-dsh-provider-row-copy{display:flex;align-items:baseline;gap:8px;min-width:0;flex:1}
-.dockyard-dsh-provider-row-name{min-width:0;overflow:hidden;color:var(--dsw-alias-label-primary,#f5f7fb);font-size:13px;font-weight:650;text-overflow:ellipsis;white-space:nowrap}
-.dockyard-dsh-provider-row-meta{min-width:0;overflow:hidden;color:var(--dsw-alias-label-caption,#8b93a1);font-size:11px;line-height:17px;text-overflow:ellipsis;white-space:nowrap}
-.dockyard-dsh-provider-row-arrow{flex:none;margin-left:4px;color:var(--dsw-alias-label-caption,#8b93a1);font-size:20px;line-height:20px;transition:transform 140ms ease,color 140ms ease}
-.dockyard-dsh-provider-row:hover .dockyard-dsh-provider-row-arrow{transform:translateX(2px);color:var(--dsw-alias-label-secondary,#c7ccd5)}
+.dockyard-dsh-provider-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;width:100%;box-sizing:border-box;margin:0;padding:0}
+@media (max-width:540px){.dockyard-dsh-provider-list{grid-template-columns:minmax(0,1fr)}}
+.dockyard-dsh-popup:not(.dockyard-dsh-settings-section *) .dockyard-dsh-provider-list{grid-template-columns:minmax(0,1fr)}
+.dockyard-dsh-provider-row{box-sizing:border-box;display:flex;flex-direction:column;justify-content:space-between;width:100%;min-height:86px;padding:14px 16px;border:.5px solid var(--dsw-alias-settings-card-stroke,rgba(255,255,255,.08));border-radius:var(--dsw-radius-xl,20px);background:var(--dsw-alias-settings-card-fill,rgba(255,255,255,.035));color:inherit;cursor:pointer;font:inherit;text-align:left;outline:none;transition:background-color 140ms ease,border-color 140ms ease;overflow:hidden}
+.dockyard-dsh-provider-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07));border-color:var(--dsw-alias-border-l3,rgba(255,255,255,.18))}
+.dockyard-dsh-provider-row[data-current=true]{border-color:rgba(121,214,200,.5);background:rgba(121,214,200,.07)}
+.dockyard-dsh-provider-row:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#3b82f6);outline-offset:-2px}
+.dockyard-dsh-provider-card-main{display:flex;flex-direction:column;gap:3px;min-width:0;width:100%}
+.dockyard-dsh-provider-card-title-row{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;width:100%}
+.dockyard-dsh-provider-row-name{min-width:0;overflow:hidden;color:var(--dsw-alias-label-primary,#f5f7fb);font-size:14px;font-weight:500;line-height:20px;text-overflow:ellipsis;white-space:nowrap}
+.dockyard-dsh-provider-row-arrow{flex:none;color:var(--dsw-alias-label-tertiary,#8b93a1);font-size:16px;line-height:16px;transition:transform 140ms ease,color 140ms ease}
+.dockyard-dsh-provider-row:hover .dockyard-dsh-provider-row-arrow{transform:translateX(2px);color:var(--dsw-alias-label-primary,#fff)}
+.dockyard-dsh-provider-row-meta{min-width:0;overflow:hidden;color:var(--dsw-alias-label-tertiary,#8b93a1);font-size:12px;line-height:18px;text-overflow:ellipsis;white-space:nowrap}
+.dockyard-dsh-provider-card-meta{display:flex;align-items:center;margin-top:10px}
+.dockyard-dsh-provider-card-badge{box-sizing:border-box;display:inline-block;padding:1px 7px;border-radius:var(--dsw-radius-xs,4px);background:var(--dsw-alias-bg-module-platform,rgba(255,255,255,.06));color:var(--dsw-alias-label-secondary,#c7ccd5);font-family:var(--ds-font-family-code,ui-monospace,Menlo,monospace);font-size:12px;line-height:18px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dockyard-dsh-head{display:flex;align-items:flex-start;gap:10px;padding-bottom:2px}
 .dockyard-dsh-head-copy{min-width:0;flex:1}
 .dockyard-dsh-eyebrow{color:#94d9d0;font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase}
@@ -105,92 +119,108 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-close{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;flex:none;padding:0;border:0;border-radius:50%;background:transparent;color:var(--dsw-alias-label-tertiary,#a9b0ba);cursor:pointer;font-size:0;line-height:0}
 .dockyard-dsh-close::before{content:"×";display:block;font:600 18px/18px Inter,var(--dsw-font-family,sans-serif);transform:translateY(-0.5px)}
 .dockyard-dsh-close:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#fff)}
-.dockyard-dsh-status{display:flex;align-items:center;gap:8px;box-sizing:border-box;min-height:40px;padding:10px 12px;border-radius:9px;background:var(--dsw-alias-bg-module-platform,rgba(255,255,255,.06));color:var(--dsw-alias-label-tertiary,#a9b0ba);line-height:18px}
-.dockyard-dsh-status[data-error=true]{background:rgba(255,104,104,.11);color:var(--dsw-alias-state-error-primary,#ff7a7a)}
-.dockyard-dsh-status[data-success=true]{background:rgba(156,229,220,.08);color:#9ce5dc}
-.dockyard-dsh-status-copy{display:block;align-self:center;min-width:0;flex:1;overflow-wrap:anywhere;white-space:normal;text-align:left;line-height:18px}
+.dockyard-dsh-status{display:flex;align-items:center;gap:10px;box-sizing:border-box;min-height:44px;padding:12px 16px;border-radius:var(--dsw-radius-lg,16px);border:.5px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08));background:var(--dsw-alias-bg-module-platform,rgba(255,255,255,.04));color:var(--dsw-alias-label-tertiary,#a9b0ba);font-size:13px;line-height:20px}
+.dockyard-dsh-status[data-error=true]{background:rgba(255,104,104,.08);border-color:rgba(255,104,104,.25);color:var(--dsw-alias-state-error-primary,#ff7a7a)}
+.dockyard-dsh-status[data-success=true]{background:rgba(156,229,220,.07);border-color:rgba(156,229,220,.2);color:#9ce5dc}
+.dockyard-dsh-status-copy{display:block;align-self:center;min-width:0;flex:1;overflow-wrap:anywhere;white-space:normal;text-align:left;line-height:20px}
 .dockyard-dsh-auth-status{align-items:flex-start}
-.dockyard-dsh-auth-status .dockyard-dsh-status-copy{white-space:normal;overflow-wrap:anywhere;line-height:18px}
+.dockyard-dsh-auth-status .dockyard-dsh-status-copy{white-space:normal;overflow-wrap:anywhere;line-height:20px}
 .dockyard-dsh-auth-status .dockyard-dsh-auth-diagnostic{flex-basis:100%;color:var(--dsw-alias-state-error-primary,#ff7a7a)}
-.dockyard-dsh-login-guide{display:flex;flex-direction:column;gap:6px;padding:9px 10px;border:1px solid rgba(121,214,200,.35);border-radius:9px;background:rgba(121,214,200,.07);text-align:left}
-.dockyard-dsh-login-guide-title{color:#b8eee8;font-size:11px;font-weight:650;line-height:17px}
-.dockyard-dsh-login-guide-copy{color:var(--dsw-alias-label-tertiary,#a9b0ba);font-size:10px;line-height:15px}
-.dockyard-dsh-login-guide-steps{display:flex;flex-direction:column;gap:5px;margin:1px 0 0;padding:0;list-style:none}
-.dockyard-dsh-login-guide-step{display:flex;align-items:flex-start;gap:7px;color:var(--dsw-alias-label-secondary,#c7ccd5);font-size:10px;line-height:15px}
-.dockyard-dsh-login-guide-number{display:inline-flex;width:16px;height:16px;flex:none;align-items:center;justify-content:center;border-radius:50%;background:rgba(121,214,200,.2);color:#b8eee8;font-size:9px;font-weight:700}
-.dockyard-dsh-login-guide-error{color:#ff9a83;font-size:10px;line-height:15px}
-.dockyard-dsh-login-guide-code{display:flex;align-items:center;gap:6px;margin-top:2px}
-.dockyard-dsh-login-guide-code input{min-width:0;flex:1;height:28px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.16));border-radius:7px;background:rgba(0,0,0,.12);color:var(--dsw-alias-label-primary,#f5f7fb);font:400 11px/20px Inter,var(--dsw-font-family,sans-serif)}
+.dockyard-dsh-login-guide{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border:.5px solid rgba(121,214,200,.35);border-radius:var(--dsw-radius-lg,16px);background:rgba(121,214,200,.07);text-align:left}
+.dockyard-dsh-login-guide-title{color:#b8eee8;font-size:12px;font-weight:650;line-height:18px}
+.dockyard-dsh-login-guide-copy{color:var(--dsw-alias-label-tertiary,#a9b0ba);font-size:11px;line-height:16px}
+.dockyard-dsh-login-guide-steps{display:flex;flex-direction:column;gap:6px;margin:2px 0 0;padding:0;list-style:none}
+.dockyard-dsh-login-guide-step{display:flex;align-items:flex-start;gap:8px;color:var(--dsw-alias-label-secondary,#c7ccd5);font-size:11px;line-height:16px}
+.dockyard-dsh-login-guide-number{display:inline-flex;width:18px;height:18px;flex:none;align-items:center;justify-content:center;border-radius:50%;background:rgba(121,214,200,.2);color:#b8eee8;font-size:10px;font-weight:700}
+.dockyard-dsh-login-guide-error{color:#ff9a83;font-size:11px;line-height:16px}
+.dockyard-dsh-login-guide-code{display:flex;align-items:center;gap:8px;margin-top:4px}
+.dockyard-dsh-login-guide-code input{min-width:0;flex:1;height:36px;padding:0 12px;border:.5px solid var(--dsw-alias-border-l4,rgba(255,255,255,.14));border-radius:var(--dsw-radius-md,12px);background:rgba(0,0,0,.2);color:var(--dsw-alias-label-primary,#f5f7fb);font:400 13px/22px Inter,var(--dsw-font-family,sans-serif)}
 .dockyard-dsh-login-guide-code input:focus{border-color:#8ecfc7;outline:0}
-.dockyard-dsh-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.dockyard-dsh-action{height:28px;padding:0 9px;border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.16));border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary,#c7ccd5);cursor:pointer;font:500 11px/20px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap;flex:none}
-.dockyard-dsh-action:hover:not(:disabled){border-color:#8ecfc7;background:rgba(121,214,200,.09);color:#b8eee8}
-.dockyard-dsh-action:disabled{cursor:default;opacity:.45}
-.dockyard-dsh-action-primary{border-color:rgba(121,214,200,.55);color:#a5e6dd}
-.dockyard-dsh-action-danger{border-color:rgba(255,125,110,.48);color:#ff9c91}
-.dockyard-dsh-field{display:flex;align-items:center;justify-content:flex-start;gap:10px;padding:8px 9px;border-radius:8px;background:rgba(255,255,255,.045);text-align:left}
-.dockyard-dsh-field-label{flex:1;color:var(--dsw-alias-label-tertiary,#a9b0ba);text-align:left}
-.dockyard-dsh-select{max-width:170px;height:27px;padding:0 7px;border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.16));border-radius:6px;background:var(--dsw-specific-menu,#2d2d31);color:var(--dsw-alias-label-primary,#f5f7fb);font:500 11px/20px Inter,var(--dsw-font-family,sans-serif)}
-.dockyard-dsh-section{display:flex;flex-direction:column;gap:6px}
-.dockyard-dsh-section-title{display:flex;width:100%;box-sizing:border-box;flex-direction:column;align-items:flex-start;gap:3px;color:var(--dsw-alias-label-tertiary,#a9b0ba);font-size:10px;font-weight:700;letter-spacing:1.2px;line-height:18px;text-transform:uppercase;text-align:left}
+.dockyard-dsh-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dockyard-dsh-action{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:36px;padding:0 14px;border:.5px solid var(--dsw-alias-border-l3,rgba(255,255,255,.14));border-radius:var(--dsw-radius-md,12px);background:transparent;color:var(--dsw-alias-label-primary,#f5f7fb);cursor:pointer;font:500 13px/22px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap;flex:none;transition:all 120ms ease}
+.dockyard-dsh-action:hover:not(:disabled){border-color:rgba(255,255,255,.24);background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:#fff}
+.dockyard-dsh-action:disabled{cursor:default;opacity:.4}
+.dockyard-dsh-action-primary{border:none;background:var(--dsw-alias-button-primary-fill,#fff)!important;color:var(--dsw-alias-label-primary-foreground,#111113)!important;font-weight:500}
+.dockyard-dsh-action-primary:hover:not(:disabled){background:#ececed!important}
+.dockyard-dsh-action-danger{border-color:rgba(255,125,110,.35);background:transparent;color:#ff9c91}
+.dockyard-dsh-action-danger:hover:not(:disabled){border-color:rgba(255,125,110,.6);background:rgba(255,104,104,.12);color:#ffb5ad}
+.dockyard-dsh-field{box-sizing:border-box;width:100%;min-width:0;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border:.5px solid var(--dsw-alias-settings-card-stroke,rgba(255,255,255,.08));border-radius:var(--dsw-radius-xl,20px);background:var(--dsw-alias-settings-card-fill,rgba(255,255,255,.035));text-align:left}
+.dockyard-dsh-field-label{min-width:0;flex:1;color:var(--dsw-alias-label-secondary,#c7ccd5);font-size:13px;text-align:left}
+.dockyard-dsh-select{box-sizing:border-box;max-width:180px;height:36px;padding:0 12px;border:.5px solid var(--dsw-alias-border-l4,rgba(255,255,255,.14));border-radius:var(--dsw-radius-md,12px);background:var(--dsw-alias-bg-layer-1,rgba(0,0,0,.2));color:var(--dsw-alias-label-primary,#f5f7fb);font:500 13px/22px Inter,var(--dsw-font-family,sans-serif)}
+.dockyard-dsh-section{display:flex;flex-direction:column;gap:8px}
+.dockyard-dsh-section-title{display:flex;width:100%;box-sizing:border-box;flex-direction:column;align-items:flex-start;gap:3px;color:var(--dsw-alias-label-tertiary,#a9b0ba);font-size:11px;font-weight:700;letter-spacing:1.2px;line-height:18px;text-transform:uppercase;text-align:left}
 .dockyard-dsh-section-title>span:first-child{display:block;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dockyard-dsh-section-value{display:block;min-width:0;max-width:100%;margin:0;color:var(--dsw-alias-label-caption,#8b93a1);font-size:11px;font-weight:400;letter-spacing:0;line-height:16px;text-transform:none;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dockyard-dsh-tier-list{display:flex;gap:5px;flex-wrap:wrap}
-.dockyard-dsh-tier{min-height:25px;padding:2px 8px;border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.16));border-radius:999px;background:transparent;color:var(--dsw-alias-label-tertiary,#a9b0ba);cursor:pointer;font:500 11px/18px Inter,var(--dsw-font-family,sans-serif)}
+.dockyard-dsh-section-value{display:block;min-width:0;max-width:100%;margin:0;color:var(--dsw-alias-label-caption,#8b93a1);font-size:12px;font-weight:400;letter-spacing:0;line-height:18px;text-transform:none;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dockyard-dsh-tier-list{display:flex;gap:6px;flex-wrap:wrap}
+.dockyard-dsh-tier{min-height:28px;padding:3px 10px;border:.5px solid var(--dsw-alias-border-l3,rgba(255,255,255,.16));border-radius:999px;background:transparent;color:var(--dsw-alias-label-tertiary,#a9b0ba);cursor:pointer;font:500 12px/20px Inter,var(--dsw-font-family,sans-serif)}
 .dockyard-dsh-tier[data-active=true]{border-color:rgba(121,214,200,.65);background:rgba(121,214,200,.12);color:#a5e6dd}
-.dockyard-dsh-tier:disabled{cursor:default;opacity:.55}
-.dockyard-dsh-context-window{gap:7px}
-.dockyard-dsh-context-window-row{display:flex;align-items:center;gap:6px;min-width:0}
-.dockyard-dsh-context-window-select{box-sizing:border-box;min-width:0;flex:1;height:29px;padding:0 7px;border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.16));border-radius:6px;background:var(--dsw-specific-menu,#2d2d31);color:var(--dsw-alias-label-primary,#f5f7fb);font:500 11px/20px Inter,var(--dsw-font-family,sans-serif)}
-.dockyard-dsh-context-window-input{box-sizing:border-box;min-width:0;flex:1;height:29px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.16));border-radius:6px;background:rgba(0,0,0,.12);color:var(--dsw-alias-label-primary,#f5f7fb);font:400 11px/20px Inter,var(--dsw-font-family,sans-serif)}
+.dockyard-dsh-tier:disabled{cursor:default;opacity:.4}
+.dockyard-dsh-context-window{box-sizing:border-box;width:100%;min-width:0;display:flex;flex-direction:column;gap:10px;padding:14px 16px;border:.5px solid var(--dsw-alias-settings-card-stroke,rgba(255,255,255,.08));border-radius:var(--dsw-radius-xl,20px);background:var(--dsw-alias-settings-card-fill,rgba(255,255,255,.035))}
+.dockyard-dsh-context-window-row{display:flex;align-items:center;gap:8px;min-width:0;width:100%;box-sizing:border-box}
+.dockyard-dsh-context-window-select{box-sizing:border-box;min-width:0;flex:1 1 auto;height:36px;padding:0 12px;border:.5px solid var(--dsw-alias-border-l4,rgba(255,255,255,.14));border-radius:var(--dsw-radius-md,12px);background:var(--dsw-alias-bg-layer-1,rgba(0,0,0,.2));color:var(--dsw-alias-label-primary,#f5f7fb);font:500 13px/22px Inter,var(--dsw-font-family,sans-serif)}
+.dockyard-dsh-context-window-input{box-sizing:border-box;min-width:0;flex:1 1 120px;height:36px;padding:0 12px;border:.5px solid var(--dsw-alias-border-l4,rgba(255,255,255,.14));border-radius:var(--dsw-radius-md,12px);background:var(--dsw-alias-bg-layer-1,rgba(0,0,0,.2));color:var(--dsw-alias-label-primary,#f5f7fb);font:400 13px/22px Inter,var(--dsw-font-family,sans-serif)}
 .dockyard-dsh-context-window-input:focus{border-color:rgba(121,214,200,.7);outline:0;box-shadow:0 0 0 2px rgba(121,214,200,.12)}
 .dockyard-dsh-context-window-input::placeholder{color:var(--dsw-alias-label-caption,#8b93a1)}
-.dockyard-dsh-context-window-save{height:29px;padding:0 8px;border:1px solid rgba(121,214,200,.55);border-radius:6px;background:rgba(121,214,200,.08);color:#a5e6dd;cursor:pointer;font:500 10px/18px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap}
-.dockyard-dsh-context-window-save:hover:not(:disabled){background:rgba(121,214,200,.16)}
-.dockyard-dsh-context-window-save:disabled{cursor:default;opacity:.45}
-.dockyard-dsh-context-window-meta{display:flex;align-items:center;gap:7px;min-width:0;flex-wrap:wrap;color:var(--dsw-alias-label-caption,#8b93a1);font-size:10px;line-height:15px}
-.dockyard-dsh-context-window-warning{color:#cbb7ff}
-.dockyard-dsh-context-window-message{color:#9ce5dc;font-size:10px;line-height:15px}
+.dockyard-dsh-context-window-save{box-sizing:border-box;height:36px;padding:0 16px;min-width:64px;flex:0 0 auto;border:none;border-radius:var(--dsw-radius-md,12px);background:var(--dsw-alias-button-primary-fill,#fff);color:var(--dsw-alias-label-primary-foreground,#111113);cursor:pointer;font:500 13px/22px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap;transition:all 120ms ease}
+.dockyard-dsh-context-window-save:hover:not(:disabled){background:#ececed}
+.dockyard-dsh-context-window-save:disabled{cursor:default;opacity:.4}
+.dockyard-dsh-context-window-meta{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap;color:var(--dsw-alias-label-caption,#8b93a1);font-size:11px;line-height:16px}
+.dockyard-dsh-context-window-warning{color:#cbb7ff;font-size:11px;line-height:16px}
+.dockyard-dsh-context-window-message{color:#9ce5dc;font-size:11px;line-height:16px}
 .dockyard-dsh-context-window-message[data-error=true]{color:#ff9a83}
-.dockyard-dsh-account{display:flex;flex-direction:column;gap:7px;padding:9px;border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.1));border-radius:10px;background:rgba(255,255,255,.035)}
+.dockyard-dsh-model-selection{display:flex;flex-direction:column;gap:10px;padding:14px 16px;border:.5px solid var(--dsw-alias-settings-card-stroke,rgba(255,255,255,.08));border-radius:var(--dsw-radius-xl,20px);background:var(--dsw-alias-settings-card-fill,rgba(255,255,255,.035))}
+.dockyard-dsh-model-search-row{display:flex;width:100%}
+.dockyard-dsh-model-search{box-sizing:border-box;width:100%;height:36px;padding:0 12px;border:.5px solid var(--dsw-alias-border-l4,rgba(255,255,255,.14));border-radius:var(--dsw-radius-md,12px);background:var(--dsw-alias-bg-layer-1,rgba(0,0,0,.2));color:var(--dsw-alias-label-primary,#f5f7fb);font:400 13px/22px Inter,var(--dsw-font-family,sans-serif)}
+.dockyard-dsh-model-search:focus{border-color:rgba(121,214,200,.7);outline:0;box-shadow:0 0 0 2px rgba(121,214,200,.12)}
+.dockyard-dsh-model-search::placeholder{color:var(--dsw-alias-label-caption,#8b93a1)}
+.dockyard-dsh-model-list-box{display:flex;flex-direction:column;gap:3px;max-height:220px;overflow-y:auto;padding:6px;border-radius:var(--dsw-radius-md,12px);border:.5px solid var(--dsw-alias-border-l4,rgba(255,255,255,.08));background:rgba(0,0,0,.15);box-sizing:border-box}
+.dockyard-dsh-model-item{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:var(--dsw-radius-sm,8px);cursor:pointer;user-select:none;transition:background 120ms ease}
+.dockyard-dsh-model-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.06))}
+.dockyard-dsh-model-checkbox{width:16px;height:16px;margin:0;cursor:pointer;accent-color:#79d6c8}
+.dockyard-dsh-model-item-info{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
+.dockyard-dsh-model-item-title{color:var(--dsw-alias-label-primary,#f5f7fb);font-size:13px;font-weight:500;line-height:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dockyard-dsh-model-item-id{color:var(--dsw-alias-label-caption,#8b93a1);font:400 11px/15px ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dockyard-dsh-model-actions{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:4px}
+.dockyard-dsh-model-actions-left{display:flex;align-items:center;gap:6px}
+.dockyard-dsh-account{display:flex;flex-direction:column;gap:10px;padding:14px 16px;border:.5px solid var(--dsw-alias-settings-card-stroke,rgba(255,255,255,.08));border-radius:var(--dsw-radius-xl,20px);background:var(--dsw-alias-settings-card-fill,rgba(255,255,255,.035))}
 .dockyard-dsh-account[data-current=true]{border-color:rgba(121,214,200,.45);background:rgba(121,214,200,.065)}
-.dockyard-dsh-account-head{display:flex;align-items:center;gap:8px}
+.dockyard-dsh-account-head{display:flex;align-items:center;gap:10px}
 .dockyard-dsh-account-identity{min-width:0;flex:1}
-.dockyard-dsh-account-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary,#f5f7fb);font-size:12px;font-weight:600}
-.dockyard-dsh-account-id{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-caption,#8b93a1);font-size:10px}
-.dockyard-dsh-account-actions{display:flex;align-items:center;gap:5px;flex:none}
-.dockyard-dsh-account-use{height:25px;padding:0 7px;border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.16));border-radius:6px;background:transparent;color:#a5e6dd;cursor:pointer;font:500 10px/18px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap}
-.dockyard-dsh-account-use:hover:not(:disabled){background:rgba(121,214,200,.12)}
-.dockyard-dsh-account-use:disabled{cursor:default;opacity:.5}
-.dockyard-dsh-account-remove{height:25px;padding:0 7px;border:1px solid rgba(255,122,122,.35);border-radius:6px;background:transparent;color:#ff9a83;cursor:pointer;font:500 10px/18px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap}
+.dockyard-dsh-account-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary,#f5f7fb);font-size:13px;font-weight:600}
+.dockyard-dsh-account-id{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-caption,#8b93a1);font-size:11px}
+.dockyard-dsh-account-actions{display:flex;align-items:center;gap:6px;flex:none}
+.dockyard-dsh-account-use{box-sizing:border-box;height:28px;padding:0 10px;border:.5px solid var(--dsw-alias-border-l3,rgba(255,255,255,.14));border-radius:var(--dsw-radius-sm,8px);background:rgba(255,255,255,.05);color:#a5e6dd;cursor:pointer;font:500 12px/18px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap;transition:all 120ms ease}
+.dockyard-dsh-account-use:hover:not(:disabled){background:rgba(121,214,200,.14);border-color:rgba(121,214,200,.4)}
+.dockyard-dsh-account-use:disabled{cursor:default;opacity:.4}
+.dockyard-dsh-account-remove{box-sizing:border-box;height:28px;padding:0 10px;border:.5px solid rgba(255,122,122,.35);border-radius:var(--dsw-radius-sm,8px);background:transparent;color:#ff9c91;cursor:pointer;font:500 12px/18px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap;transition:all 120ms ease}
 .dockyard-dsh-account-remove:hover:not(:disabled){border-color:rgba(255,122,122,.7);background:rgba(255,104,104,.12)}
-.dockyard-dsh-account-remove:disabled{cursor:default;opacity:.5}
-.dockyard-dsh-account-meta{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-caption,#8b93a1);font-size:10px;flex-wrap:wrap}
+.dockyard-dsh-account-remove:disabled{cursor:default;opacity:.4}
+.dockyard-dsh-account-meta{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-caption,#8b93a1);font-size:11px;flex-wrap:wrap}
 .dockyard-dsh-health{color:#9ce5dc}.dockyard-dsh-health[data-bad=true]{color:#ff9a83}
-.dockyard-dsh-account-note{padding:4px 6px;border-radius:6px;background:rgba(203,183,255,.07);color:var(--dsw-alias-label-caption,#8b93a1);font-size:10px;line-height:15px;text-align:left}
-.dockyard-dsh-account-error{max-width:100%;overflow:hidden;color:#ff9a83;font-size:10px;line-height:15px;text-align:left;text-overflow:ellipsis;white-space:nowrap}
-.dockyard-dsh-quota{display:flex;flex-direction:column;gap:4px}
+.dockyard-dsh-account-note{padding:4px 8px;border-radius:var(--dsw-radius-xs,4px);background:rgba(203,183,255,.07);color:var(--dsw-alias-label-caption,#8b93a1);font-size:11px;line-height:16px;text-align:left}
+.dockyard-dsh-account-error{max-width:100%;overflow:hidden;color:#ff9a83;font-size:11px;line-height:16px;text-align:left;text-overflow:ellipsis;white-space:nowrap}
+.dockyard-dsh-quota{display:flex;flex-direction:column;gap:5px}
 .dockyard-dsh-quota-row{display:flex;align-items:center;gap:8px}
 .dockyard-dsh-quota-copy{min-width:0;flex:1;color:var(--dsw-alias-label-tertiary,#a9b0ba);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dockyard-dsh-quota-value{flex:none;color:var(--dsw-alias-label-primary,#f5f7fb);font-size:11px}
-.dockyard-dsh-quota-track{height:4px;overflow:hidden;border-radius:99px;background:rgba(255,255,255,.1)}
+.dockyard-dsh-quota-value{flex:none;color:var(--dsw-alias-label-primary,#f5f7fb);font-size:12px}
+.dockyard-dsh-quota-track{height:5px;overflow:hidden;border-radius:99px;background:rgba(255,255,255,.1)}
 .dockyard-dsh-quota-fill{height:100%;border-radius:inherit;background:linear-gradient(90deg,#8edbd1,#b59bff)}
-.dockyard-dsh-muted{padding:4px 2px;color:var(--dsw-alias-label-caption,#8b93a1);text-align:left}
-.dockyard-dsh-candidates{display:flex;flex-direction:column;gap:5px}
-.dockyard-dsh-candidate{display:flex;align-items:center;gap:7px;padding:6px 7px;border-radius:7px;background:rgba(255,255,255,.04)}
+.dockyard-dsh-muted{padding:6px 2px;color:var(--dsw-alias-label-caption,#8b93a1);text-align:left}
+.dockyard-dsh-candidates{display:flex;flex-direction:column;gap:6px}
+.dockyard-dsh-candidate{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:var(--dsw-radius-md,12px);background:rgba(255,255,255,.04)}
 .dockyard-dsh-candidate-copy{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary,#c7ccd5)}
-.dockyard-dsh-key-notice{padding:7px 8px;border-radius:8px;background:rgba(203,183,255,.08);color:var(--dsw-alias-label-tertiary,#a9b0ba);line-height:17px;text-align:left}
-.dockyard-dsh-key-form{--dockyard-dsh-key-control-height:32px;display:flex;width:100%;box-sizing:border-box;align-self:stretch;align-items:stretch;flex-direction:column;gap:6px;padding:9px;border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.1));border-radius:10px;background:rgba(255,255,255,.035)}
-.dockyard-dsh-key-form-row{display:flex;width:100%;min-width:0;min-height:var(--dockyard-dsh-key-control-height);align-items:stretch;gap:6px}
-.dockyard-dsh-key-input{display:block;box-sizing:border-box;width:100%;min-width:0;flex:1 1 auto;height:var(--dockyard-dsh-key-control-height);min-height:var(--dockyard-dsh-key-control-height);margin:0;padding:0 8px;border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.16));border-radius:7px;background:rgba(0,0,0,.12);color:var(--dsw-alias-label-primary,#f5f7fb);font:400 11px/20px Inter,var(--dsw-font-family,sans-serif)}
+.dockyard-dsh-key-notice{padding:8px 10px;border-radius:var(--dsw-radius-md,12px);background:rgba(203,183,255,.08);color:var(--dsw-alias-label-tertiary,#a9b0ba);line-height:18px;text-align:left}
+.dockyard-dsh-key-form{--dockyard-dsh-key-control-height:36px;display:flex;width:100%;box-sizing:border-box;align-self:stretch;align-items:stretch;flex-direction:column;gap:10px;padding:14px 16px;border:.5px solid var(--dsw-alias-settings-card-stroke,rgba(255,255,255,.08));border-radius:var(--dsw-radius-xl,20px);background:var(--dsw-alias-settings-card-fill,rgba(255,255,255,.035))}
+.dockyard-dsh-key-form-row{display:flex;width:100%;min-width:0;min-height:var(--dockyard-dsh-key-control-height);align-items:stretch;gap:8px}
+.dockyard-dsh-key-input{display:block;box-sizing:border-box;width:100%;min-width:0;flex:1 1 auto;height:var(--dockyard-dsh-key-control-height);min-height:var(--dockyard-dsh-key-control-height);margin:0;padding:0 12px;border:.5px solid var(--dsw-alias-border-l4,rgba(255,255,255,.14));border-radius:var(--dsw-radius-md,12px);background:var(--dsw-alias-bg-layer-1,rgba(0,0,0,.2));color:var(--dsw-alias-label-primary,#f5f7fb);font:400 13px/22px Inter,var(--dsw-font-family,sans-serif)}
 .dockyard-dsh-key-form>.dockyard-dsh-key-input{flex:0 0 auto}
 .dockyard-dsh-key-input::placeholder{color:var(--dsw-alias-label-caption,#8b93a1)}
 .dockyard-dsh-key-input:focus{border-color:rgba(121,214,200,.7);outline:0;box-shadow:0 0 0 2px rgba(121,214,200,.12)}
-.dockyard-dsh-key-save{box-sizing:border-box;height:var(--dockyard-dsh-key-control-height);min-height:var(--dockyard-dsh-key-control-height);padding:0 9px;border:1px solid rgba(121,214,200,.55);border-radius:7px;background:rgba(121,214,200,.08);color:#a5e6dd;cursor:pointer;font:500 11px/20px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap}
-.dockyard-dsh-key-save:hover:not(:disabled){background:rgba(121,214,200,.16)}
-.dockyard-dsh-key-save:disabled{cursor:default;opacity:.45}
-.dockyard-dsh-key-ref{overflow:hidden;color:var(--dsw-alias-label-caption,#8b93a1);font:400 9px/14px ui-monospace,SFMono-Regular,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
-.dockyard-dsh-key-source{color:var(--dsw-alias-label-caption,#8b93a1);font-size:10px}
+.dockyard-dsh-key-save{box-sizing:border-box;height:var(--dockyard-dsh-key-control-height);min-height:var(--dockyard-dsh-key-control-height);padding:0 16px;border:none;border-radius:var(--dsw-radius-md,12px);background:var(--dsw-alias-button-primary-fill,#fff);color:var(--dsw-alias-label-primary-foreground,#111113);cursor:pointer;font:500 13px/22px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap;transition:all 120ms ease}
+.dockyard-dsh-key-save:hover:not(:disabled){background:#ececed}
+.dockyard-dsh-key-save:disabled{cursor:default;opacity:.4}
+.dockyard-dsh-key-ref{overflow:hidden;color:var(--dsw-alias-label-caption,#8b93a1);font:400 10px/14px ui-monospace,SFMono-Regular,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
+.dockyard-dsh-key-source{color:var(--dsw-alias-label-caption,#8b93a1);font-size:11px}
 @keyframes dockyard-dsh-pulse{0%,100%{opacity:.45}50%{opacity:1}}
 `;
 
@@ -280,6 +310,12 @@ function installModelMenuFolding() {
     modelGroupFoldState.set(key, !collapsed);
     syncModelMenuGroups(menu);
   };
+  const handleMouseMove = (event) => {
+    const item = event.target?.closest?.('button[role="menuitemradio"]');
+    if (item && document.activeElement !== item && !item.disabled) {
+      item.focus({ preventScroll: true });
+    }
+  };
   const sync = () => {
     for (const menu of document.querySelectorAll('[role="menu"]')) {
       const label = menu.getAttribute("aria-label") ?? "";
@@ -287,6 +323,7 @@ function installModelMenuFolding() {
       if (!boundMenus.has(menu)) {
         menu.addEventListener("click", toggle);
         menu.addEventListener("keydown", toggle);
+        menu.addEventListener("mousemove", handleMouseMove);
         boundMenus.add(menu);
       }
       syncModelMenuGroups(menu);
@@ -300,6 +337,7 @@ function installModelMenuFolding() {
     for (const menu of boundMenus) {
       menu.removeEventListener("click", toggle);
       menu.removeEventListener("keydown", toggle);
+      menu.removeEventListener("mousemove", handleMouseMove);
     }
     boundMenus.clear();
   };
@@ -428,7 +466,8 @@ function quotaSummary(account, t) {
   if (indicator?.type === "quota") return `${indicator.percent}%`;
   const first = selectPrimaryQuotaWindow(rows);
   if (first?.remaining !== null && first?.remaining !== undefined) return formatNumber(first.remaining, t);
-  if (account?.resources?.quotaDiagnostic) return text(t, "value.quota");
+  if (first?.resetAt) return text(t, "health.healthy");
+  if (account?.resources?.quotaDiagnostic) return text(t, "health.healthy");
   return account ? text(t, "summary.connected") : text(t, "summary.notConnected");
 }
 
@@ -447,8 +486,17 @@ function providerOverviewSummary(provider, t) {
   return text(t, "summary.accounts", { count: accounts.length, summary });
 }
 
+function isUuidString(value) {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
 function accountName(account, t) {
-  return account?.email ?? account?.displayName ?? account?.accountId ?? text(t, "value.unknown");
+  const name = !isUuidString(account?.displayName) ? account?.displayName : null;
+  const email = account?.email;
+  if (name && email && name !== email && !name.includes("@")) {
+    return `${name} (${email})`;
+  }
+  return name ?? email ?? account?.accountId ?? text(t, "value.unknown");
 }
 
 function accountIdentityLine(account, t) {
@@ -954,7 +1002,7 @@ function ContextWindowSection({ providerId, current, model, accountId = null, ke
     }
   };
 
-  return h("div", { className: "dockyard-dsh-section dockyard-dsh-context-window" },
+  return h("div", { className: "dockyard-dsh-context-window" },
     h("div", { className: "dockyard-dsh-section-title" },
       h("span", null, text(t, "contextWindow.title")),
       h("span", { className: "dockyard-dsh-section-value" }, contextWindowScopeLabel(scope, t))),
@@ -998,6 +1046,203 @@ function ContextWindowSection({ providerId, current, model, accountId = null, ke
     message ? h("div", { className: "dockyard-dsh-context-window-message", "data-error": message.error }, message.text) : null);
 }
 
+function ModelSelectionSection({ providerId, remote, directory, modelDirectories, t }) {
+  const [state, setState] = useState({
+    status: "loading",
+    models: [],
+    enabledModelIds: null,
+  });
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [search, setSearch] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ status: "loading", models: [], enabledModelIds: null });
+    setMessage(null);
+
+    if (!providerId || typeof remote?.getModelSelection !== "function") {
+      setState({ status: "ready", models: [], enabledModelIds: null });
+      return undefined;
+    }
+
+    Promise.resolve(remote.getModelSelection({ providerId }))
+      .then((response) => unwrapRemote(response, t))
+      .then((data) => {
+        if (cancelled) return;
+        const models = Array.isArray(data?.models) ? data.models : [];
+        const enabled = Array.isArray(data?.enabledModelIds) ? data.enabledModelIds : null;
+        setState({
+          status: "ready",
+          models,
+          enabledModelIds: enabled,
+        });
+        if (enabled !== null) {
+          setSelectedIds(new Set(enabled));
+        } else {
+          setSelectedIds(new Set(models.map((m) => m.id)));
+        }
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setState({ status: "error", models: [], enabledModelIds: null });
+        setMessage({ error: true, text: errorText(error, t) });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [providerId, remote, t]);
+
+  const models = state.models;
+  if (state.status === "loading") {
+    return h("div", { className: "dockyard-dsh-section dockyard-dsh-model-selection" },
+      h("div", { className: "dockyard-dsh-section-title" },
+        h("span", null, text(t, "modelSelection.title")),
+        h("span", { className: "dockyard-dsh-section-value" }, text(t, "modelSelection.loading"))));
+  }
+
+  if (state.status !== "loading" && models.length === 0) {
+    return null;
+  }
+
+  const query = search.trim().toLowerCase();
+  const filtered = query
+    ? models.filter((m) =>
+        m.id.toLowerCase().includes(query) ||
+        (m.name && m.name.toLowerCase().includes(query)))
+    : models;
+
+  const toggleModel = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const selectAll = () => {
+    setSelectedIds(new Set(models.map((m) => m.id)));
+  };
+
+  const deselectAll = () => {
+    setSelectedIds(new Set());
+  };
+
+  const save = async () => {
+    if (typeof remote?.setModelSelection !== "function") {
+      setMessage({ error: true, text: text(t, "error.remoteNotMounted", { method: "setModelSelection" }) });
+      return;
+    }
+    setSaving(true);
+    setMessage(null);
+    try {
+      const enabledList = Array.from(selectedIds);
+      unwrapRemote(await remote.setModelSelection({
+        providerId,
+        enabledModelIds: enabledList,
+      }), t);
+      setState((prev) => ({ ...prev, enabledModelIds: enabledList }));
+      setMessage({ error: false, text: text(t, "modelSelection.saved") });
+      try {
+        if (typeof modelDirectories?.catalog?.refresh === "function") {
+          modelDirectories.catalog.refresh();
+        } else if (typeof modelDirectories?.catalog?.invalidate === "function") {
+          modelDirectories.catalog.invalidate();
+          modelDirectories.catalog.load?.().catch(() => {});
+        }
+      } catch {}
+      try {
+        const res = directory?.load?.();
+        if (res && typeof res.catch === "function") res.catch(() => {});
+      } catch {}
+      try {
+        const res = directory?.catalog?.refresh?.();
+        if (res && typeof res.catch === "function") res.catch(() => {});
+      } catch {}
+      try {
+        const res = directory?.refresh?.();
+        if (res && typeof res.catch === "function") res.catch(() => {});
+      } catch {}
+      try {
+        if (modelDirectories?.live?.directories?.values) {
+          for (const dir of modelDirectories.live.directories.values) {
+            try {
+              const res = dir.load?.();
+              if (res && typeof res.catch === "function") res.catch(() => {});
+            } catch {}
+          }
+        }
+      } catch {}
+    } catch (err) {
+      setMessage({ error: true, text: errorText(err, t) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return h("div", { className: "dockyard-dsh-section dockyard-dsh-model-selection" },
+    h("div", { className: "dockyard-dsh-section-title" },
+      h("span", null, text(t, "modelSelection.title")),
+      h("span", { className: "dockyard-dsh-section-value" },
+        text(t, "modelSelection.enabledCount", { enabled: selectedIds.size, total: models.length }))),
+    h("div", { className: "dockyard-dsh-model-search-row" },
+      h("input", {
+        type: "text",
+        className: "dockyard-dsh-model-search",
+        placeholder: text(t, "modelSelection.searchPlaceholder"),
+        value: search,
+        onChange: (e) => setSearch(e.target.value),
+      })),
+    h("div", { className: "dockyard-dsh-model-list-box" },
+      filtered.map((item) => {
+        const checked = selectedIds.has(item.id);
+        const meta = item.contextWindow ? ` · ${Math.round(item.contextWindow / 1024)}k context` : "";
+        return h("label", {
+          key: item.id,
+          className: "dockyard-dsh-model-item",
+        },
+          h("input", {
+            type: "checkbox",
+            className: "dockyard-dsh-model-checkbox",
+            checked,
+            onChange: () => toggleModel(item.id),
+          }),
+          h("div", { className: "dockyard-dsh-model-item-info" },
+            h("div", { className: "dockyard-dsh-model-item-title" }, item.name || item.id),
+            h("div", { className: "dockyard-dsh-model-item-id" }, `${item.id}${meta}`)));
+      })),
+    h("div", { className: "dockyard-dsh-model-actions" },
+      h("div", { className: "dockyard-dsh-model-actions-left" },
+        h("button", {
+          type: "button",
+          className: "dockyard-dsh-action",
+          onClick: selectAll,
+          disabled: saving,
+        }, text(t, "modelSelection.selectAll")),
+        h("button", {
+          type: "button",
+          className: "dockyard-dsh-action",
+          onClick: deselectAll,
+          disabled: saving,
+        }, text(t, "modelSelection.deselectAll"))),
+      h("button", {
+        type: "button",
+        className: "dockyard-dsh-action dockyard-dsh-action-primary",
+        onClick: save,
+        disabled: saving,
+      }, saving ? text(t, "modelSelection.saving") : text(t, "modelSelection.save"))),
+    message ? h("div", {
+      className: "dockyard-dsh-context-window-message",
+      "data-error": message.error,
+    }, message.text) : null);
+}
+
 function ChevronIcon({ open }) {
   return h("span", {
     className: "dockyard-dsh-chevron",
@@ -1032,7 +1277,11 @@ function quotaView(account, t) {
   return h("div", { className: "dockyard-dsh-quota" }, rows.map((window, index) => {
     const balance = window.kind === "balance";
     const percent = balance ? null : quotaPercent(window);
-    const remaining = balance ? (formatBalance(window, t) ?? formatNumber(window.remaining, t)) : formatNumber(window.remaining, t);
+    const remaining = balance
+      ? (formatBalance(window, t) ?? formatNumber(window.remaining, t))
+      : (window.remaining === null && (window.limit === null || window.limit === undefined) && window.resetAt)
+        ? text(t, "health.healthy")
+        : formatNumber(window.remaining, t);
     const limit = balance && window.limit !== null && window.limit !== undefined
       ? (formatBalance(window, t, window.limit) ?? formatNumber(window.limit, t))
       : null;
@@ -1048,10 +1297,21 @@ function quotaView(account, t) {
         h("span", { className: "dockyard-dsh-quota-value" }, percent === null ? value : `${percent}%`)),
       percent === null ? null : h("div", { className: "dockyard-dsh-quota-track" },
         h("div", { className: "dockyard-dsh-quota-fill", style: { width: `${percent}%` } })),
-      h("div", { className: "dockyard-dsh-muted" }, text(t, "quota.resetUpdated", {
-        reset: formatDate(window.resetAt, t),
-        updated: formatDate(window.updatedAt, t),
-      })));
+      h("div", { className: "dockyard-dsh-muted" },
+        text(t, "quota.resetUpdated", {
+          reset: formatDate(window.resetAt, t),
+          updated: formatDate(window.updatedAt, t),
+        }),
+        account?.resources?.quotaDiagnostic
+          ? h("span", null, ` · ${account.resources.quotaDiagnostic}`)
+          : null,
+        account?.resources?.quotaUrl
+          ? h("span", null, " · ", h("a", {
+            href: account.resources.quotaUrl,
+            target: "_blank",
+            rel: "noreferrer noopener",
+          }, text(t, "quota.openUsage")))
+          : null));
   }));
 }
 
@@ -1212,7 +1472,7 @@ function NativeKeyCard({ entry, providerId, controller, busy, t }) {
     entry?.usage ? nativeQuotaView(entry, t) : null);
 }
 
-function NativeKeyPopup({ providerId, native, directory, directoryState, nativeController, remote, onClose, t }) {
+function NativeKeyPopup({ providerId, native, directory, modelDirectories, directoryState, nativeController, remote, onClose, t }) {
   const [tierBusy, setTierBusy] = useState(false);
   const [keyDraft, setKeyDraft] = useState("");
   const [labelDraft, setLabelDraft] = useState("");
@@ -1322,6 +1582,13 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
         remote,
         t,
       }),
+      h(ModelSelectionSection, {
+        providerId,
+        remote,
+        directory,
+        modelDirectories,
+        t,
+      }),
       h("div", { className: "dockyard-dsh-section" },
         h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.configuredKeys")), h("span", { className: "dockyard-dsh-section-value" }, `${configuredCount}`)),
         keys.length === 0
@@ -1366,7 +1633,7 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
       h("div", { className: "dockyard-dsh-toolbar" },
         h("button", {
           type: "button",
-          className: "dockyard-dsh-action dockyard-dsh-action-primary",
+          className: "dockyard-dsh-action",
           disabled: busy,
           onClick: () => controller.refreshAll(),
         }, controlState.action === "refresh" ? text(t, "status.refreshing") : text(t, "subscription.refreshAll"))),
@@ -1393,14 +1660,17 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
               onClick: () => onSelect(providerId),
               "aria-label": text(t, "subscription.configure", { provider: displayName }),
             },
-              h("span", { className: "dockyard-dsh-provider-row-copy" },
-                h("span", { className: "dockyard-dsh-provider-row-name" }, displayName),
-                h("span", { className: "dockyard-dsh-provider-row-meta" }, `${providerOverviewSummary(provider, t)}${modelCount ? ` · ${modelCount}` : ""}`)),
-              h("span", { className: "dockyard-dsh-provider-row-arrow", "aria-hidden": true }, "›"));
+              h("div", { className: "dockyard-dsh-provider-card-main" },
+                h("div", { className: "dockyard-dsh-provider-card-title-row" },
+                  h("span", { className: "dockyard-dsh-provider-row-name" }, displayName),
+                  h("span", { className: "dockyard-dsh-provider-row-arrow", "aria-hidden": true }, "›")),
+                h("div", { className: "dockyard-dsh-provider-row-meta" }, `${providerOverviewSummary(provider, t)}${modelCount ? ` · ${modelCount}` : ""}`)),
+              h("div", { className: "dockyard-dsh-provider-card-meta" },
+                h("span", { className: "dockyard-dsh-provider-card-badge" }, providerId)));
          })))));
 }
 
-function SubscriptionSettingsSection({ close, controller, remote, t }) {
+function SubscriptionSettingsSection({ close, controller, remote, modelDirectories, t }) {
   const controlState = useSnapshot(controller.store);
   const [selectedProviderId, setSelectedProviderId] = useState(null);
   const providers = controlState.snapshot?.providers ?? [];
@@ -1429,7 +1699,8 @@ function SubscriptionSettingsSection({ close, controller, remote, t }) {
       ? h(DockyardPopup, {
         providerId: selectedProviderId,
         provider,
-        directory: null,
+        directory: modelDirectories?.catalog ?? null,
+        modelDirectories,
         directoryState: null,
         controlState,
         controller,
@@ -1450,7 +1721,7 @@ function SubscriptionSettingsSection({ close, controller, remote, t }) {
       }));
 }
 
-function DockyardPopup({ providerId, provider, directory, directoryState, controlState, controller, remote, onOpenOverview, onClose, t }) {
+function DockyardPopup({ providerId, provider, directory, modelDirectories, directoryState, controlState, controller, remote, onOpenOverview, onClose, t }) {
   const [tierBusy, setTierBusy] = useState(false);
   const { current, group, model, efforts } = modelDetails(directoryState, providerId);
   const modelLabel = model?.name ?? current?.model ?? text(t, "title.noModel");
@@ -1544,6 +1815,13 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
         remote,
         t,
       }),
+      h(ModelSelectionSection, {
+        providerId,
+        remote,
+        directory,
+        modelDirectories,
+        t,
+      }),
       h("div", { className: "dockyard-dsh-section" },
         h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "subscription.connectedAccounts")), h("span", { className: "dockyard-dsh-section-value" }, `${accounts.length}`)),
         accounts.length === 0
@@ -1564,7 +1842,7 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
         h(CandidateList, { scan: controlState.scan, providerId, controller, busy, accounts, t })) : null));
 }
 
-function DockyardAccountControl({ directory, modelDirectory, controller, nativeController, remote, t }) {
+function DockyardAccountControl({ directory, modelDirectory, modelDirectories, controller, nativeController, remote, t }) {
   const directoryState = useSnapshot(directory);
   const controlState = useSnapshot(controller.store);
   const nativeState = useSnapshot(nativeController.store);
@@ -1702,38 +1980,56 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
 
   useEffect(() => {
     if (!open || typeof window === "undefined") return undefined;
+    let rafId = null;
     const updatePopupPosition = () => {
       const anchor = rootRef.current;
       if (!anchor) return;
       const rect = anchor.getBoundingClientRect();
       const margin = 14;
-      const gap = 9;
+      const gap = 8;
       const viewportWidth = window.innerWidth;
       const viewportHeight = window.innerHeight;
       const popupWidth = Math.min(480, Math.max(0, viewportWidth - margin * 2));
-      const left = Math.min(
-        Math.max(margin, rect.left),
-        Math.max(margin, viewportWidth - popupWidth - margin),
-      );
-      const availableAbove = Math.max(0, rect.top - gap - margin);
-      const availableBelow = Math.max(0, viewportHeight - rect.bottom - margin);
-      const openAbove = availableAbove >= 280 || availableAbove >= availableBelow;
 
-      anchor.style.setProperty("--dockyard-dsh-popup-left", `${left}px`);
-      if (openAbove) {
-        anchor.style.setProperty("--dockyard-dsh-popup-top", "auto");
-        anchor.style.setProperty("--dockyard-dsh-popup-bottom", `${Math.max(margin, viewportHeight - rect.top + gap)}px`);
-        anchor.style.setProperty("--dockyard-dsh-popup-max-height", `${Math.max(180, Math.min(560, availableAbove))}px`);
+      if (rect.width === 0 && rect.height === 0) {
+        rafId = requestAnimationFrame(updatePopupPosition);
+        return;
+      }
+
+      const isRightAligned = rect.right > viewportWidth / 2;
+      if (isRightAligned) {
+        const right = Math.max(margin, Math.min(viewportWidth - popupWidth - margin, viewportWidth - rect.right));
+        anchor.style.setProperty("--dockyard-dsh-popup-left", "auto");
+        anchor.style.setProperty("--dockyard-dsh-popup-right", `${right}px`);
       } else {
-        anchor.style.setProperty("--dockyard-dsh-popup-top", `${margin}px`);
+        const left = Math.max(margin, Math.min(rect.left, viewportWidth - popupWidth - margin));
+        anchor.style.setProperty("--dockyard-dsh-popup-left", `${left}px`);
+        anchor.style.setProperty("--dockyard-dsh-popup-right", "auto");
+      }
+
+      const availableAbove = Math.max(0, rect.top - gap - margin);
+      const availableBelow = Math.max(0, viewportHeight - rect.bottom - gap - margin);
+      const openAbove = availableBelow < 260 || (availableAbove > availableBelow && availableBelow < 380);
+
+      if (openAbove) {
+        const bottom = Math.max(margin, viewportHeight - rect.top + gap);
+        const maxHeight = Math.max(160, Math.min(560, availableAbove));
+        anchor.style.setProperty("--dockyard-dsh-popup-top", "auto");
+        anchor.style.setProperty("--dockyard-dsh-popup-bottom", `${bottom}px`);
+        anchor.style.setProperty("--dockyard-dsh-popup-max-height", `${maxHeight}px`);
+      } else {
+        const top = Math.max(margin, rect.bottom + gap);
+        const maxHeight = Math.max(160, Math.min(560, availableBelow));
+        anchor.style.setProperty("--dockyard-dsh-popup-top", `${top}px`);
         anchor.style.setProperty("--dockyard-dsh-popup-bottom", "auto");
-        anchor.style.setProperty("--dockyard-dsh-popup-max-height", `${Math.max(180, viewportHeight - margin * 2)}px`);
+        anchor.style.setProperty("--dockyard-dsh-popup-max-height", `${maxHeight}px`);
       }
     };
     updatePopupPosition();
     window.addEventListener("resize", updatePopupPosition);
     window.addEventListener("scroll", updatePopupPosition, true);
     return () => {
+      if (rafId) cancelAnimationFrame(rafId);
       window.removeEventListener("resize", updatePopupPosition);
       window.removeEventListener("scroll", updatePopupPosition, true);
     };
@@ -1848,6 +2144,7 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
       providerId,
       provider,
       directory: modelDirectory,
+      modelDirectories,
       directoryState,
       controlState,
       controller,
@@ -1859,6 +2156,7 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
       providerId,
       native,
       directory: modelDirectory,
+      modelDirectories,
       directoryState,
       nativeController,
       remote,
@@ -1896,6 +2194,7 @@ export async function apply(ctx) {
         return {
           directory: modelDirectory.store,
           modelDirectory,
+          modelDirectories: scope.modelDirectories,
           controller,
           nativeController,
           remote,
@@ -1908,7 +2207,7 @@ export async function apply(ctx) {
       order: 15,
       label: () => text(t, "settings.subscriptionSection"),
       locale: DOCKYARD_LOCALE_NS,
-      inject: () => ({ controller, remote }),
+      inject: () => ({ controller, remote, modelDirectories: scope.modelDirectories }),
     }, SubscriptionSettingsSection));
   });
   return async () => {

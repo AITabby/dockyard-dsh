@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -35,6 +36,38 @@ import {
 
 const PROVIDER_ID = "antigravity";
 const DEFAULT_CLI = "agy";
+
+export function resolveAgyCliPath(configured, { env = process.env, home = homedir() } = {}) {
+  const envPath = configured ?? env.DOCKYARD_ANTIGRAVITY_CLI;
+  if (envPath && envPath !== "agy" && envPath !== DEFAULT_CLI) {
+    return envPath;
+  }
+  const candidates = [
+    join(home, ".local", "bin", "agy"),
+    join(home, ".gemini", "antigravity", "bin", "agy"),
+    "/usr/local/bin/agy",
+    "/opt/homebrew/bin/agy",
+    "/usr/bin/agy",
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return envPath || DEFAULT_CLI;
+}
+
+function augmentPathWithUserBins(env = process.env, home = homedir()) {
+  const extraPaths = [
+    join(home, ".local", "bin"),
+    join(home, ".gemini", "antigravity", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+  ];
+  const currentPath = env?.PATH || "";
+  const parts = currentPath.split(":");
+  const toPrepend = extraPaths.filter((p) => existsSync(p) && !parts.includes(p));
+  if (toPrepend.length === 0) return currentPath;
+  return [...toPrepend, currentPath].filter(Boolean).join(":");
+}
 const DEFAULT_CATALOG_TTL_MS = 60_000;
 const DEFAULT_AUTH_TIMEOUT_MS = 10 * 60 * 1000;
 const CREDENTIAL_SLOT = Symbol("dockyard-antigravity-session");
@@ -306,7 +339,11 @@ function runCommand(command, args, {
     const childEnv = { ...env };
     if (includeAccountInfo) delete childEnv.AGY_CLI_HIDE_ACCOUNT_INFO;
     else childEnv.AGY_CLI_HIDE_ACCOUNT_INFO ??= "1";
-    const child = spawn(command, args, {
+    childEnv.PATH = augmentPathWithUserBins(childEnv, childEnv.HOME || homedir());
+    const resolvedCommand = (command === DEFAULT_CLI || command === "agy")
+      ? resolveAgyCliPath(command, { env: childEnv, home: childEnv.HOME || homedir() })
+      : command;
+    const child = spawn(resolvedCommand, args, {
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -370,8 +407,13 @@ function parseJsonOutput(output) {
 
 function runStreamingCommand(command, args, { env = process.env, timeoutMs = 300_000, signal } = {}) {
   return (async function* lines() {
-    const child = spawn(command, args, {
-      env: { ...env, AGY_CLI_HIDE_ACCOUNT_INFO: "1" },
+    const childEnv = { ...env, AGY_CLI_HIDE_ACCOUNT_INFO: "1" };
+    childEnv.PATH = augmentPathWithUserBins(childEnv, childEnv.HOME || homedir());
+    const resolvedCommand = (command === DEFAULT_CLI || command === "agy")
+      ? resolveAgyCliPath(command, { env: childEnv, home: childEnv.HOME || homedir() })
+      : command;
+    const child = spawn(resolvedCommand, args, {
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       ...(signal ? { signal } : {}),
@@ -623,6 +665,7 @@ export function createAntigravityCatalogLoader({
   commandRunner = runCommand,
   registryLoader = null,
 } = {}) {
+  const resolvedCliPath = resolveAgyCliPath(cliPath, { env, home });
   const cached = new Map();
   const pending = new Map();
   const pendingRefreshes = new Set();
@@ -657,7 +700,7 @@ export function createAntigravityCatalogLoader({
 
   const refresh = (scope) => {
     if (pending.has(scope)) return pending.get(scope);
-    const promise = Promise.resolve(commandRunner(cliPath, ["models"], {
+    const promise = Promise.resolve(commandRunner(resolvedCliPath, ["models"], {
       env,
       timeoutMs,
     })).then(async (result) => {
@@ -993,11 +1036,13 @@ function appendDelta(current, next) {
 export function createAntigravityCliExecutor({
   cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
   env = process.env,
+  home = homedir(),
   timeoutMs = 300_000,
   commandRunner = runCommand,
   catalogLoader = null,
   streamCommandRunner = runStreamingCommand,
 } = {}) {
+  const resolvedCliPath = resolveAgyCliPath(cliPath, { env, home });
   return async function executeAntigravity({ request = {} } = {}) {
     if (contentHasImageInCurrentTurn(request)) {
       throw unsupportedContentError(
@@ -1026,7 +1071,7 @@ export function createAntigravityCliExecutor({
       let text = "";
       let usage = null;
       const handledTools = new Set();
-      for await (const line of streamCommandRunner(cliPath, args, {
+      for await (const line of streamCommandRunner(resolvedCliPath, args, {
         env,
         timeoutMs,
         signal: request.signal,
@@ -1319,6 +1364,7 @@ function publicAntigravityAuthSession(session) {
 export function createAntigravityOAuthAuthorizer({
   cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
   environment = process.env,
+  home = homedir(),
   timeoutMs = DEFAULT_AUTH_TIMEOUT_MS,
   prompt = "Reply with OK",
   spawnImpl = spawn,
@@ -1327,7 +1373,8 @@ export function createAntigravityOAuthAuthorizer({
   ptyPythonPath = process.env.DOCKYARD_ANTIGRAVITY_PTY_PYTHON || "python3",
   instructions = "已打开 Google 官方验证页；选择账号并完成验证后，DSH 会自动接入。",
 } = {}) {
-  if (!cliPath) throw new Error("Antigravity OAuth authorizer requires an agy CLI path");
+  const resolvedCliPath = resolveAgyCliPath(cliPath, { env: environment, home });
+  if (!resolvedCliPath) throw new Error("Antigravity OAuth authorizer requires an agy CLI path");
   if (typeof spawnImpl !== "function") throw new Error("Antigravity OAuth authorizer requires a process spawner");
   if (typeof tokenReader !== "function") throw new Error("Antigravity OAuth authorizer requires a token reader");
 
@@ -1421,6 +1468,7 @@ export function createAntigravityOAuthAuthorizer({
       XDG_CONFIG_HOME: join(profileDir, ".config"),
       DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath,
     };
+    childEnv.PATH = augmentPathWithUserBins(childEnv, home);
     // Do not force AGY_CLI_HIDE_ACCOUNT_INFO here. In agy, the presence of
     // the variable is itself treated as enabled even when its value is "0";
     // that mode skips the browser OAuth bootstrap and only asks the user to
@@ -1455,9 +1503,9 @@ export function createAntigravityOAuthAuthorizer({
       // agy refuses to bootstrap OAuth when stdin is a plain pipe. macOS's
       // built-in `script` gives it a hidden pseudo-terminal while DSH still
       // owns the pipe, so the user only sees the browser verification page.
-      const command = usePty ? ptyPythonPath : cliPath;
+      const command = usePty ? ptyPythonPath : resolvedCliPath;
       const args = usePty
-        ? ["-u", "-c", ANTIGRAVITY_PTY_SCRIPT, cliPath, "-p", prompt, "--output-format", "json"]
+        ? ["-u", "-c", ANTIGRAVITY_PTY_SCRIPT, resolvedCliPath, "-p", prompt, "--output-format", "json"]
         : ["-p", prompt, "--output-format", "json"];
       const child = spawnImpl(command, args, {
         env: childEnv,
@@ -1541,6 +1589,8 @@ export class AntigravityOfficialSessionDriver {
   constructor({
     cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
     env = process.env,
+    home = homedir(),
+    cacheFilePath,
     timeoutMs = 30_000,
     commandRunner = runCommand,
     ptyPythonPath = process.env.DOCKYARD_ANTIGRAVITY_PTY_PYTHON || "python3",
@@ -1570,8 +1620,10 @@ export class AntigravityOfficialSessionDriver {
     // SECURITY.md: remote OAuth endpoints must be https (or loopback http)
     // even when they come from the environment.
     assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_ANTIGRAVITY_AUTHORIZATION_URL");
-    this.cliPath = cliPath;
+    const resolvedCli = resolveAgyCliPath(cliPath, { env, home });
+    this.cliPath = resolvedCli;
     this.env = env;
+    this.home = home;
     this.timeoutMs = timeoutMs;
     this.commandRunner = commandRunner;
     this.ptyPythonPath = ptyPythonPath;
@@ -1588,8 +1640,9 @@ export class AntigravityOfficialSessionDriver {
     this.tokenResolver = tokenResolver;
     this.identityFromOfficialSession = identityFromOfficialSession;
     this.cliOAuthAuthorizer = createAntigravityOAuthAuthorizer({
-      cliPath,
+      cliPath: resolvedCli,
       environment: env,
+      home,
       timeoutMs: authorizationTimeoutMs,
     });
     const browserOAuthConfigured = Boolean(clientId && clientSecret);
@@ -1666,8 +1719,10 @@ export class AntigravityOfficialSessionDriver {
       : null);
     this.oauthAuthorizer = oauthAuthorizer ?? this.browserAuthorizer ?? this.cliOAuthAuthorizer;
     this.catalogLoader = catalogLoader ?? createAntigravityCatalogLoader({
-      cliPath,
+      cliPath: resolvedCli,
       env,
+      home,
+      ...(cacheFilePath !== undefined ? { cacheFilePath } : {}),
       timeoutMs,
       commandRunner,
     });
@@ -1764,6 +1819,9 @@ export class AntigravityOfficialSessionDriver {
       ...(current.refreshToken ? { refresh: current.refreshToken } : {}),
       ...(current.expiresAt ? { expiresAt: current.expiresAt } : {}),
     };
+    const rotated = current.source === "antigravity_keychain"
+      && Boolean(account?.resources?.sessionFingerprint)
+      && sessionFingerprint(current) !== account.resources?.sessionFingerprint;
     if (!tokenNeedsRefresh(credential, now)) {
       // When agy's Keychain has already rotated the session, keep DSH's own
       // secure copy aligned even though no second CLI refresh is necessary.
@@ -1773,7 +1831,7 @@ export class AntigravityOfficialSessionDriver {
         && typeof context.secretStore?.write === "function") {
         await context.secretStore.write(credentialRef, credential);
       }
-      return { session: current, credential, rotated: false };
+      return { session: current, credential, rotated };
     }
     if (!current.refreshToken) {
       throw activeSessionError("Antigravity official session has expired; authorize again");

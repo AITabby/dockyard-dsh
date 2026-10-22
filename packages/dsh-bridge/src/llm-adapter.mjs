@@ -67,14 +67,27 @@ function providerCatalogModels(providerId, catalog) {
     })
     .map((model) => {
       const reasoning = normalizeDshReasoning(model.reasoning);
+      const contextWindow = Number.isInteger(model.contextWindow) && model.contextWindow > 0
+        ? model.contextWindow
+        : undefined;
+      // DSH reserves defaultMaxTokens from the context window (messageBudget = contextWindow - defaultMaxTokens).
+      // If defaultMaxTokens is too large, it starves the conversation budget and breaks compaction
+      // with TargetPressureConfigError. Bound defaultMaxTokens to at most 20% of contextWindow (or 16384).
+      let defaultMaxTokens = undefined;
+      if (Number.isInteger(model.maxTokens) && model.maxTokens > 0) {
+        const cap = contextWindow ? Math.max(1024, Math.min(16384, Math.floor(contextWindow * 0.2))) : 16384;
+        defaultMaxTokens = Math.min(model.maxTokens, cap);
+      } else if (contextWindow) {
+        defaultMaxTokens = Math.min(8192, Math.floor(contextWindow * 0.2));
+      }
       return {
         provider: providerId,
         id: model.id,
         name: typeof model.name === "string" && model.name.length > 0 ? model.name : model.id,
         description: modelDescription(model),
         ...(Array.isArray(model.inputModalities) ? { inputModalities: [...model.inputModalities] } : {}),
-        ...(Number.isInteger(model.contextWindow) ? { context: { contextWindow: model.contextWindow } } : {}),
-        ...(Number.isInteger(model.maxTokens) ? { defaultMaxTokens: model.maxTokens } : {}),
+        ...(contextWindow ? { context: { contextWindow } } : {}),
+        ...(defaultMaxTokens !== undefined ? { defaultMaxTokens } : {}),
         ...(reasoning ? { reasoning } : {}),
       };
     });
@@ -92,6 +105,7 @@ function manifestFor(runtime, providerId) {
  * Test doubles that do not expose a snapshot retain the old catalog behavior.
  */
 function providerHasConnectedAccount(runtime, providerId) {
+  if (providerId === "opencode") return true;
   if (typeof runtime.snapshot !== "function") return true;
   const snapshot = runtime.snapshot();
   if (!Array.isArray(snapshot?.providers)) return true;
@@ -123,32 +137,64 @@ function unsupportedContentError(message) {
   return error;
 }
 
+const CONTEXT_OVERFLOW_PATTERNS = [
+  /context[\s_-](?:length|window)[\s_-](?:exceed|overflow|limit)/i,
+  /maximum context length/i,
+  /max context window/i,
+  /too\s+(?:large|long)\s+for\s+(?:(?:this|the)\s+)?(?:model(?:'s)?\s+)?context/i,
+  /(?:input|prompt|request|messages?)\b.{0,40}(?:exceed|overflow|is\s+larger\s+than)\b.{0,40}\b(?:model(?:'s)?\s+)?context/i,
+];
+
+export function isContextOverflowError(errorOrMessage) {
+  if (!errorOrMessage) return false;
+  if (typeof errorOrMessage === "string") {
+    return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(errorOrMessage));
+  }
+  const code = String(errorOrMessage.code ?? errorOrMessage.upstreamCode ?? "");
+  if (/CONTEXT_WINDOW_EXCEEDED|CONTEXT_LENGTH_EXCEEDED/i.test(code)) return true;
+  const message = String(errorOrMessage.message ?? errorOrMessage.reason ?? "");
+  return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(message));
+}
+
 /**
- * dsh-llm-pi-ai currently leaves a Codex WebSocket close with code 1006 as
- * PI_AI_ERROR. That bypasses dsh-llm-retry, whose default policy retries
- * TRANSPORT failures at the durable agent-step boundary. Normalize only this
- * transport signature here; the bridge must not retry inside a live stream,
- * because doing so could duplicate already-emitted tool calls.
+ * Normalize provider failures (WebSocket closed 1006 -> TRANSPORT, context overflow -> CONTEXT_WINDOW_EXCEEDED).
+ * Context overflow mapping allows DSH's compaction service to intercept the error and perform
+ * automatic overflow compaction and turn retry.
  */
 function normalizeTransportFailure(chunk) {
   const failure = chunk?.type === "finish" && chunk.reason?.kind === "error"
     ? chunk.reason.failure
     : null;
-  if (!failure || failure.code === "TRANSPORT") return chunk;
-  if (!/\bWebSocket closed\s+1006\b/i.test(String(failure.message ?? ""))) return chunk;
-  return {
-    ...chunk,
-    reason: {
-      ...chunk.reason,
-      failure: {
-        ...failure,
-        code: "TRANSPORT",
+  if (!failure) return chunk;
+  if (failure.code !== "TRANSPORT" && /\bWebSocket closed\s+1006\b/i.test(String(failure.message ?? ""))) {
+    return {
+      ...chunk,
+      reason: {
+        ...chunk.reason,
+        failure: {
+          ...failure,
+          code: "TRANSPORT",
+        },
       },
-    },
-  };
+    };
+  }
+  if (failure.code !== "CONTEXT_WINDOW_EXCEEDED" && isContextOverflowError(failure)) {
+    return {
+      ...chunk,
+      reason: {
+        ...chunk.reason,
+        failure: {
+          ...failure,
+          code: "CONTEXT_WINDOW_EXCEEDED",
+        },
+      },
+    };
+  }
+  return chunk;
 }
 
 const RETRYABLE_THROWN_FAILURE_CODES = new Set([
+  "CONTEXT_WINDOW_EXCEEDED",
   "EMPTY_RESPONSE",
   "RATE_LIMIT",
   "SERVER",
@@ -169,6 +215,8 @@ function retryFinishFromThrownError(error) {
     code = "EMPTY_RESPONSE";
   } else if (code === "PI_AI_ERROR" && /\bWebSocket closed\s+1006\b/i.test(String(error.message ?? ""))) {
     code = "TRANSPORT";
+  } else if (isContextOverflowError(error)) {
+    code = "CONTEXT_WINDOW_EXCEEDED";
   }
   if (!RETRYABLE_THROWN_FAILURE_CODES.has(code)) return null;
   return {
@@ -184,6 +232,44 @@ function retryFinishFromThrownError(error) {
           : {}),
       },
     },
+  };
+}
+
+export function resolveFallbackModelMetadata(provider, model) {
+  const id = String(model ?? "").toLowerCase();
+  let contextWindow = 131072;
+  let maxTokens = 8192;
+  if (id.includes("gemini")) {
+    contextWindow = 1048576;
+    maxTokens = 16384;
+  } else if (id.includes("claude-sonnet-4") || id.includes("claude-4")) {
+    contextWindow = 1000000;
+    maxTokens = 16384;
+  } else if (id.includes("claude")) {
+    contextWindow = 200000;
+    maxTokens = 8192;
+  } else if (id.includes("grok-4")) {
+    contextWindow = 256000;
+    maxTokens = 8192;
+  } else if (id.includes("qwen")) {
+    contextWindow = 262144;
+    maxTokens = 8192;
+  } else if (id.includes("glm-5")) {
+    contextWindow = 204800;
+    maxTokens = 8192;
+  } else if (id.includes("deepseek-v4") || id.includes("deepseek-v3") || id.includes("deepseek-r1")) {
+    contextWindow = 200000;
+    maxTokens = 8192;
+  } else if (id.includes("gpt-") || id.includes("codex-") || provider === "openai-codex") {
+    contextWindow = 200000;
+    maxTokens = 8192;
+  }
+  return {
+    provider,
+    id: model,
+    name: model,
+    context: { contextWindow },
+    defaultMaxTokens: maxTokens,
   };
 }
 
@@ -237,16 +323,15 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
     });
   }
 
-  async function providerCatalog(provider, signal) {
-    // The catalog is provider-scoped shared state. Binding the single
-    // in-flight fetch to the FIRST caller's AbortSignal meant one cancelled
-    // request killed the catalog for everyone else while later callers'
-    // signals were silently ignored. Fetch without a caller signal instead;
-    // each caller races its own signal against the shared result.
+  async function providerCatalog(provider, signal, { force = false } = {}) {
+    if (!force) {
+      const cached = cachedProviderCatalog(provider);
+      if (cached) return cached;
+    }
     let promise = catalogPromises.get(provider);
     if (!promise) {
       promise = Promise.resolve()
-        .then(() => runtime.getCatalog(provider, {}))
+        .then(() => runtime.getCatalog(provider, { force }))
         .then((catalog) => {
           catalogCache.set(provider, { value: catalog, fetchedAt: Date.now() });
           return catalog;
@@ -279,13 +364,7 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
   }
 
   function fastResolveModel(provider, model) {
-    const isGemini = typeof model === "string" && model.toLowerCase().includes("gemini");
-    const fallback = {
-      provider,
-      id: model,
-      name: model,
-      ...(isGemini ? { context: { contextWindow: 1048576 }, defaultMaxTokens: 65536 } : {}),
-    };
+    const fallback = resolveFallbackModelMetadata(provider, model);
     const catalog = cachedProviderCatalog(provider);
     if (!catalog) {
       warmProviderCatalog(provider);
@@ -304,23 +383,39 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
       return undefined;
     },
 
+    imageRequestPricing(_provider, _model) {
+      return undefined;
+    },
+
+    imageRequestTarget(_provider, _model, image) {
+      return {
+        width: image?.width ?? 0,
+        height: image?.height ?? 0,
+        maxBytes: image?.bytes ?? 0,
+      };
+    },
+
     async listModels(provider, signal) {
       await ensureRuntimeReady();
       if (!providerHasConnectedAccount(runtime, provider)) return [];
       const catalog = await providerCatalog(provider, signal);
-      return providerCatalogModels(provider, catalog);
+      const allModels = providerCatalogModels(provider, catalog);
+      const enabled = runtime.getModelSelection?.(provider);
+      if (Array.isArray(enabled)) {
+        const set = new Set(enabled);
+        return allModels.filter((entry) => set.has(entry.id));
+      }
+      return allModels;
     },
 
     async resolveModel(provider, model, signal) {
       await ensureRuntimeReady();
-      const isGemini = typeof model === "string" && model.toLowerCase().includes("gemini");
-      const fallback = {
-        provider,
-        id: model,
-        name: model,
-        ...(isGemini ? { context: { contextWindow: 1048576 }, defaultMaxTokens: 65536 } : {}),
-      };
+      const fallback = resolveFallbackModelMetadata(provider, model);
       if (!providerHasConnectedAccount(runtime, provider)) return fallback;
+      const cached = cachedProviderCatalog(provider);
+      if (cached) {
+        return providerCatalogModels(provider, cached).find((entry) => entry.id === model) ?? fallback;
+      }
       const catalog = await providerCatalog(provider, signal);
       return providerCatalogModels(provider, catalog).find((entry) => entry.id === model) ?? fallback;
     },
@@ -364,7 +459,13 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
               ? { modelContext: { ...(model.context ?? {}), maxTokens: model.defaultMaxTokens } }
               : {}),
           }
-        : options;
+        : { ...options };
+      if (options.purpose === "compaction") {
+        // Strip heavy reasoning effort during compaction so summarization runs swiftly
+        // without timing out or spending minutes in chain-of-thought exploration.
+        delete request.reasoningEffort;
+        delete request.reasoning_effort;
+      }
       const attachments = typeof attachmentsResolver === "function"
         ? attachmentsResolver()
         : undefined;
@@ -386,7 +487,7 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
         // EMPTY_STREAM_OUTPUT marker reaches this boundary with no output
         // already committed. If another provider throws the same marker after
         // forwarding a chunk, rethrow it to avoid replaying tool side effects.
-        if (!emittedChunk) {
+        if (!emittedChunk || isContextOverflowError(error)) {
           const retryFinish = retryFinishFromThrownError(error);
           if (retryFinish) {
             yield retryFinish;
@@ -399,6 +500,16 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
 
     providers() {
       return [...owned];
+    },
+
+    invalidateCatalog(provider) {
+      if (provider) {
+        catalogCache.delete(provider);
+        catalogPromises.delete(provider);
+      } else {
+        catalogCache.clear();
+        catalogPromises.clear();
+      }
     },
   };
 }

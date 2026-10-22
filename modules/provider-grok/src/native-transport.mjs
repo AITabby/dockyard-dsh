@@ -117,7 +117,7 @@ export async function buildGrokRequest(request = {}, context = {}) {
   if (request.temperature !== undefined) body.temperature = request.temperature;
   const maxTokens = request.maxTokens ?? request.modelContext?.maxTokens;
   if (Number.isInteger(maxTokens) && maxTokens > 0) body.max_tokens = maxTokens;
-  if (request.reasoningEffort) body.reasoning_effort = request.reasoningEffort;
+  if (request.reasoningEffort && request.purpose !== "compaction") body.reasoning_effort = request.reasoningEffort;
   const tools = buildGrokTools(request.tools);
   if (tools) body.tools = tools;
   return body;

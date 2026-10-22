@@ -10,7 +10,12 @@ import { createBrowserOAuthAuthorizer } from "../packages/oauth/src/browser-oaut
 import { createCliOAuthAuthorizer } from "../packages/oauth/src/cli-oauth-authorizer.mjs";
 import { createCliStatusAuthorizer } from "../packages/oauth/src/cli-status-authorizer.mjs";
 import { createOfficialSessionAuthorizer } from "../packages/oauth/src/official-session-authorizer.mjs";
-import { createCodexDriver, createCodexPiAiExecutor } from "../modules/provider-codex/src/index.mjs";
+import {
+  createCodexCatalogLoader,
+  createCodexDriver,
+  createCodexPiAiExecutor,
+  parseCodexModelCatalog,
+} from "../modules/provider-codex/src/index.mjs";
 import {
   createAntigravityCatalogLoader,
   createAntigravityCliExecutor,
@@ -28,9 +33,11 @@ import {
   resolveAntigravityNativeInvocationModel,
 } from "../modules/provider-antigravity/src/index.mjs";
 import {
+  BUILTIN_GROK_MODELS,
   createGrokCatalogLoader,
   createGrokCliExecutor,
   createGrokDriver,
+  grokPlanFromTier,
   grokRequestPromptBlocks,
   parseGrokAuth,
   parseGrokCreditsConfig,
@@ -511,7 +518,7 @@ test("Antigravity driver uses official CLI data without requiring token storage"
     if (args[0] === "models") return { output: "Fetching available models...\nmodel-from-provider\tLive model\n", errorOutput: "" };
     throw new Error("unexpected command");
   };
-  const driver = createAntigravityDriver({ commandRunner, tokenResolver: () => null });
+  const driver = createAntigravityDriver({ commandRunner, tokenResolver: () => null, cacheFilePath: null });
   const secretStore = new MemorySecretStore();
   const discovered = await driver.discover({ now: new Date("2026-08-14T12:00:00.000Z") });
   assert.equal(discovered.candidates.length, 1);
@@ -630,7 +637,7 @@ test("Antigravity refreshAccount reuses the live quota response", async () => {
     }
     throw new Error(`unexpected command: ${command}`);
   };
-  const driver = createAntigravityDriver({ commandRunner, tokenResolver: () => null });
+  const driver = createAntigravityDriver({ commandRunner, tokenResolver: () => null, cacheFilePath: null });
   const discovered = await driver.discover({ now: new Date("2026-08-14T12:00:00.000Z") });
   const account = await driver.importAccount(discovered.candidates[0], { secretStore: new MemorySecretStore() });
   calls.length = 0;
@@ -975,6 +982,99 @@ test("provider model metadata exposes only returned reasoning tiers", () => {
       { id: "xhigh", name: "Xhigh" },
     ],
   });
+});
+
+test("Codex catalog loader parses live endpoint models and respects visibility and priority", async () => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-codex-catalog-"));
+  try {
+    const rawApiData = {
+      models: [
+        {
+          slug: "gpt-reserve",
+          display_name: "GPT-Reserve",
+          visibility: "hide",
+          priority: 4,
+          supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }],
+        },
+        {
+          slug: "gpt-6-luna",
+          display_name: "GPT-6-Luna",
+          visibility: "list",
+          priority: 5,
+          default_reasoning_level: "medium",
+          supported_reasoning_levels: [
+            { effort: "low", description: "Fast" },
+            { effort: "medium", description: "Balanced" },
+            { effort: "high", description: "Deep" },
+          ],
+          context_window: 272000,
+          input_modalities: ["text", "image"],
+        },
+        {
+          slug: "gpt-5.6-terra",
+          display_name: "GPT-5.6-Terra",
+          visibility: "list",
+          priority: 8,
+          default_reasoning_level: "medium",
+          supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }],
+          context_window: 272000,
+        },
+      ],
+    };
+
+    let fetchCalled = false;
+    const fetchImpl = async (url, options) => {
+      fetchCalled = true;
+      assert.ok(url.includes("client_version=0.163.0"));
+      assert.equal(options.headers.authorization, "Bearer test-access-token");
+      assert.equal(options.headers["chatgpt-account-id"], "test-account-id");
+      return {
+        ok: true,
+        json: async () => rawApiData,
+      };
+    };
+
+    const loader = createCodexCatalogLoader({
+      home,
+      fetchImpl,
+    });
+
+    const liveResult = await loader({
+      credential: { access: "test-access-token", accountId: "test-account-id" },
+    });
+
+    assert.equal(fetchCalled, true);
+    assert.equal(liveResult.source, "official_codex_models_api");
+    assert.equal(liveResult.models.length, 2);
+    assert.equal(liveResult.models[0].id, "gpt-6-luna");
+    assert.equal(liveResult.models[0].name, "GPT-6-Luna");
+    assert.equal(liveResult.models[0].contextWindow, 272000);
+    assert.equal(liveResult.models[0].reasoning.defaultEffort, "medium");
+    assert.deepEqual(liveResult.models[0].reasoning.efforts.map((e) => e.id), ["low", "medium", "high"]);
+    assert.equal(liveResult.models[1].id, "gpt-5.6-terra");
+
+    // Local cache fallback when fetch fails
+    const failingLoader = createCodexCatalogLoader({
+      home,
+      modelsCachePath: join(home, "models_cache.json"),
+      fetchImpl: async () => { throw new Error("Network down"); },
+    });
+
+    await writeFile(join(home, "models_cache.json"), JSON.stringify({
+      models: [
+        { slug: "cached-model", display_name: "Cached Model", visibility: "list", priority: 1 },
+      ],
+    }));
+
+    const cacheResult = await failingLoader({
+      credential: { access: "test-access-token", accountId: "test-account-id" },
+    });
+    assert.equal(cacheResult.source, "official_codex_models_cache");
+    assert.equal(cacheResult.models.length, 1);
+    assert.equal(cacheResult.models[0].id, "cached-model");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("Antigravity capacity metadata is enriched only from a live-compatible registry family", () => {
@@ -1416,6 +1516,171 @@ test("Grok catalog loader caches a local provider response", async () => {
   assert.deepEqual(first.models, [{ id: "grok-live", name: "grok-live" }]);
   assert.strictEqual(first, second);
   assert.equal(reads, 1);
+});
+
+test("Grok catalog loader provides built-in models with reasoning efforts when CLI and cache are missing", async () => {
+  const loader = createGrokCatalogLoader({
+    grokHome: "/provider/grok-empty",
+    readJson: async () => null,
+    commandRunner: async () => {
+      const err = new Error("spawn grok ENOENT");
+      err.code = "ENOENT";
+      throw err;
+    },
+  });
+  const result = await loader();
+  assert.equal(result.source, "official_grok_builtin");
+  assert.ok(result.models.length >= 4);
+  const grok3 = result.models.find((m) => m.id === "grok-3");
+  assert.ok(grok3);
+  assert.equal(grok3.name, "Grok 3");
+  assert.equal(grok3.reasoning?.defaultEffort, "medium");
+  assert.deepEqual(grok3.reasoning?.efforts.map((e) => e.id), ["low", "medium", "high"]);
+});
+
+test("Grok refreshAccount succeeds for browser OAuth account without requiring grok CLI", async () => {
+  const secretStore = new MemorySecretStore();
+  const credentialRef = "keychain://grok/browser-account";
+  await secretStore.write(credentialRef, {
+    access: "valid-browser-access",
+    refresh: "valid-browser-refresh",
+    accountId: "grok-browser-user",
+    email: "user@example.test",
+    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+  });
+
+  let commandRunnerCalled = false;
+  const driver = createGrokDriver({
+    cliPath: "grok-not-installed",
+    commandRunner: async () => {
+      commandRunnerCalled = true;
+      const err = new Error("spawn grok ENOENT");
+      err.code = "ENOENT";
+      throw err;
+    },
+  });
+
+  const refreshed = await driver.refreshAccount({
+    accountId: "grok-browser-user",
+    email: "user@example.test",
+    auth: { credentialRef },
+    resources: {
+      authSource: "official_grok_browser_oauth",
+      sessionSource: "browser",
+    },
+  }, { secretStore });
+
+  assert.equal(commandRunnerCalled, false);
+  assert.equal(refreshed.email, "user@example.test");
+  assert.equal(refreshed.refresh.refreshable, true);
+  assert.ok(refreshed.refresh.lastRefreshedAt);
+});
+
+test("Grok builtin catalog includes grok-4.7, grok-4.6, grok-4.5 with authentic reasoning efforts", () => {
+  const grok47 = BUILTIN_GROK_MODELS.find((m) => m.id === "grok-4.7");
+  assert.ok(grok47);
+  assert.equal(grok47.name, "Grok 4.7");
+  assert.equal(grok47.contextWindow, 256000);
+  assert.equal(grok47.reasoning?.defaultEffort, "high");
+  assert.deepEqual(grok47.reasoning?.efforts.map((e) => e.id), ["xhigh", "high", "medium", "low"]);
+
+  const grok46 = BUILTIN_GROK_MODELS.find((m) => m.id === "grok-4.6");
+  assert.ok(grok46);
+  assert.equal(grok46.name, "Grok 4.6");
+  assert.equal(grok46.reasoning?.defaultEffort, "high");
+
+  const grok45 = BUILTIN_GROK_MODELS.find((m) => m.id === "grok-4.5");
+  assert.ok(grok45);
+  assert.equal(grok45.name, "Grok 4.5");
+  assert.deepEqual(grok45.reasoning?.efforts.map((e) => e.id), ["high", "medium", "low"]);
+});
+
+test("Grok parseGrokModelCatalog supports data list from official proxy", () => {
+  const parsed = parseGrokModelCatalog("", {
+    data: [
+      {
+        id: "grok-4.7",
+        name: "Grok 4.7",
+        context_window: 256000,
+        reasoning_effort: "high",
+        reasoning_efforts: [
+          { id: "xhigh", value: "xhigh", label: "Extra High" },
+          { id: "high", value: "high", label: "High", default: true },
+        ],
+      },
+    ],
+  });
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].id, "grok-4.7");
+  assert.equal(parsed[0].name, "Grok 4.7");
+  assert.equal(parsed[0].reasoning?.defaultEffort, "high");
+  assert.deepEqual(parsed[0].reasoning?.efforts.map((e) => e.id), ["xhigh", "high"]);
+});
+
+test("Grok grokPlanFromTier maps tier numbers to subscription plan names", () => {
+  assert.equal(grokPlanFromTier(3), "Premium");
+  assert.equal(grokPlanFromTier(4), "Premium+");
+  assert.equal(grokPlanFromTier(2), "Basic");
+  assert.equal(grokPlanFromTier(1), "Free");
+  assert.equal(grokPlanFromTier("Enterprise"), "Enterprise");
+  assert.equal(grokPlanFromTier(null), null);
+});
+
+test("Grok refreshAccount resolves userinfo and tier 3 Premium plan for accounts with missing email or UUID displayName", async () => {
+  const secretStore = new MemorySecretStore();
+  const credentialRef = "keychain://grok/browser-uuid-account";
+  const userUuid = "37460f42-f0cb-45f3-ad14-faf1a4fb24a0";
+  const mockJwt = `header.${Buffer.from(JSON.stringify({ sub: userUuid, tier: 3 })).toString("base64url")}.sig`;
+  await secretStore.write(credentialRef, {
+    access: mockJwt,
+    refresh: "mock-refresh",
+    accountId: userUuid,
+    displayName: userUuid,
+    email: null,
+    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+  });
+
+  let userinfoCalled = false;
+  const driver = createGrokDriver({
+    cliPath: "grok-not-installed",
+    fetchImpl: async (url, init) => {
+      if (String(url).includes("/userinfo")) {
+        userinfoCalled = true;
+        assert.equal(init.headers.authorization, `Bearer ${mockJwt}`);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            sub: userUuid,
+            name: "Ryanxlll2",
+            email: "1957670520@qq.com",
+          }),
+        };
+      }
+      return { ok: false, status: 404 };
+    },
+  });
+
+  const refreshed = await driver.refreshAccount({
+    accountId: userUuid,
+    displayName: userUuid,
+    email: null,
+    auth: { credentialRef },
+    subscription: { plan: null },
+    resources: {
+      authSource: "official_grok_browser_oauth",
+      sessionSource: "browser",
+    },
+  }, { secretStore });
+
+  assert.equal(userinfoCalled, true);
+  assert.equal(refreshed.displayName, "Ryanxlll2");
+  assert.equal(refreshed.email, "1957670520@qq.com");
+  assert.equal(refreshed.subscription.plan, "Premium");
+
+  const stored = await secretStore.read(credentialRef);
+  assert.equal(stored.displayName, "Ryanxlll2");
+  assert.equal(stored.email, "1957670520@qq.com");
 });
 
 test("Claude subscription status rejects API keys and maps live registry metadata", async () => {

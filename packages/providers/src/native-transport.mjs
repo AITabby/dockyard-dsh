@@ -486,8 +486,8 @@ export function textFromContent(content) {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) return content.map((part) => textFromContent(part)).filter(Boolean).join("");
   if (!content || typeof content !== "object") return "";
-  if (content.type === "image") return "";
-  if (content.type === "tool-result") {
+  if (content.type === "image" || content.type === "reasoning" || content.type === "thinking") return "";
+  if (content.type === "tool-result" || content.type === "tool_result") {
     return textFromContent(content.content ?? content.output ?? content.result ?? content.text);
   }
   return content.text ?? content.value ?? content.content ?? content.delta ?? "";

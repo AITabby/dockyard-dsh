@@ -53,7 +53,9 @@ function markRemoteMethods() {
     "nativeKeyUnregister",
     "nativeKeySetPolicy",
     "getContextWindowOverride",
-    "setContextWindowOverride"
+    "setContextWindowOverride",
+    "getModelSelection",
+    "setModelSelection"
   ]) {
     let initializer;
     Remote(name2)(void 0, {
@@ -153,14 +155,20 @@ var init_dockyard_remote_host = __esm({
       async setContextWindowOverride(request = {}) {
         return this.dockyard.setContextWindowOverride(request, request.value);
       }
+      async getModelSelection(request = {}) {
+        return this.dockyard.getModelSelection(request.providerId);
+      }
+      async setModelSelection(request = {}) {
+        return this.dockyard.setModelSelection(request.providerId, request.enabledModelIds);
+      }
     };
     markRemoteMethods();
   }
 });
 
 // packages/dsh-plugin/src/index.mjs
-import { existsSync, readFileSync as readFileSync2 } from "node:fs";
-import { join as join12 } from "node:path";
+import { existsSync as existsSync3, readFileSync as readFileSync2 } from "node:fs";
+import { join as join13 } from "node:path";
 
 // packages/core/src/errors.mjs
 var DockyardError = class extends Error {
@@ -596,6 +604,37 @@ function finiteNumber(value) {
 }
 function stringValue(value) {
   return value === void 0 || value === null || value === "" ? null : String(value);
+}
+var EXTENDED_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
+function resolveReasoningFromModel(model) {
+  if (!model) return void 0;
+  if (model.reasoning === false) return void 0;
+  if (Array.isArray(model.reasoning?.efforts) && model.reasoning.efforts.length > 0) {
+    return model.reasoning;
+  }
+  if (model.thinkingLevelMap && typeof model.thinkingLevelMap === "object") {
+    const supported = EXTENDED_THINKING_LEVELS.filter((level) => {
+      const mapped = model.thinkingLevelMap[level];
+      if (mapped === null) return false;
+      if (level === "xhigh" || level === "max") return mapped !== void 0 && mapped !== null;
+      return true;
+    });
+    if (supported.length === 0) return void 0;
+    const efforts = supported.map((id) => ({
+      id,
+      name: id.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+    }));
+    const defaultEffort = supported.includes("medium") ? "medium" : supported.includes("high") ? "high" : supported[0];
+    return { efforts, defaultEffort };
+  }
+  if (model.reasoning === true) {
+    const supported = ["minimal", "low", "medium", "high"];
+    return {
+      efforts: supported.map((id) => ({ id, name: id.charAt(0).toUpperCase() + id.slice(1) })),
+      defaultEffort: "medium"
+    };
+  }
+  return void 0;
 }
 async function fetchJson(url, init = {}, { timeoutMs = 2e4, fetchImpl = fetch } = {}) {
   const controller = new AbortController();
@@ -1221,14 +1260,22 @@ function providerCatalogModels(providerId, catalog) {
     return true;
   }).map((model) => {
     const reasoning = normalizeDshReasoning(model.reasoning);
+    const contextWindow = Number.isInteger(model.contextWindow) && model.contextWindow > 0 ? model.contextWindow : void 0;
+    let defaultMaxTokens = void 0;
+    if (Number.isInteger(model.maxTokens) && model.maxTokens > 0) {
+      const cap = contextWindow ? Math.max(1024, Math.min(16384, Math.floor(contextWindow * 0.2))) : 16384;
+      defaultMaxTokens = Math.min(model.maxTokens, cap);
+    } else if (contextWindow) {
+      defaultMaxTokens = Math.min(8192, Math.floor(contextWindow * 0.2));
+    }
     return {
       provider: providerId,
       id: model.id,
       name: typeof model.name === "string" && model.name.length > 0 ? model.name : model.id,
       description: modelDescription(model),
       ...Array.isArray(model.inputModalities) ? { inputModalities: [...model.inputModalities] } : {},
-      ...Number.isInteger(model.contextWindow) ? { context: { contextWindow: model.contextWindow } } : {},
-      ...Number.isInteger(model.maxTokens) ? { defaultMaxTokens: model.maxTokens } : {},
+      ...contextWindow ? { context: { contextWindow } } : {},
+      ...defaultMaxTokens !== void 0 ? { defaultMaxTokens } : {},
       ...reasoning ? { reasoning } : {}
     };
   });
@@ -1237,6 +1284,7 @@ function manifestFor(runtime, providerId) {
   return runtime.listProviderManifests?.().find((manifest) => manifest.id === providerId) ?? null;
 }
 function providerHasConnectedAccount(runtime, providerId) {
+  if (providerId === "opencode") return true;
   if (typeof runtime.snapshot !== "function") return true;
   const snapshot = runtime.snapshot();
   if (!Array.isArray(snapshot?.providers)) return true;
@@ -1262,22 +1310,54 @@ function unsupportedContentError(message) {
   error.code = "UNSUPPORTED_CONTENT";
   return error;
 }
+var CONTEXT_OVERFLOW_PATTERNS = [
+  /context[\s_-](?:length|window)[\s_-](?:exceed|overflow|limit)/i,
+  /maximum context length/i,
+  /max context window/i,
+  /too\s+(?:large|long)\s+for\s+(?:(?:this|the)\s+)?(?:model(?:'s)?\s+)?context/i,
+  /(?:input|prompt|request|messages?)\b.{0,40}(?:exceed|overflow|is\s+larger\s+than)\b.{0,40}\b(?:model(?:'s)?\s+)?context/i
+];
+function isContextOverflowError(errorOrMessage) {
+  if (!errorOrMessage) return false;
+  if (typeof errorOrMessage === "string") {
+    return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(errorOrMessage));
+  }
+  const code = String(errorOrMessage.code ?? errorOrMessage.upstreamCode ?? "");
+  if (/CONTEXT_WINDOW_EXCEEDED|CONTEXT_LENGTH_EXCEEDED/i.test(code)) return true;
+  const message = String(errorOrMessage.message ?? errorOrMessage.reason ?? "");
+  return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(message));
+}
 function normalizeTransportFailure(chunk) {
   const failure = chunk?.type === "finish" && chunk.reason?.kind === "error" ? chunk.reason.failure : null;
-  if (!failure || failure.code === "TRANSPORT") return chunk;
-  if (!/\bWebSocket closed\s+1006\b/i.test(String(failure.message ?? ""))) return chunk;
-  return {
-    ...chunk,
-    reason: {
-      ...chunk.reason,
-      failure: {
-        ...failure,
-        code: "TRANSPORT"
+  if (!failure) return chunk;
+  if (failure.code !== "TRANSPORT" && /\bWebSocket closed\s+1006\b/i.test(String(failure.message ?? ""))) {
+    return {
+      ...chunk,
+      reason: {
+        ...chunk.reason,
+        failure: {
+          ...failure,
+          code: "TRANSPORT"
+        }
       }
-    }
-  };
+    };
+  }
+  if (failure.code !== "CONTEXT_WINDOW_EXCEEDED" && isContextOverflowError(failure)) {
+    return {
+      ...chunk,
+      reason: {
+        ...chunk.reason,
+        failure: {
+          ...failure,
+          code: "CONTEXT_WINDOW_EXCEEDED"
+        }
+      }
+    };
+  }
+  return chunk;
 }
 var RETRYABLE_THROWN_FAILURE_CODES = /* @__PURE__ */ new Set([
+  "CONTEXT_WINDOW_EXCEEDED",
   "EMPTY_RESPONSE",
   "RATE_LIMIT",
   "SERVER",
@@ -1290,6 +1370,8 @@ function retryFinishFromThrownError(error) {
     code = "EMPTY_RESPONSE";
   } else if (code === "PI_AI_ERROR" && /\bWebSocket closed\s+1006\b/i.test(String(error.message ?? ""))) {
     code = "TRANSPORT";
+  } else if (isContextOverflowError(error)) {
+    code = "CONTEXT_WINDOW_EXCEEDED";
   }
   if (!RETRYABLE_THROWN_FAILURE_CODES.has(code)) return null;
   return {
@@ -1303,6 +1385,43 @@ function retryFinishFromThrownError(error) {
         ...typeof error.providerRetryAfterMs === "number" && Number.isFinite(error.providerRetryAfterMs) ? { providerRetryAfterMs: error.providerRetryAfterMs } : {}
       }
     }
+  };
+}
+function resolveFallbackModelMetadata(provider, model) {
+  const id = String(model ?? "").toLowerCase();
+  let contextWindow = 131072;
+  let maxTokens = 8192;
+  if (id.includes("gemini")) {
+    contextWindow = 1048576;
+    maxTokens = 16384;
+  } else if (id.includes("claude-sonnet-4") || id.includes("claude-4")) {
+    contextWindow = 1e6;
+    maxTokens = 16384;
+  } else if (id.includes("claude")) {
+    contextWindow = 2e5;
+    maxTokens = 8192;
+  } else if (id.includes("grok-4")) {
+    contextWindow = 256e3;
+    maxTokens = 8192;
+  } else if (id.includes("qwen")) {
+    contextWindow = 262144;
+    maxTokens = 8192;
+  } else if (id.includes("glm-5")) {
+    contextWindow = 204800;
+    maxTokens = 8192;
+  } else if (id.includes("deepseek-v4") || id.includes("deepseek-v3") || id.includes("deepseek-r1")) {
+    contextWindow = 2e5;
+    maxTokens = 8192;
+  } else if (id.includes("gpt-") || id.includes("codex-") || provider === "openai-codex") {
+    contextWindow = 2e5;
+    maxTokens = 8192;
+  }
+  return {
+    provider,
+    id: model,
+    name: model,
+    context: { contextWindow },
+    defaultMaxTokens: maxTokens
   };
 }
 function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = null } = {}) {
@@ -1339,10 +1458,14 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
       );
     });
   }
-  async function providerCatalog(provider, signal) {
+  async function providerCatalog(provider, signal, { force = false } = {}) {
+    if (!force) {
+      const cached = cachedProviderCatalog(provider);
+      if (cached) return cached;
+    }
     let promise = catalogPromises.get(provider);
     if (!promise) {
-      promise = Promise.resolve().then(() => runtime.getCatalog(provider, {})).then((catalog) => {
+      promise = Promise.resolve().then(() => runtime.getCatalog(provider, { force })).then((catalog) => {
         catalogCache.set(provider, { value: catalog, fetchedAt: Date.now() });
         return catalog;
       }).finally(() => {
@@ -1368,13 +1491,7 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
     }
   }
   function fastResolveModel(provider, model) {
-    const isGemini = typeof model === "string" && model.toLowerCase().includes("gemini");
-    const fallback = {
-      provider,
-      id: model,
-      name: model,
-      ...isGemini ? { context: { contextWindow: 1048576 }, defaultMaxTokens: 65536 } : {}
-    };
+    const fallback = resolveFallbackModelMetadata(provider, model);
     const catalog = cachedProviderCatalog(provider);
     if (!catalog) {
       warmProviderCatalog(provider);
@@ -1390,22 +1507,36 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
     providerRetryPolicy() {
       return void 0;
     },
+    imageRequestPricing(_provider, _model) {
+      return void 0;
+    },
+    imageRequestTarget(_provider, _model, image) {
+      return {
+        width: image?.width ?? 0,
+        height: image?.height ?? 0,
+        maxBytes: image?.bytes ?? 0
+      };
+    },
     async listModels(provider, signal) {
       await ensureRuntimeReady();
       if (!providerHasConnectedAccount(runtime, provider)) return [];
       const catalog = await providerCatalog(provider, signal);
-      return providerCatalogModels(provider, catalog);
+      const allModels = providerCatalogModels(provider, catalog);
+      const enabled = runtime.getModelSelection?.(provider);
+      if (Array.isArray(enabled)) {
+        const set = new Set(enabled);
+        return allModels.filter((entry) => set.has(entry.id));
+      }
+      return allModels;
     },
     async resolveModel(provider, model, signal) {
       await ensureRuntimeReady();
-      const isGemini = typeof model === "string" && model.toLowerCase().includes("gemini");
-      const fallback = {
-        provider,
-        id: model,
-        name: model,
-        ...isGemini ? { context: { contextWindow: 1048576 }, defaultMaxTokens: 65536 } : {}
-      };
+      const fallback = resolveFallbackModelMetadata(provider, model);
       if (!providerHasConnectedAccount(runtime, provider)) return fallback;
+      const cached = cachedProviderCatalog(provider);
+      if (cached) {
+        return providerCatalogModels(provider, cached).find((entry) => entry.id === model) ?? fallback;
+      }
       const catalog = await providerCatalog(provider, signal);
       return providerCatalogModels(provider, catalog).find((entry) => entry.id === model) ?? fallback;
     },
@@ -1437,7 +1568,11 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
         ...options,
         ...model.context ? { modelContext: { ...model.context } } : {},
         ...model.defaultMaxTokens !== void 0 ? { modelContext: { ...model.context ?? {}, maxTokens: model.defaultMaxTokens } } : {}
-      } : options;
+      } : { ...options };
+      if (options.purpose === "compaction") {
+        delete request.reasoningEffort;
+        delete request.reasoning_effort;
+      }
       const attachments = typeof attachmentsResolver === "function" ? attachmentsResolver() : void 0;
       const stream = await runtime.stream(options.provider, request, {
         accountId: options.accountId,
@@ -1453,7 +1588,7 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
           yield normalizeTransportFailure(chunk);
         }
       } catch (error) {
-        if (!emittedChunk) {
+        if (!emittedChunk || isContextOverflowError(error)) {
           const retryFinish = retryFinishFromThrownError(error);
           if (retryFinish) {
             yield retryFinish;
@@ -1465,6 +1600,15 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
     },
     providers() {
       return [...owned];
+    },
+    invalidateCatalog(provider) {
+      if (provider) {
+        catalogCache.delete(provider);
+        catalogPromises.delete(provider);
+      } else {
+        catalogCache.clear();
+        catalogPromises.clear();
+      }
     }
   };
 }
@@ -2032,10 +2176,96 @@ var ContextWindowOverrideStore = class {
   }
 };
 
+// packages/runtime/src/model-selection-store.mjs
+function normalizedMap2(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value;
+}
+function cleanState2(value) {
+  const providers = {};
+  for (const [providerId, record] of Object.entries(normalizedMap2(value?.providers))) {
+    const id = typeof providerId === "string" ? providerId.trim() : null;
+    if (!id) continue;
+    if (Array.isArray(record?.enabled)) {
+      const enabled = record.enabled.map((m) => typeof m === "string" ? m.trim() : "").filter(Boolean);
+      providers[id] = { enabled, updatedAt: record.updatedAt ?? (/* @__PURE__ */ new Date()).toISOString() };
+    }
+  }
+  return { schema: 1, providers };
+}
+var ModelSelectionStore = class {
+  stateStore;
+  state = { schema: 1, providers: {} };
+  readyPromise;
+  constructor({ stateStore } = {}) {
+    if (!stateStore || typeof stateStore.load !== "function" || typeof stateStore.update !== "function" && typeof stateStore.save !== "function") {
+      throw new TypeError("ModelSelectionStore requires a state store");
+    }
+    this.stateStore = stateStore;
+    this.readyPromise = this.load();
+  }
+  async load() {
+    const snapshot = await this.stateStore.load();
+    const raw = snapshot?.modelSelection;
+    if (raw && typeof raw === "object") {
+      this.state = cleanState2(raw);
+    }
+    return this.state;
+  }
+  async ready() {
+    return this.readyPromise;
+  }
+  get(providerId) {
+    if (!providerId) return null;
+    const record = this.state.providers?.[providerId];
+    if (!record || !Array.isArray(record.enabled)) return null;
+    return [...record.enabled];
+  }
+  async set(providerId, enabledModelIds) {
+    if (!providerId) throw new Error("providerId is required");
+    await this.ready();
+    const cleaned = Array.isArray(enabledModelIds) ? enabledModelIds.map((m) => typeof m === "string" ? m.trim() : "").filter(Boolean) : null;
+    if (!this.state.providers) this.state.providers = {};
+    if (cleaned === null) {
+      delete this.state.providers[providerId];
+    } else {
+      this.state.providers[providerId] = {
+        enabled: cleaned,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    const saved = structuredClone(this.state);
+    if (typeof this.stateStore.update === "function") {
+      await this.stateStore.update((latest) => ({
+        ...latest,
+        modelSelection: saved
+      }));
+    } else {
+      const latest = await this.stateStore.load();
+      await this.stateStore.save({
+        ...latest,
+        modelSelection: saved
+      });
+    }
+    return cleaned;
+  }
+  isModelEnabled(providerId, modelId) {
+    const enabled = this.get(providerId);
+    if (enabled === null) return true;
+    return enabled.includes(modelId);
+  }
+  filterModels(providerId, models = []) {
+    const enabled = this.get(providerId);
+    if (enabled === null) return models;
+    const set = new Set(enabled);
+    return models.filter((model) => set.has(model.id));
+  }
+};
+
 // modules/provider-codex/src/driver.mjs
 import { createHash as createHash3 } from "node:crypto";
 import { homedir as homedir2 } from "node:os";
-import { join as join4 } from "node:path";
+import { dirname as dirname3, join as join4 } from "node:path";
 
 // packages/oauth/src/browser-oauth-authorizer.mjs
 import { createHash as createHash2, randomBytes, randomUUID as randomUUID2 } from "node:crypto";
@@ -2721,6 +2951,9 @@ var DEFAULT_AUTHORIZATION_URL = `${AUTH_BASE_URL}/oauth/authorize`;
 var DEFAULT_TOKEN_URL = `${AUTH_BASE_URL}/oauth/token`;
 var DEFAULT_REDIRECT_URI = "http://localhost:1455/auth/callback";
 var DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
+var DEFAULT_CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models";
+var DEFAULT_CODEX_CLIENT_VERSION = "0.163.0";
+var DEFAULT_CODEX_CATALOG_TTL_MS = 6e4;
 var DEFAULT_USAGE_URLS = Object.freeze([
   "https://chatgpt.com/backend-api/wham/usage",
   "https://chatgpt.com/backend-api/codex/usage"
@@ -2730,9 +2963,15 @@ var CREDENTIAL_SLOT = Symbol("dockyard-codex-credential");
 function hash(value) {
   return createHash3("sha256").update(String(value)).digest("hex");
 }
-function codexAuthPath({ env = process.env, home = homedir2(), authFilePath } = {}) {
+function codexHomePath({ env = process.env, home = homedir2(), codexHome, authFilePath } = {}) {
+  if (codexHome) return codexHome;
+  if (authFilePath) return dirname3(authFilePath);
+  return env.CODEX_HOME || join4(home, ".codex");
+}
+function codexAuthPath({ env = process.env, home = homedir2(), authFilePath, codexHome } = {}) {
   if (authFilePath) return authFilePath;
-  return join4(env.CODEX_HOME || join4(home, ".codex"), "auth.json");
+  const baseHome = codexHomePath({ env, home, codexHome, authFilePath });
+  return join4(baseHome, "auth.json");
 }
 function profileClaims(payload) {
   return payload?.["https://api.openai.com/profile"] ?? payload?.profile ?? {};
@@ -2850,13 +3089,174 @@ function isExpiring(tokens, now, leewaySeconds) {
   if (!tokens.expiresAt) return true;
   return new Date(tokens.expiresAt).getTime() <= now.getTime() + leewaySeconds * 1e3;
 }
+function reasoningFromThinkingLevelMap(thinkingLevelMap) {
+  if (!thinkingLevelMap || typeof thinkingLevelMap !== "object") return void 0;
+  const efforts = Object.entries(thinkingLevelMap).filter(([id, providerValue]) => id !== "off" && typeof providerValue === "string" && providerValue.length > 0).map(([id, providerValue]) => ({
+    id,
+    name: id.replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase()),
+    ...providerValue === id ? {} : { description: `provider value: ${providerValue}` }
+  }));
+  return efforts.length > 0 ? { efforts } : void 0;
+}
+function parseCodexReasoning(model) {
+  if (Array.isArray(model?.supported_reasoning_levels) && model.supported_reasoning_levels.length > 0) {
+    const efforts = model.supported_reasoning_levels.map((lvl) => {
+      const id = typeof lvl === "string" ? lvl : lvl.effort;
+      const name2 = id.replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+      const description = typeof lvl?.description === "string" ? lvl.description : void 0;
+      return {
+        id,
+        name: name2,
+        ...description ? { description } : {}
+      };
+    });
+    const defaultEffort = typeof model.default_reasoning_level === "string" ? model.default_reasoning_level : void 0;
+    return {
+      efforts,
+      ...defaultEffort && efforts.some((effort) => effort.id === defaultEffort) ? { defaultEffort } : {}
+    };
+  }
+  return reasoningFromThinkingLevelMap(model?.thinkingLevelMap);
+}
+function codexModelToDshCatalog(model) {
+  const id = model.slug ?? model.id;
+  const name2 = model.display_name ?? model.name ?? id;
+  const reasoning = parseCodexReasoning(model);
+  const input = Array.isArray(model.input_modalities) ? model.input_modalities : Array.isArray(model.input) ? model.input : void 0;
+  const contextWindow = Number.isInteger(model.context_window) ? model.context_window : Number.isInteger(model.contextWindow) ? model.contextWindow : void 0;
+  const maxTokens = Number.isInteger(model.max_output_tokens) ? Math.min(model.max_output_tokens, 16384) : Number.isInteger(model.maxTokens) ? Math.min(model.maxTokens, 16384) : 8192;
+  return {
+    id,
+    name: name2,
+    ...input ? { inputModalities: [...input] } : {},
+    ...contextWindow ? { contextWindow } : {},
+    ...maxTokens ? { maxTokens } : {},
+    ...reasoning ? { reasoning } : {}
+  };
+}
+function parseCodexModelCatalog(raw) {
+  const modelsList = Array.isArray(raw?.models) ? raw.models : Array.isArray(raw) ? raw : [];
+  if (modelsList.length === 0) return [];
+  const visible = modelsList.filter((m) => m?.visibility !== "hide");
+  const candidates = visible.length > 0 ? visible : modelsList;
+  const sorted = [...candidates].sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
+  return sorted.map(codexModelToDshCatalog);
+}
+function createCodexCatalogLoader({
+  env = process.env,
+  home = homedir2(),
+  codexHome,
+  authFilePath,
+  modelsCachePath,
+  modelsUrl = env.DOCKYARD_CODEX_MODELS_URL || DEFAULT_CODEX_MODELS_URL,
+  clientVersion = env.DOCKYARD_CODEX_CLIENT_VERSION || DEFAULT_CODEX_CLIENT_VERSION,
+  fetchImpl = fetch,
+  cacheTtlMs = Number(process.env.DOCKYARD_CODEX_CATALOG_TTL_MS) || DEFAULT_CODEX_CATALOG_TTL_MS,
+  fallbackLoader = null
+} = {}) {
+  const resolvedHome = codexHomePath({ env, home, codexHome, authFilePath });
+  const resolvedAuthPath = codexAuthPath({ env, home, authFilePath, codexHome: resolvedHome });
+  const resolvedCachePath = modelsCachePath || join4(resolvedHome, "models_cache.json");
+  let cached = null;
+  let cachedAt = 0;
+  let pending = null;
+  return async function loadCatalog({ force = false, credential = null, signal = null } = {}) {
+    const now = Date.now();
+    if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
+    if (pending) return pending;
+    pending = (async () => {
+      let discoveredModels = [];
+      let source = "official_codex_models_api";
+      let liveToken = credential?.access ?? null;
+      let liveAccountId = credential?.accountId ?? null;
+      if (!liveToken) {
+        try {
+          const authRaw = await readJsonFile(resolvedAuthPath);
+          if (authRaw) {
+            const tokens = normalizeTokens(authRaw);
+            if (tokens?.access) {
+              liveToken = tokens.access;
+              liveAccountId = tokens.accountId;
+            }
+          }
+        } catch {
+        }
+      }
+      if (liveToken) {
+        try {
+          const url = new URL(modelsUrl);
+          url.searchParams.set("client_version", clientVersion);
+          const headers = {
+            authorization: `Bearer ${liveToken}`,
+            "user-agent": `Codex/${clientVersion}`,
+            accept: "application/json"
+          };
+          if (liveAccountId) {
+            headers["chatgpt-account-id"] = liveAccountId;
+          }
+          const res = await fetchImpl(url.href, {
+            method: "GET",
+            headers,
+            ...signal ? { signal } : {}
+          });
+          if (res.ok) {
+            const data = await res.json().catch(() => ({}));
+            discoveredModels = parseCodexModelCatalog(data);
+            if (discoveredModels.length > 0) {
+              source = "official_codex_models_api";
+            }
+          }
+        } catch {
+        }
+      }
+      if (discoveredModels.length === 0) {
+        try {
+          const cacheData = await readJsonFile(resolvedCachePath);
+          if (cacheData) {
+            discoveredModels = parseCodexModelCatalog(cacheData);
+            if (discoveredModels.length > 0) {
+              source = "official_codex_models_cache";
+            }
+          }
+        } catch {
+        }
+      }
+      if (discoveredModels.length === 0 && typeof fallbackLoader === "function") {
+        try {
+          const fallback = await fallbackLoader();
+          if (Array.isArray(fallback?.models) && fallback.models.length > 0) {
+            discoveredModels = fallback.models;
+            source = fallback.source ?? "dsh_pi_ai_provider_catalog";
+          }
+        } catch {
+        }
+      }
+      const result = {
+        models: discoveredModels,
+        source
+      };
+      if (discoveredModels.length > 0) {
+        cached = result;
+        cachedAt = Date.now();
+      }
+      return result;
+    })().finally(() => {
+      pending = null;
+    });
+    return pending;
+  };
+}
 var CodexOAuthDriver = class {
   constructor({
     authFilePath,
+    codexHome,
+    modelsCachePath,
     env = process.env,
     home = homedir2(),
     tokenUrl = env.DOCKYARD_CODEX_TOKEN_URL || DEFAULT_TOKEN_URL,
     usageUrls = env.DOCKYARD_CODEX_USAGE_URL ? [env.DOCKYARD_CODEX_USAGE_URL] : [...DEFAULT_USAGE_URLS],
+    modelsUrl = env.DOCKYARD_CODEX_MODELS_URL || DEFAULT_CODEX_MODELS_URL,
+    clientVersion = env.DOCKYARD_CODEX_CLIENT_VERSION || DEFAULT_CODEX_CLIENT_VERSION,
     clientId = env.DOCKYARD_CODEX_CLIENT_ID || DEFAULT_CLIENT_ID,
     fetchImpl = fetch,
     requestExecutor = null,
@@ -2870,14 +3270,23 @@ var CodexOAuthDriver = class {
     browserCallbackPort = Number(env.DOCKYARD_CODEX_CALLBACK_PORT || 1455),
     cliPath = env.DOCKYARD_CODEX_CLI || "codex"
   } = {}) {
-    this.authFilePath = codexAuthPath({ env, home, authFilePath });
+    this.authFilePath = codexAuthPath({ env, home, authFilePath, codexHome });
     this.tokenUrl = assertSecureEndpointUrl(tokenUrl, "DOCKYARD_CODEX_TOKEN_URL");
     assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_CODEX_AUTHORIZATION_URL");
     this.usageUrls = usageUrls.map((url) => assertSecureEndpointUrl(url, "DOCKYARD_CODEX_USAGE_URL"));
     this.clientId = clientId;
     this.fetchImpl = fetchImpl;
     this.requestExecutor = requestExecutor;
-    this.catalogLoader = catalogLoader;
+    this.catalogLoader = catalogLoader ?? createCodexCatalogLoader({
+      env,
+      home,
+      codexHome,
+      authFilePath: this.authFilePath,
+      modelsCachePath,
+      modelsUrl,
+      clientVersion,
+      fetchImpl
+    });
     this.refreshLeewaySeconds = refreshLeewaySeconds;
     this.cliAuthorizer = createCliOAuthAuthorizer({
       providerId: PROVIDER_ID,
@@ -3162,10 +3571,21 @@ var CodexOAuthDriver = class {
     wrapped.authForbidden = !sawAuthExpired && sawAuthForbidden;
     throw wrapped;
   }
-  async getCatalog() {
+  async getCatalog(context = {}) {
+    let credential = null;
+    if (context.accounts?.[0] && context.secretStore) {
+      try {
+        credential = await this.#liveCredential(context.accounts[0], context);
+      } catch {
+      }
+    }
     if (this.catalogLoader) {
       try {
-        const catalog = await this.catalogLoader();
+        const catalog = await this.catalogLoader({
+          force: Boolean(context.force),
+          credential,
+          accounts: context.accounts
+        });
         if (Array.isArray(catalog?.models) && catalog.models.length > 0) return catalog;
       } catch {
       }
@@ -3198,12 +3618,16 @@ function createCodexPiAiExecutor({
     const modelId = String(request.model);
     const requestedEffort = typeof request.reasoningEffort === "string" ? request.reasoningEffort : void 0;
     const catalogModel2 = typeof modelResolver === "function" ? modelResolver(modelId) : null;
-    const contextWindow = catalogModel2?.contextWindow;
-    const maxTokens = catalogModel2?.maxTokens;
-    if (!Number.isInteger(contextWindow) || contextWindow <= 0 || !Number.isInteger(maxTokens) || maxTokens <= 0) {
-      throw new Error(`Codex live model catalog did not return context/output capacities for "${modelId}"`);
-    }
-    const thinkingLevelMap = catalogModel2?.thinkingLevelMap;
+    const contextWindow = Number.isInteger(catalogModel2?.contextWindow) && catalogModel2.contextWindow > 0 ? catalogModel2.contextWindow : 272e3;
+    const maxTokens = Number.isInteger(catalogModel2?.maxTokens) && catalogModel2.maxTokens > 0 ? Math.min(catalogModel2.maxTokens, 16384) : 16384;
+    const thinkingLevelMap = catalogModel2?.thinkingLevelMap ?? {
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: "max",
+      ultra: "ultra"
+    };
     const model = {
       id: modelId,
       name: typeof catalogModel2?.name === "string" && catalogModel2.name.length > 0 ? catalogModel2.name : modelId,
@@ -3212,7 +3636,7 @@ function createCodexPiAiExecutor({
       baseUrl: DEFAULT_CODEX_BASE_URL,
       reasoning: typeof catalogModel2?.reasoning === "boolean" ? catalogModel2.reasoning : requestedEffort !== void 0,
       ...thinkingLevelMap ? { thinkingLevelMap: { ...thinkingLevelMap } } : {},
-      input: Array.isArray(catalogModel2?.input) && catalogModel2.input.length > 0 ? [...catalogModel2.input] : ["text"],
+      input: Array.isArray(catalogModel2?.input) && catalogModel2.input.length > 0 ? [...catalogModel2.input] : Array.isArray(catalogModel2?.inputModalities) && catalogModel2.inputModalities.length > 0 ? [...catalogModel2.inputModalities] : ["text", "image"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow,
       maxTokens
@@ -3237,6 +3661,7 @@ function createCodexPiAiExecutor({
       provider: PROVIDER_ID,
       displayName: "OpenAI Codex",
       piProvider: provider,
+      modelErrors: /* @__PURE__ */ new Map(),
       configuredMaxTokens: /* @__PURE__ */ new Map(),
       streamIdleTimeoutMs: 3e5
     };
@@ -3294,9 +3719,10 @@ function createCodexModule({ driver = {} } = {}) {
 // modules/provider-antigravity/src/driver.mjs
 import { spawn as spawn4 } from "node:child_process";
 import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir as mkdir3, mkdtemp as mkdtemp2, readFile as readFile4, rename as rename2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir4, tmpdir as tmpdir2 } from "node:os";
-import { dirname as dirname3, join as join6 } from "node:path";
+import { dirname as dirname4, join as join6 } from "node:path";
 
 // packages/providers/src/cli-agent-transport.mjs
 import { spawn as spawn3 } from "node:child_process";
@@ -3864,8 +4290,8 @@ function textFromContent(content) {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) return content.map((part) => textFromContent(part)).filter(Boolean).join("");
   if (!content || typeof content !== "object") return "";
-  if (content.type === "image") return "";
-  if (content.type === "tool-result") {
+  if (content.type === "image" || content.type === "reasoning" || content.type === "thinking") return "";
+  if (content.type === "tool-result" || content.type === "tool_result") {
     return textFromContent(content.content ?? content.output ?? content.result ?? content.text);
   }
   return content.text ?? content.value ?? content.content ?? content.delta ?? "";
@@ -4521,7 +4947,7 @@ function resolveAntigravityThinkingConfig(request = {}) {
   const effort = String(
     request.reasoningEffort ?? request.reasoning_effort ?? (typeof request.thinking === "string" ? request.thinking : null) ?? ""
   ).toLowerCase().trim();
-  if (effort === "none" || effort === "off" || request.thinking === false) {
+  if (request.purpose === "compaction" || effort === "none" || effort === "off" || request.thinking === false) {
     return {
       includeThoughts: false,
       thinkingBudget: 0
@@ -5004,6 +5430,36 @@ var antigravityNativeTransportConstants = Object.freeze({
 // modules/provider-antigravity/src/driver.mjs
 var PROVIDER_ID3 = "antigravity";
 var DEFAULT_CLI = "agy";
+function resolveAgyCliPath(configured, { env = process.env, home = homedir4() } = {}) {
+  const envPath = configured ?? env.DOCKYARD_ANTIGRAVITY_CLI;
+  if (envPath && envPath !== "agy" && envPath !== DEFAULT_CLI) {
+    return envPath;
+  }
+  const candidates = [
+    join6(home, ".local", "bin", "agy"),
+    join6(home, ".gemini", "antigravity", "bin", "agy"),
+    "/usr/local/bin/agy",
+    "/opt/homebrew/bin/agy",
+    "/usr/bin/agy"
+  ];
+  for (const candidate2 of candidates) {
+    if (existsSync(candidate2)) return candidate2;
+  }
+  return envPath || DEFAULT_CLI;
+}
+function augmentPathWithUserBins(env = process.env, home = homedir4()) {
+  const extraPaths = [
+    join6(home, ".local", "bin"),
+    join6(home, ".gemini", "antigravity", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin"
+  ];
+  const currentPath = env?.PATH || "";
+  const parts = currentPath.split(":");
+  const toPrepend = extraPaths.filter((p) => existsSync(p) && !parts.includes(p));
+  if (toPrepend.length === 0) return currentPath;
+  return [...toPrepend, currentPath].filter(Boolean).join(":");
+}
 var DEFAULT_CATALOG_TTL_MS = 6e4;
 var DEFAULT_AUTH_TIMEOUT_MS = 10 * 60 * 1e3;
 var CREDENTIAL_SLOT2 = Symbol("dockyard-antigravity-session");
@@ -5206,7 +5662,9 @@ function runCommand(command, args, {
     const childEnv = { ...env };
     if (includeAccountInfo) delete childEnv.AGY_CLI_HIDE_ACCOUNT_INFO;
     else childEnv.AGY_CLI_HIDE_ACCOUNT_INFO ??= "1";
-    const child = spawn4(command, args, {
+    childEnv.PATH = augmentPathWithUserBins(childEnv, childEnv.HOME || homedir4());
+    const resolvedCommand = command === DEFAULT_CLI || command === "agy" ? resolveAgyCliPath(command, { env: childEnv, home: childEnv.HOME || homedir4() }) : command;
+    const child = spawn4(resolvedCommand, args, {
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -5355,7 +5813,7 @@ async function readAntigravityCatalogCache(filePath) {
 }
 async function writeAntigravityCatalogCache(filePath, cache) {
   if (!filePath) return;
-  await mkdir3(dirname3(filePath), { recursive: true, mode: 448 });
+  await mkdir3(dirname4(filePath), { recursive: true, mode: 448 });
   const entries = Object.entries(cache.entries ?? {}).slice(-8);
   const tempPath = `${filePath}.${randomUUID4()}.tmp`;
   try {
@@ -5403,6 +5861,7 @@ function createAntigravityCatalogLoader({
   commandRunner = runCommand,
   registryLoader = null
 } = {}) {
+  const resolvedCliPath = resolveAgyCliPath(cliPath, { env, home });
   const cached = /* @__PURE__ */ new Map();
   const pending = /* @__PURE__ */ new Map();
   const pendingRefreshes = /* @__PURE__ */ new Set();
@@ -5435,7 +5894,7 @@ function createAntigravityCatalogLoader({
   };
   const refresh = (scope) => {
     if (pending.has(scope)) return pending.get(scope);
-    const promise = Promise.resolve(commandRunner(cliPath, ["models"], {
+    const promise = Promise.resolve(commandRunner(resolvedCliPath, ["models"], {
       env,
       timeoutMs
     })).then(async (result) => {
@@ -5706,6 +6165,7 @@ function publicAntigravityAuthSession(session) {
 function createAntigravityOAuthAuthorizer({
   cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
   environment = process.env,
+  home = homedir4(),
   timeoutMs = DEFAULT_AUTH_TIMEOUT_MS,
   prompt = "Reply with OK",
   spawnImpl = spawn4,
@@ -5714,7 +6174,8 @@ function createAntigravityOAuthAuthorizer({
   ptyPythonPath = process.env.DOCKYARD_ANTIGRAVITY_PTY_PYTHON || "python3",
   instructions = "\u5DF2\u6253\u5F00 Google \u5B98\u65B9\u9A8C\u8BC1\u9875\uFF1B\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u9A8C\u8BC1\u540E\uFF0CDSH \u4F1A\u81EA\u52A8\u63A5\u5165\u3002"
 } = {}) {
-  if (!cliPath) throw new Error("Antigravity OAuth authorizer requires an agy CLI path");
+  const resolvedCliPath = resolveAgyCliPath(cliPath, { env: environment, home });
+  if (!resolvedCliPath) throw new Error("Antigravity OAuth authorizer requires an agy CLI path");
   if (typeof spawnImpl !== "function") throw new Error("Antigravity OAuth authorizer requires a process spawner");
   if (typeof tokenReader !== "function") throw new Error("Antigravity OAuth authorizer requires a token reader");
   const sessions = /* @__PURE__ */ new Map();
@@ -5796,6 +6257,7 @@ function createAntigravityOAuthAuthorizer({
       XDG_CONFIG_HOME: join6(profileDir, ".config"),
       DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath
     };
+    childEnv.PATH = augmentPathWithUserBins(childEnv, home);
     delete childEnv.AGY_CLI_HIDE_ACCOUNT_INFO;
     const session = {
       sessionId: `${PROVIDER_ID3}:${randomUUID4()}`,
@@ -5822,8 +6284,8 @@ function createAntigravityOAuthAuthorizer({
     };
     sessions.set(session.sessionId, session);
     try {
-      const command = usePty ? ptyPythonPath : cliPath;
-      const args = usePty ? ["-u", "-c", ANTIGRAVITY_PTY_SCRIPT, cliPath, "-p", prompt, "--output-format", "json"] : ["-p", prompt, "--output-format", "json"];
+      const command = usePty ? ptyPythonPath : resolvedCliPath;
+      const args = usePty ? ["-u", "-c", ANTIGRAVITY_PTY_SCRIPT, resolvedCliPath, "-p", prompt, "--output-format", "json"] : ["-p", prompt, "--output-format", "json"];
       const child = spawnImpl(command, args, {
         env: childEnv,
         stdio: ["pipe", "pipe", "pipe"],
@@ -5902,6 +6364,8 @@ var AntigravityOfficialSessionDriver = class {
   constructor({
     cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
     env = process.env,
+    home = homedir4(),
+    cacheFilePath,
     timeoutMs = 3e4,
     commandRunner = runCommand,
     ptyPythonPath = process.env.DOCKYARD_ANTIGRAVITY_PTY_PYTHON || "python3",
@@ -5929,8 +6393,10 @@ var AntigravityOfficialSessionDriver = class {
     authorizationTimeoutMs = DEFAULT_AUTH_TIMEOUT_MS
   } = {}) {
     assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_ANTIGRAVITY_AUTHORIZATION_URL");
-    this.cliPath = cliPath;
+    const resolvedCli = resolveAgyCliPath(cliPath, { env, home });
+    this.cliPath = resolvedCli;
     this.env = env;
+    this.home = home;
     this.timeoutMs = timeoutMs;
     this.commandRunner = commandRunner;
     this.ptyPythonPath = ptyPythonPath;
@@ -5945,8 +6411,9 @@ var AntigravityOfficialSessionDriver = class {
     this.tokenResolver = tokenResolver;
     this.identityFromOfficialSession = identityFromOfficialSession;
     this.cliOAuthAuthorizer = createAntigravityOAuthAuthorizer({
-      cliPath,
+      cliPath: resolvedCli,
       environment: env,
+      home,
       timeoutMs: authorizationTimeoutMs
     });
     const browserOAuthConfigured = Boolean(clientId && clientSecret);
@@ -6020,8 +6487,10 @@ var AntigravityOfficialSessionDriver = class {
     }) : null);
     this.oauthAuthorizer = oauthAuthorizer ?? this.browserAuthorizer ?? this.cliOAuthAuthorizer;
     this.catalogLoader = catalogLoader ?? createAntigravityCatalogLoader({
-      cliPath,
+      cliPath: resolvedCli,
       env,
+      home,
+      ...cacheFilePath !== void 0 ? { cacheFilePath } : {},
       timeoutMs,
       commandRunner
     });
@@ -6107,12 +6576,13 @@ var AntigravityOfficialSessionDriver = class {
       ...current.refreshToken ? { refresh: current.refreshToken } : {},
       ...current.expiresAt ? { expiresAt: current.expiresAt } : {}
     };
+    const rotated = current.source === "antigravity_keychain" && Boolean(account?.resources?.sessionFingerprint) && sessionFingerprint(current) !== account.resources?.sessionFingerprint;
     if (!tokenNeedsRefresh(credential, now)) {
       const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
       if (current.source === "antigravity_keychain" && credentialRef && typeof context.secretStore?.write === "function") {
         await context.secretStore.write(credentialRef, credential);
       }
-      return { session: current, credential, rotated: false };
+      return { session: current, credential, rotated };
     }
     if (!current.refreshToken) {
       throw activeSessionError("Antigravity official session has expired; authorize again");
@@ -6121,7 +6591,7 @@ var AntigravityOfficialSessionDriver = class {
     const officialHome = this.env.HOME || homedir4();
     const childEnv = agyRefreshEnvironment(this.env, officialTokenPath);
     try {
-      await mkdir3(dirname3(officialTokenPath), { recursive: true, mode: 448 });
+      await mkdir3(dirname4(officialTokenPath), { recursive: true, mode: 448 });
       const refreshCommand = this.usePtyForSessionRefresh ? this.ptyPythonPath : this.cliPath;
       const refreshArgs = this.usePtyForSessionRefresh ? ["-u", "-c", ANTIGRAVITY_PTY_SCRIPT, this.cliPath, "models"] : ["models"];
       await this.commandRunner(refreshCommand, refreshArgs, {
@@ -6148,7 +6618,7 @@ var AntigravityOfficialSessionDriver = class {
       if (nextCredential.access === credential.access && !expiryAdvanced) {
         throw new Error("agy did not advance the Antigravity OAuth token expiry");
       }
-      await mkdir3(dirname3(officialTokenPath), { recursive: true, mode: 448 });
+      await mkdir3(dirname4(officialTokenPath), { recursive: true, mode: 448 });
       const persistedPath = `${officialTokenPath}.${randomUUID4()}.tmp`;
       try {
         await writeFile2(persistedPath, JSON.stringify({
@@ -6186,7 +6656,7 @@ var AntigravityOfficialSessionDriver = class {
     const childEnv = agyRefreshEnvironment(this.env, tokenPath);
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
     try {
-      await mkdir3(dirname3(tokenPath), { recursive: true, mode: 448 });
+      await mkdir3(dirname4(tokenPath), { recursive: true, mode: 448 });
       if (!readAntigravityTokenFile({ env: childEnv, home: officialHome })?.token) {
         await writeFile2(tokenPath, JSON.stringify({
           auth_method: "consumer",
@@ -6645,6 +7115,8 @@ import { join as join7 } from "node:path";
 var PROVIDER_ID4 = "grok";
 var DEFAULT_AUTHORIZATION_URL2 = "https://auth.x.ai/oauth2/authorize";
 var DEFAULT_TOKEN_URL2 = "https://auth.x.ai/oauth2/token";
+var DEFAULT_USERINFO_URL = "https://auth.x.ai/oauth2/userinfo";
+var DEFAULT_GROK_MODELS_URL = "https://cli-chat-proxy.grok.com/v1/models";
 var DEFAULT_CLIENT_ID2 = "b1a00492-073a-47ea-816f-4c329264a828";
 var DEFAULT_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write workspaces:read workspaces:write";
 var DEFAULT_GROK_HOME = join7(homedir5(), ".grok");
@@ -6652,7 +7124,7 @@ var DEFAULT_CATALOG_TTL_MS2 = 6e4;
 var DEFAULT_GROK_USAGE_URL = "https://grok.com/?_s=usage";
 var DEFAULT_GROK_CREDITS_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 var DEFAULT_GROK_TOKEN_HEADER = "xai-grok-cli";
-var DEFAULT_GROK_CLIENT_VERSION = "0.2.112";
+var DEFAULT_GROK_CLIENT_VERSION = "1.0.13";
 var CREDENTIAL_SLOT3 = Symbol("dockyard-grok-credential");
 function hash3(value) {
   return createHash5("sha256").update(String(value)).digest("hex");
@@ -6681,11 +7153,21 @@ function authRecords(raw) {
   }
   return Object.entries(raw).filter(([, value]) => value && typeof value === "object").map(([scopeKey, value]) => ({ scopeKey, value }));
 }
+function grokPlanFromTier(tier) {
+  if (typeof tier === "string" && tier.length > 0) return tier;
+  if (tier === 3) return "Premium";
+  if (tier === 4) return "Premium+";
+  if (tier === 2) return "Basic";
+  if (tier === 1) return "Free";
+  if (tier === 5) return "Enterprise";
+  return null;
+}
 function parseGrokAuth(raw) {
   return authRecords(raw).map(({ scopeKey, value }) => {
     const access2 = firstString2(value.key, value.access_token, value.accessToken);
     if (!access2) return null;
     const accessPayload = decodeJwtPayload(access2) ?? {};
+    const idPayload = decodeJwtPayload(value.id_token ?? value.idToken) ?? {};
     const expiresAt = grokTokenExpiresAt(value, accessPayload);
     const accountId = firstString2(
       value.user_id,
@@ -6696,16 +7178,36 @@ function parseGrokAuth(raw) {
       value.teamId,
       accessPayload.sub,
       accessPayload.user_id,
-      accessPayload.userId
+      accessPayload.userId,
+      idPayload.sub
     ) ?? `${scopeKey}:${hash3(access2).slice(0, 20)}`;
-    const email = firstString2(value.email, value.user_email, value.userEmail, accessPayload.email);
+    const email = firstString2(value.email, value.user_email, value.userEmail, idPayload.email, accessPayload.email);
+    const displayName = firstString2(
+      value.first_name,
+      value.firstName,
+      value.name,
+      idPayload.preferred_username,
+      idPayload.name,
+      idPayload.nickname,
+      accessPayload.name,
+      email,
+      accountId
+    );
+    const plan = firstString2(
+      value.subscription_level,
+      value.subscriptionLevel,
+      value.subscription_tier,
+      value.subscriptionTier,
+      grokPlanFromTier(accessPayload.tier),
+      grokPlanFromTier(idPayload.tier)
+    );
     return {
       access: access2,
       refresh: firstString2(value.refresh_token, value.refreshToken),
       accountId,
       email,
-      displayName: firstString2(value.first_name, value.firstName, value.name, accessPayload.name, email, accountId),
-      plan: firstString2(value.subscription_level, value.subscriptionLevel),
+      displayName,
+      plan,
       expiresAt,
       createdAt: firstString2(value.create_time, value.createdAt),
       scopes: Array.isArray(value.scopes) ? value.scopes.map(String) : typeof value.scope === "string" ? value.scope.split(/\s+/).filter(Boolean) : [],
@@ -6787,8 +7289,10 @@ function summarizeGrokCandidate(candidate2) {
   };
 }
 function cacheEntries(cache) {
-  if (!cache?.models || typeof cache.models !== "object") return [];
-  return Array.isArray(cache.models) ? cache.models.map((value) => [value?.id, value]).filter(([id]) => id) : Object.entries(cache.models);
+  if (!cache || typeof cache !== "object") return [];
+  const entries = cache.models ?? cache.data;
+  if (!entries || typeof entries !== "object") return [];
+  return Array.isArray(entries) ? entries.map((value) => [value?.id, value]).filter(([id]) => id) : Object.entries(entries);
 }
 function normalizeReasoning(info) {
   const raw = Array.isArray(info?.reasoning_efforts) ? info.reasoning_efforts : [];
@@ -6823,7 +7327,7 @@ function parseGrokModelCatalog(output = "", cache = null) {
     const contextWindow = finiteNumber(info.context_window ?? info.contextWindow);
     const maxTokens = finiteNumber(info.max_completion_tokens ?? info.maxTokens);
     if (Number.isInteger(contextWindow)) model.contextWindow = contextWindow;
-    if (Number.isInteger(maxTokens)) model.maxTokens = maxTokens;
+    if (Number.isInteger(maxTokens)) model.maxTokens = Math.min(maxTokens, 16384);
     if (Array.isArray(info.input) && info.input.length > 0) model.inputModalities = [...info.input];
     return model;
   });
@@ -6897,6 +7401,125 @@ function parseGrokCreditsConfig(body, { now = /* @__PURE__ */ new Date() } = {})
     }
   };
 }
+var DEFAULT_GROK_REASONING_EFFORTS = Object.freeze([
+  { id: "low", name: "Low", description: "\u5FEB\u901F\u601D\u8003\uFF0C\u4FDD\u7559\u57FA\u7840\u63A8\u7406" },
+  { id: "medium", name: "Medium", description: "\u6807\u51C6\u601D\u8003\uFF0C\u5E73\u8861\u63A8\u7406\u6DF1\u5EA6\u4E0E\u54CD\u5E94\u901F\u5EA6" },
+  { id: "high", name: "High", description: "\u6DF1\u5EA6\u601D\u8003\uFF0C\u9002\u5408\u590D\u6742\u903B\u8F91\u4E0E\u591A\u6B65\u9AA4\u5206\u6790" }
+]);
+var BUILTIN_GROK_MODELS = Object.freeze([
+  {
+    id: "grok-4.7",
+    name: "Grok 4.7",
+    contextWindow: 256e3,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [
+        { id: "xhigh", name: "Extra High", description: "Maximum reasoning for the hardest tasks." },
+        { id: "high", name: "High", description: "Thorough reasoning and quality. Recommended.", default: true },
+        { id: "medium", name: "Medium", description: "Strong quality with a faster turnaround." },
+        { id: "low", name: "Low", description: "Fastest responses. Best for simple tasks." }
+      ],
+      defaultEffort: "high"
+    },
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "grok-4.7-build-fast",
+    name: "Grok 4.7 Fast",
+    contextWindow: 256e3,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [
+        { id: "xhigh", name: "Extra High", description: "Maximum reasoning for the hardest tasks." },
+        { id: "high", name: "High", description: "Thorough reasoning and quality. Recommended.", default: true },
+        { id: "medium", name: "Medium", description: "Strong quality with a faster turnaround." },
+        { id: "low", name: "Low", description: "Fastest responses. Best for simple tasks." }
+      ],
+      defaultEffort: "high"
+    },
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "grok-4.6",
+    name: "Grok 4.6",
+    contextWindow: 256e3,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [
+        { id: "xhigh", name: "Extra High", description: "Highest effort and reasoning level" },
+        { id: "high", name: "High", description: "Higher implementation quality with extensive reasoning", default: true },
+        { id: "medium", name: "Medium", description: "Balanced effort with standard implementation and testing" },
+        { id: "low", name: "Low", description: "Quick, fast implementations" }
+      ],
+      defaultEffort: "high"
+    },
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "grok-4.5",
+    name: "Grok 4.5",
+    contextWindow: 256e3,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [
+        { id: "high", name: "High", description: "Highest implementation quality with extensive reasoning", default: true },
+        { id: "medium", name: "Medium", description: "Balanced effort with standard implementation and testing" },
+        { id: "low", name: "Low", description: "Quick, fast implementations" }
+      ],
+      defaultEffort: "high"
+    },
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "grok-build-0.1",
+    name: "Grok Build 0.1",
+    contextWindow: 131072,
+    maxTokens: 16384,
+    reasoning: {
+      efforts: [
+        { id: "high", name: "High", description: "Deep thinking mode", default: true }
+      ],
+      defaultEffort: "high"
+    },
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "grok-3",
+    name: "Grok 3",
+    contextWindow: 131072,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [...DEFAULT_GROK_REASONING_EFFORTS],
+      defaultEffort: "medium"
+    },
+    inputModalities: ["text"]
+  },
+  {
+    id: "grok-3-mini",
+    name: "Grok 3 Mini",
+    contextWindow: 131072,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [...DEFAULT_GROK_REASONING_EFFORTS],
+      defaultEffort: "medium"
+    },
+    inputModalities: ["text"]
+  },
+  {
+    id: "grok-2",
+    name: "Grok 2",
+    contextWindow: 131072,
+    maxTokens: 8192,
+    inputModalities: ["text"]
+  },
+  {
+    id: "grok-2-mini",
+    name: "Grok 2 Mini",
+    contextWindow: 131072,
+    maxTokens: 8192,
+    inputModalities: ["text"]
+  }
+]);
 function createGrokCatalogLoader({
   env = process.env,
   home = homedir5(),
@@ -6905,49 +7528,119 @@ function createGrokCatalogLoader({
   commandRunner = null,
   timeoutMs = 3e4,
   readJson: readJson3 = readJsonFile,
-  cacheTtlMs = Number(process.env.DOCKYARD_GROK_CATALOG_TTL_MS) || DEFAULT_CATALOG_TTL_MS2
+  cacheTtlMs = Number(process.env.DOCKYARD_GROK_CATALOG_TTL_MS) || DEFAULT_CATALOG_TTL_MS2,
+  registryLoader = null,
+  fetchImpl = fetch,
+  modelsUrl = env.DOCKYARD_GROK_MODELS_URL || DEFAULT_GROK_MODELS_URL,
+  tokenHeader = env.DOCKYARD_GROK_TOKEN_HEADER || DEFAULT_GROK_TOKEN_HEADER,
+  clientVersion = env.DOCKYARD_GROK_CLIENT_VERSION || DEFAULT_GROK_CLIENT_VERSION
 } = {}) {
   const resolvedHome = grokHomePath({ env, home, grokHome });
   let cached = null;
   let cachedAt = 0;
   let pending = null;
-  return async function loadCatalog({ force = false } = {}) {
+  return async function loadCatalog({ force = false, credential = null } = {}) {
     const now = Date.now();
     if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
     if (pending) return pending;
     pending = (async () => {
       const cache = await readJson3(join7(resolvedHome, "models_cache.json"));
-      let value;
-      if (typeof commandRunner === "function") {
+      let discoveredModels = [];
+      let source = "official_grok_cli";
+      let cliError = null;
+      if (credential?.access) {
+        try {
+          const res = await fetchImpl(modelsUrl, {
+            method: "GET",
+            headers: {
+              authorization: `Bearer ${credential.access}`,
+              "x-xai-token-auth": tokenHeader,
+              "x-userid": credential.accountId,
+              "x-grok-client-version": clientVersion,
+              accept: "application/json"
+            }
+          });
+          if (res.ok) {
+            const json = await res.json().catch(() => ({}));
+            discoveredModels = parseGrokModelCatalog("", json);
+            if (discoveredModels.length > 0) {
+              source = "official_grok_models_api";
+            }
+          }
+        } catch (error) {
+          cliError = error;
+        }
+      }
+      if (discoveredModels.length === 0 && typeof commandRunner === "function") {
         try {
           const result = await commandRunner(cliPath, ["models"], {
             env,
             timeoutMs,
             providerId: PROVIDER_ID4
           });
-          const models = parseGrokModelCatalog(result.output, cache);
-          value = {
-            models,
-            source: "official_grok_cli",
-            ...models.length ? {} : { diagnostics: ["Grok \u5B98\u65B9 CLI \u6CA1\u6709\u8FD4\u56DE\u53EF\u7528\u6A21\u578B"] }
-          };
+          discoveredModels = parseGrokModelCatalog(result.output, cache);
         } catch (error) {
-          value = {
-            models: parseGrokModelCatalog("", cache),
-            source: cache ? "official_grok_local_cache" : "official_grok_cli",
-            diagnostics: [`Grok \u5B98\u65B9\u6A21\u578B\u76EE\u5F55\u8BFB\u53D6\u5931\u8D25\uFF1A${error.message}`]
-          };
+          cliError = error;
+          discoveredModels = parseGrokModelCatalog("", cache);
+          source = cache ? "official_grok_local_cache" : "official_grok_cli";
         }
-      } else {
-        value = {
-          models: parseGrokModelCatalog("", cache),
-          source: "official_grok_local_cache",
-          ...cache ? {} : { diagnostics: [`\u672A\u627E\u5230 Grok \u5B9E\u65F6\u6A21\u578B\u7F13\u5B58\uFF1A${join7(resolvedHome, "models_cache.json")}`] }
-        };
+      } else if (discoveredModels.length === 0) {
+        discoveredModels = parseGrokModelCatalog("", cache);
+        source = "official_grok_local_cache";
       }
-      cached = value;
+      if (discoveredModels.length > 0) {
+        let finalModels = discoveredModels;
+        if (source === "official_grok_models_api") {
+          const modelsMap2 = /* @__PURE__ */ new Map();
+          for (const m of discoveredModels) modelsMap2.set(m.id, { ...m });
+          for (const m of BUILTIN_GROK_MODELS) {
+            if (!modelsMap2.has(m.id)) modelsMap2.set(m.id, { ...m });
+          }
+          finalModels = [...modelsMap2.values()];
+        }
+        cached = {
+          models: finalModels,
+          source,
+          ...cliError ? { diagnostics: [`Grok \u5B98\u65B9\u6A21\u578B\u76EE\u5F55\u63D0\u793A\uFF1A${cliError.message}`] } : {}
+        };
+        cachedAt = Date.now();
+        return cached;
+      }
+      const modelsMap = /* @__PURE__ */ new Map();
+      for (const m of BUILTIN_GROK_MODELS) {
+        modelsMap.set(m.id, { ...m });
+      }
+      if (typeof registryLoader === "function") {
+        try {
+          const registry = await registryLoader();
+          for (const item of Array.isArray(registry) ? registry : []) {
+            if (!item?.id) continue;
+            if (item.provider === "xai" || String(item.id).startsWith("grok-")) {
+              const previous = modelsMap.get(item.id);
+              if (!previous) {
+                const reasoning = resolveReasoningFromModel(item);
+                modelsMap.set(item.id, {
+                  id: item.id,
+                  name: item.name ?? item.id,
+                  ...Number.isInteger(item.contextWindow) ? { contextWindow: item.contextWindow } : {},
+                  ...Number.isInteger(item.maxTokens) ? { maxTokens: Math.min(item.maxTokens, 16384) } : {},
+                  ...Array.isArray(item.input) ? { inputModalities: [...item.input] } : {},
+                  ...reasoning ? { reasoning } : {}
+                });
+              }
+            }
+          }
+        } catch {
+        }
+      }
+      const models = [...modelsMap.values()];
+      cached = {
+        models,
+        source: discoveredModels.length > 0 ? source : "official_grok_builtin",
+        ...cliError ? { diagnostics: [`Grok \u5B98\u65B9\u6A21\u578B\u76EE\u5F55\u63D0\u793A\uFF1A${cliError.message}`] } : {}
+      };
       cachedAt = Date.now();
-      return value;
+      return cached;
     })().finally(() => {
       pending = null;
     });
@@ -6966,6 +7659,8 @@ var GrokOAuthDriver = class {
     browserOAuth = env.DOCKYARD_GROK_BROWSER_OAUTH !== "0",
     authorizationUrl = env.DOCKYARD_GROK_AUTHORIZATION_URL || DEFAULT_AUTHORIZATION_URL2,
     tokenUrl = env.DOCKYARD_GROK_TOKEN_URL || DEFAULT_TOKEN_URL2,
+    userinfoUrl = env.DOCKYARD_GROK_USERINFO_URL || DEFAULT_USERINFO_URL,
+    modelsUrl = env.DOCKYARD_GROK_MODELS_URL || DEFAULT_GROK_MODELS_URL,
     clientId = env.DOCKYARD_GROK_CLIENT_ID || DEFAULT_CLIENT_ID2,
     oauthScope = env.DOCKYARD_GROK_OAUTH_SCOPE || DEFAULT_OAUTH_SCOPE,
     cliPath = env.DOCKYARD_GROK_CLI || "grok",
@@ -6975,7 +7670,8 @@ var GrokOAuthDriver = class {
     creditsUrl = env.DOCKYARD_GROK_CREDITS_URL || DEFAULT_GROK_CREDITS_URL,
     tokenHeader = env.DOCKYARD_GROK_TOKEN_HEADER || DEFAULT_GROK_TOKEN_HEADER,
     clientVersion = env.DOCKYARD_GROK_CLIENT_VERSION || DEFAULT_GROK_CLIENT_VERSION,
-    timeoutMs = 3e4
+    timeoutMs = 3e4,
+    registryLoader = null
   } = {}) {
     this.env = env;
     this.grokHome = grokHomePath({ env, home, grokHome });
@@ -6985,11 +7681,13 @@ var GrokOAuthDriver = class {
     this.requestExecutor = requestExecutor;
     this.fetchImpl = fetchImpl;
     this.creditsUrl = validateNativeEndpoint(creditsUrl, { providerId: PROVIDER_ID4 });
+    this.modelsUrl = validateNativeEndpoint(modelsUrl, { providerId: PROVIDER_ID4 });
     this.tokenHeader = String(tokenHeader || DEFAULT_GROK_TOKEN_HEADER);
     this.clientVersion = String(clientVersion || DEFAULT_GROK_CLIENT_VERSION);
     this.timeoutMs = timeoutMs;
     this.authorizationUrl = assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_GROK_AUTHORIZATION_URL");
     this.tokenUrl = assertSecureEndpointUrl(tokenUrl, "DOCKYARD_GROK_TOKEN_URL");
+    this.userinfoUrl = assertSecureEndpointUrl(userinfoUrl, "DOCKYARD_GROK_USERINFO_URL");
     this.clientId = clientId;
     this.oauthScope = oauthScope;
     this.catalogLoader = catalogLoader ?? createGrokCatalogLoader({
@@ -6998,7 +7696,12 @@ var GrokOAuthDriver = class {
       grokHome: this.grokHome,
       cliPath,
       commandRunner,
-      timeoutMs
+      timeoutMs,
+      registryLoader,
+      fetchImpl: this.fetchImpl,
+      modelsUrl: this.modelsUrl,
+      tokenHeader: this.tokenHeader,
+      clientVersion: this.clientVersion
     });
     this.cliAuthorizer = createCliOAuthAuthorizer({
       providerId: PROVIDER_ID4,
@@ -7051,6 +7754,23 @@ var GrokOAuthDriver = class {
           error.status = response.status;
           error.upstreamCode = body.error ?? body.error_code;
           throw error;
+        }
+        const access2 = firstString2(body.access_token, body.accessToken, body.key);
+        if (access2) {
+          try {
+            const userinfoRes = await this.fetchImpl(this.userinfoUrl, {
+              method: "GET",
+              headers: { authorization: `Bearer ${access2}`, accept: "application/json" },
+              ...context.signal ? { signal: context.signal } : {}
+            });
+            if (userinfoRes.ok) {
+              const userinfo = await userinfoRes.json().catch(() => ({}));
+              if (userinfo?.name) body.name = userinfo.name;
+              if (userinfo?.email) body.email = userinfo.email;
+              if (userinfo?.sub) body.user_id = userinfo.sub;
+            }
+          } catch {
+          }
         }
         return {
           ...body,
@@ -7260,41 +7980,87 @@ var GrokOAuthDriver = class {
       });
     }
   }
+  #isBrowserAccount(account) {
+    return account?.resources?.authSource === "official_grok_browser_oauth" || account?.resources?.sessionSource === "browser" || !account?.resources?.cliProfile && Boolean(account?.refresh?.refreshable);
+  }
   async refreshAccount(account, context = {}) {
-    await this.#refreshOAuthCredential(account, context);
-    const prepared = await this.#prepareCredentialEnvironment(account, context);
+    const credential = await this.#refreshOAuthCredential(account, context);
+    const isBrowser = this.#isBrowserAccount(account);
     let updated = null;
     let commandError2 = null;
-    try {
-      await this.commandRunner(this.cliPath, ["models"], {
-        env: prepared.env,
-        timeoutMs: this.timeoutMs,
-        providerId: PROVIDER_ID4
-      });
-    } catch (error) {
-      error.authExpired = error.code === 401 || /auth|login|expired|credential|access token.{0,80}(?:valid|invalid|expired|revok)/i.test(String(error.message));
-      commandError2 = error;
+    if (!isBrowser) {
+      const prepared = await this.#prepareCredentialEnvironment(account, context);
+      try {
+        await this.commandRunner(this.cliPath, ["models"], {
+          env: prepared.env,
+          timeoutMs: this.timeoutMs,
+          providerId: PROVIDER_ID4
+        });
+      } catch (error) {
+        if (error?.code !== "ENOENT" && !/ENOENT|not found/i.test(String(error?.message))) {
+          error.authExpired = error.code === 401 || /auth|login|expired|credential|access token.{0,80}(?:valid|invalid|expired|revok)/i.test(String(error.message));
+          commandError2 = error;
+        }
+      }
+      let finishError = null;
+      try {
+        updated = await this.#finishCredentialEnvironment(prepared, account, context);
+      } catch (error) {
+        finishError = error;
+      }
+      if (commandError2) {
+        if (finishError && !commandError2.cause) commandError2.cause = finishError;
+        throw commandError2;
+      }
+      if (finishError) throw finishError;
     }
-    let finishError = null;
-    try {
-      updated = await this.#finishCredentialEnvironment(prepared, account, context);
-    } catch (error) {
-      finishError = error;
-    }
-    if (commandError2) {
-      if (finishError && !commandError2.cause) commandError2.cause = finishError;
-      throw commandError2;
-    }
-    if (finishError) throw finishError;
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
+    const effective = updated ?? credential;
+    const accessPayload = decodeJwtPayload(effective.access) ?? {};
+    const plan = firstString2(
+      effective.plan,
+      grokPlanFromTier(accessPayload.tier),
+      account.subscription?.plan
+    );
+    let email = firstString2(effective.email, account.email);
+    let displayName = firstString2(effective.displayName, account.displayName);
+    const isUuidOrMissingName = !displayName || displayName === account.accountId || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(displayName);
+    if ((!email || isUuidOrMissingName) && effective.access) {
+      try {
+        const userinfoRes = await this.fetchImpl(this.userinfoUrl, {
+          method: "GET",
+          headers: { authorization: `Bearer ${effective.access}`, accept: "application/json" },
+          ...context.signal ? { signal: context.signal } : {}
+        });
+        if (userinfoRes?.ok) {
+          const userinfo = await userinfoRes.json().catch(() => ({}));
+          if (userinfo?.name) displayName = userinfo.name;
+          if (userinfo?.email) email = userinfo.email;
+          if (context.secretStore) {
+            const credentialRef = account.auth?.credentialRef ?? account.credentialRef;
+            await context.secretStore.write(credentialRef, {
+              ...effective,
+              ...email ? { email } : {},
+              ...displayName ? { displayName } : {},
+              ...plan ? { plan } : {}
+            });
+          }
+        }
+      } catch {
+      }
+    }
     return {
-      ...updated?.email ? { email: updated.email } : {},
-      ...updated?.displayName ? { displayName: updated.displayName } : {},
+      ...email ? { email } : {},
+      ...displayName ? { displayName } : {},
+      subscription: {
+        ...account.subscription,
+        ...plan ? { plan } : {}
+      },
       refresh: {
-        accessTokenExpiresAt: updated?.expiresAt ?? account.refresh?.accessTokenExpiresAt ?? null,
+        accessTokenExpiresAt: effective?.expiresAt ?? account.refresh?.accessTokenExpiresAt ?? null,
         nextRefreshAt: null,
         lastRefreshedAt: now.toISOString(),
-        refreshable: Boolean(updated?.refresh ?? prepared.credential.refresh)
+        refreshable: Boolean(effective?.refresh ?? account.refresh?.refreshable)
       }
     };
   }
@@ -7321,16 +8087,29 @@ var GrokOAuthDriver = class {
       throw error;
     }
     const parsed = parseGrokCreditsConfig(body, { now });
+    const accessPayload = decodeJwtPayload(credential.access) ?? {};
+    const plan = firstString2(
+      parsed.subscription?.plan,
+      grokPlanFromTier(accessPayload.tier),
+      account.subscription?.plan
+    );
     return {
       ...parsed,
       subscription: {
         ...account.subscription,
-        ...parsed.subscription.plan ? { plan: parsed.subscription.plan } : {}
+        ...plan ? { plan } : {}
       }
     };
   }
   async getCatalog(context = {}) {
-    return this.catalogLoader({ force: Boolean(context.force) });
+    let credential = null;
+    if (context.accounts?.[0] && context.secretStore) {
+      try {
+        credential = await this.#readCredential(context.accounts[0], context);
+      } catch {
+      }
+    }
+    return this.catalogLoader({ force: Boolean(context.force), credential });
   }
   async invoke(request, invocation, context = {}) {
     const executor = context.requestExecutor ?? this.requestExecutor;
@@ -7483,7 +8262,7 @@ async function buildGrokRequest(request = {}, context = {}) {
   if (request.temperature !== void 0) body.temperature = request.temperature;
   const maxTokens = request.maxTokens ?? request.modelContext?.maxTokens;
   if (Number.isInteger(maxTokens) && maxTokens > 0) body.max_tokens = maxTokens;
-  if (request.reasoningEffort) body.reasoning_effort = request.reasoningEffort;
+  if (request.reasoningEffort && request.purpose !== "compaction") body.reasoning_effort = request.reasoningEffort;
   const tools = buildGrokTools(request.tools);
   if (tools) body.tools = tools;
   return body;
@@ -10672,13 +11451,1178 @@ function createCursorModule({ driver = {} } = {}) {
   });
 }
 
+// modules/provider-opencode/src/native-transport.mjs
+import { spawn as spawn6 } from "node:child_process";
+import { randomBytes as randomBytes4 } from "node:crypto";
+import { existsSync as existsSync2, readdirSync } from "node:fs";
+import { homedir as homedir10 } from "node:os";
+import { join as join10 } from "node:path";
+import readline from "node:readline";
+var PROVIDER_ID10 = "opencode";
+var DEFAULT_ENDPOINT5 = "https://opencode.ai/inference/openai/v1/chat/completions";
+function findOpencodeCliPath() {
+  const appSupportCliDir = join10(homedir10(), "Library/Application Support/ai.opencode.desktop/cli");
+  if (existsSync2(appSupportCliDir)) {
+    try {
+      const entries = readdirSync(appSupportCliDir);
+      for (const entry of entries) {
+        const candidate2 = join10(appSupportCliDir, entry, "opencode-cli");
+        if (existsSync2(candidate2)) return candidate2;
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+function contentPartText(part) {
+  if (typeof part === "string") return part;
+  if (!part || typeof part !== "object") return "";
+  if (part.type === "reasoning" || part.type === "thinking") return "";
+  if (part.type === "tool-call" || part.type === "function-call" || part.type === "tooluse") {
+    const name2 = part.name ?? part.function?.name ?? "tool";
+    return `[Tool Call: ${name2}]`;
+  }
+  if (part.type === "tool-result" || part.type === "tool_result") {
+    const text3 = textFromContent(part.content ?? part.output ?? part.result ?? part.text);
+    const trimmed = text3.length > 8192 ? `${text3.slice(0, 8192)}... [truncated]` : text3;
+    return `[Tool Result ${part.toolCallId ?? part.id ?? ""}]:
+${trimmed}`;
+  }
+  return textFromContent(part);
+}
+function promptFromRequest(request) {
+  if (typeof request.prompt === "string" && request.prompt.trim()) {
+    return request.prompt;
+  }
+  const messages = Array.isArray(request.messages) ? request.messages : [];
+  if (messages.length === 1 && !request.system) {
+    const msg = messages[0];
+    const text3 = typeof msg?.content === "string" ? msg.content : Array.isArray(msg?.content) ? msg.content.map(contentPartText).filter(Boolean).join("\n") : contentPartText(msg?.content);
+    if (text3) return text3;
+  }
+  const parts = [];
+  if (typeof request.system === "string" && request.system.trim()) {
+    parts.push(`[System instructions: ${request.system.trim()}]`);
+  }
+  for (const msg of messages) {
+    const role = msg?.role === "assistant" ? "Assistant" : msg?.role === "system" ? "System" : "User";
+    const text3 = typeof msg?.content === "string" ? msg.content : Array.isArray(msg?.content) ? msg.content.map(contentPartText).filter(Boolean).join("\n") : contentPartText(msg?.content);
+    if (text3) {
+      parts.push(`${role}: ${text3}`);
+    }
+  }
+  if (parts.length > 0) return parts.join("\n\n");
+  return typeof request.prompt === "string" ? request.prompt : "";
+}
+function firstString9(...values) {
+  return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
+}
+function toolCallPart3(part) {
+  const type = String(part?.type ?? "").toLowerCase().replace(/[_-]/g, "");
+  return type === "toolcall" || type === "functioncall" || type === "tooluse" ? part : null;
+}
+async function openAiContent2(content, attachments) {
+  const values = Array.isArray(content) ? content : [content];
+  const blocks = [];
+  for (const part of values) {
+    if (typeof part === "string") {
+      if (part) blocks.push({ type: "text", text: part });
+      continue;
+    }
+    if (!part || typeof part !== "object") continue;
+    if (part.type === "image") {
+      const image = await resolveImageData(part, attachments);
+      if (!image) throw nativeProviderError(PROVIDER_ID10, "image attachment could not be resolved");
+      blocks.push({ type: "image_url", image_url: { url: `data:${image.mediaType};base64,${image.data}` } });
+      continue;
+    }
+    if (part.type === "tool-result" || part.type === "tool_result") {
+      blocks.push({
+        type: "text",
+        text: `[Tool Result ${part.toolCallId ?? part.id ?? ""}]
+${textFromContent(part.content ?? part.output ?? part.result ?? part.text)}`
+      });
+      continue;
+    }
+    const call = toolCallPart3(part);
+    if (call) {
+      blocks.push({
+        type: "text",
+        text: `[Tool Call ${call.name ?? call.function?.name ?? "tool"}] ${JSON.stringify(parseToolArguments(call.arguments ?? call.input ?? call.function?.arguments))}`
+      });
+      continue;
+    }
+    const text3 = textFromContent(part);
+    if (text3) blocks.push({ type: "text", text: text3 });
+  }
+  return blocks;
+}
+async function buildOpencodeMessages(request, attachments) {
+  const result = [];
+  if (typeof request.system === "string" && request.system.length > 0) {
+    result.push({ role: "system", content: request.system });
+  }
+  for (const message of Array.isArray(request.messages) ? request.messages : []) {
+    const role = message?.role === "assistant" ? "assistant" : message?.role === "tool" ? "tool" : "user";
+    if (role === "tool") {
+      result.push({
+        role: "tool",
+        tool_call_id: firstString9(message.toolCallId, message.tool_call_id, message.id, "tool-result"),
+        content: textFromContent(message.content ?? message.text ?? message.output ?? message.result)
+      });
+      continue;
+    }
+    const content = await openAiContent2(message?.content ?? message?.text, attachments);
+    result.push({
+      role,
+      content: content.length === 1 && content[0]?.type === "text" ? content[0].text : content
+    });
+  }
+  return result;
+}
+var OPENCODE_SERVER_START_TIMEOUT_MS = 15e3;
+var OPENCODE_SERVER_READY_PATTERN = /server listening on (http:\/\/127\.0\.0\.1:\d+)/i;
+var serverChild = null;
+var serverUrl = null;
+var serverPassword = null;
+var serverStarting = null;
+function opencodeServerAuth(password) {
+  return `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`;
+}
+function abortSignalError(signal) {
+  const reason = signal?.reason;
+  if (reason instanceof Error) return reason;
+  const error = new Error("The operation was aborted");
+  error.name = "AbortError";
+  return error;
+}
+function opencodeDebug(...args) {
+  if (process.env.OPENCODE_TRANSPORT_DEBUG) {
+    console.error("[opencode-transport]", ...args);
+  }
+}
+async function startOpencodeServer(cliPath) {
+  opencodeDebug("starting local server", cliPath);
+  const password = randomBytes4(24).toString("base64url");
+  const child = spawn6(cliPath, ["serve", "--hostname", "127.0.0.1", "--port", "0"], {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, OPENCODE_PASSWORD: password }
+  });
+  let diagnostics = "";
+  child.stderr?.on("data", (chunk) => {
+    diagnostics = `${diagnostics}${String(chunk)}`.slice(-4e3);
+  });
+  let url;
+  try {
+    url = await new Promise((resolve2, reject) => {
+      let buffer = "";
+      let timer = null;
+      let settled = false;
+      const settle = (error, value) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        child.stdout?.off?.("data", onStdout);
+        child.off?.("exit", onExit);
+        child.off?.("error", onError);
+        if (error) reject(error);
+        else resolve2(value);
+      };
+      const onStdout = (chunk) => {
+        buffer += String(chunk);
+        const match = buffer.match(OPENCODE_SERVER_READY_PATTERN);
+        if (match) settle(null, match[1]);
+      };
+      const onExit = (code, exitSignal) => {
+        settle(
+          new Error(
+            `OpenCode \u672C\u5730\u670D\u52A1\u63D0\u524D\u9000\u51FA (code ${code ?? "null"}, signal ${exitSignal ?? "null"})${diagnostics ? `: ${diagnostics.trim()}` : ""}`
+          )
+        );
+      };
+      const onError = (error) => settle(error);
+      timer = setTimeout(() => {
+        settle(new Error(`OpenCode \u672C\u5730\u670D\u52A1\u542F\u52A8\u8D85\u65F6${diagnostics ? `: ${diagnostics.trim()}` : ""}`));
+      }, OPENCODE_SERVER_START_TIMEOUT_MS);
+      child.stdout?.on("data", onStdout);
+      child.once("exit", onExit);
+      child.once("error", onError);
+    });
+  } catch (error) {
+    try {
+      child.kill();
+    } catch {
+    }
+    throw error;
+  }
+  child.stdout?.on("data", () => {
+  });
+  child.stderr?.on("data", () => {
+  });
+  child.unref?.();
+  child.stdout?.unref?.();
+  child.stderr?.unref?.();
+  const info = { child, url, password };
+  opencodeDebug("local server ready", url);
+  child.once("exit", () => {
+    if (serverChild === child) {
+      serverChild = null;
+      serverUrl = null;
+      serverPassword = null;
+    }
+  });
+  process.once("exit", () => {
+    try {
+      child.kill();
+    } catch {
+    }
+  });
+  return info;
+}
+async function ensureOpencodeServer(cliPath) {
+  if (serverUrl && serverChild && serverChild.exitCode === null) {
+    return { child: serverChild, url: serverUrl, password: serverPassword };
+  }
+  if (serverStarting) return serverStarting;
+  serverStarting = startOpencodeServer(cliPath).then((info) => {
+    serverChild = info.child;
+    serverUrl = info.url;
+    serverPassword = info.password;
+    serverStarting = null;
+    return info;
+  }).catch((error) => {
+    serverStarting = null;
+    throw error;
+  });
+  return serverStarting;
+}
+async function opencodeServerRequest(server, method, path, body, { signal, fetchImpl = fetch } = {}) {
+  let response;
+  try {
+    response = await fetchImpl(`${server.url}${path}`, {
+      method,
+      headers: {
+        Authorization: opencodeServerAuth(server.password),
+        ...body !== void 0 ? { "Content-Type": "application/json" } : {}
+      },
+      ...body !== void 0 ? { body: JSON.stringify(body) } : {},
+      ...signal ? { signal } : {}
+    });
+  } catch (error) {
+    if (signal?.aborted) throw abortSignalError(signal);
+    throw error;
+  }
+  if (!response.ok) {
+    const details = await response.text().catch(() => "");
+    throw nativeProviderError(
+      PROVIDER_ID10,
+      `OpenCode \u672C\u5730\u670D\u52A1\u8BF7\u6C42\u5931\u8D25 (${method} ${path}): ${response.status}${details ? ` ${details.slice(0, 500)}` : ""}`
+    );
+  }
+  if (response.status === 204) return null;
+  const text3 = await response.text();
+  if (!text3) return null;
+  try {
+    return JSON.parse(text3);
+  } catch {
+    return null;
+  }
+}
+async function openOpencodeEventStream(server, sessionId, { signal, fetchImpl = fetch } = {}) {
+  let response;
+  try {
+    response = await fetchImpl(`${server.url}/api/event`, {
+      headers: {
+        Authorization: opencodeServerAuth(server.password),
+        Accept: "text/event-stream"
+      },
+      ...signal ? { signal } : {}
+    });
+  } catch (error) {
+    if (signal?.aborted) throw abortSignalError(signal);
+    throw error;
+  }
+  if (!response.ok) {
+    const details = await response.text().catch(() => "");
+    throw nativeProviderError(
+      PROVIDER_ID10,
+      `OpenCode \u4E8B\u4EF6\u6D41\u8FDE\u63A5\u5931\u8D25: ${response.status}${details ? ` ${details.slice(0, 300)}` : ""}`
+    );
+  }
+  if (!response.body?.getReader) {
+    throw nativeProviderError(PROVIDER_ID10, "OpenCode \u4E8B\u4EF6\u6D41\u4E0D\u53EF\u8BFB\u53D6");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let closed = false;
+  return {
+    async next() {
+      while (!closed) {
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary === -1) {
+          const { value, done } = await reader.read();
+          if (done) {
+            closed = true;
+            return { done: true };
+          }
+          buffer = `${buffer}${decoder.decode(value, { stream: true })}`.replace(/\r\n/g, "\n");
+          boundary = buffer.indexOf("\n\n");
+        }
+        const raw = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        let data = "";
+        for (const line of raw.split("\n")) {
+          if (line.startsWith("data:")) data += `${data ? "\n" : ""}${line.slice(5).trim()}`;
+        }
+        if (!data) continue;
+        let event;
+        try {
+          event = JSON.parse(data);
+        } catch {
+          continue;
+        }
+        if (event?.data?.sessionID !== sessionId) continue;
+        return { done: false, value: event };
+      }
+      return { done: true };
+    },
+    async close() {
+      closed = true;
+      try {
+        await reader.cancel();
+      } catch {
+      }
+    }
+  };
+}
+function opencodeServerModel(request) {
+  const raw = typeof request?.model === "string" ? request.model.trim() : "";
+  if (!raw) return null;
+  const [baseRaw, embeddedVariant] = raw.split("#");
+  const base = baseRaw.startsWith("opencode/") ? baseRaw.slice("opencode/".length) : baseRaw;
+  if (!base) return null;
+  if (request?.purpose === "compaction") {
+    return { providerID: PROVIDER_ID10, id: base };
+  }
+  const effort = request.reasoningEffort ?? request.reasoning_effort ?? embeddedVariant;
+  const variant = typeof effort === "string" && effort && effort !== "medium" ? effort : null;
+  return { providerID: PROVIDER_ID10, id: base, ...variant ? { variant } : {} };
+}
+function opencodeUsageFromTokens(tokens) {
+  const input = Number(tokens?.input ?? 0);
+  const output = Number(tokens?.output ?? 0);
+  return {
+    prompt_tokens: Number.isFinite(input) ? input : 0,
+    completion_tokens: Number.isFinite(output) ? output : 0,
+    total_tokens: (Number.isFinite(input) ? input : 0) + (Number.isFinite(output) ? output : 0)
+  };
+}
+function opencodeEventMessage(data) {
+  const value = data?.error ?? data?.message ?? data?.reason;
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (value && typeof value === "object") {
+    const nested = value.message ?? value.error ?? value.reason;
+    if (typeof nested === "string" && nested.trim()) return nested.trim();
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+function isPermissionRequestEvent(type, data, sessionId) {
+  if (typeof type !== "string" || !type.includes("permission")) return false;
+  if (data?.sessionID !== sessionId) return false;
+  return type.includes("request") || type.endsWith(".updated") || type.endsWith(".asked");
+}
+async function* runViaOpencodeServer({ server, request, signal, fetchImpl }) {
+  const prompt = promptFromRequest(request);
+  const model = opencodeServerModel(request);
+  const controller = new AbortController();
+  let sessionId = null;
+  let stream = null;
+  let aborted = false;
+  const pendingReplies = /* @__PURE__ */ new Set();
+  const onAbort = () => {
+    aborted = true;
+    controller.abort();
+    if (sessionId) {
+      void opencodeServerRequest(server, "POST", `/api/session/${sessionId}/interrupt`, void 0, { fetchImpl }).catch(() => {
+      });
+    }
+  };
+  if (signal) {
+    if (signal.aborted) throw abortSignalError(signal);
+    signal.addEventListener("abort", onAbort, { once: true });
+  }
+  let text3 = "";
+  let textIndex = 0;
+  let textOpen = false;
+  let nextIndex = 1;
+  let reasoning = null;
+  let rawUsage = null;
+  let stop = "stop";
+  try {
+    const created = await opencodeServerRequest(
+      server,
+      "POST",
+      "/api/session",
+      {
+        ...model ? { model } : {},
+        location: { directory: process.cwd() }
+      },
+      { signal: controller.signal, fetchImpl }
+    );
+    sessionId = created?.data?.id ?? created?.id ?? null;
+    if (!sessionId) {
+      throw nativeProviderError(PROVIDER_ID10, "OpenCode \u4F1A\u8BDD\u521B\u5EFA\u5931\u8D25\uFF1A\u54CD\u5E94\u4E2D\u6CA1\u6709\u4F1A\u8BDD ID");
+    }
+    opencodeDebug("session created", sessionId);
+    stream = await openOpencodeEventStream(server, sessionId, { signal: controller.signal, fetchImpl });
+    opencodeDebug("event stream connected");
+    await opencodeServerRequest(
+      server,
+      "POST",
+      `/api/session/${sessionId}/prompt`,
+      { text: prompt },
+      { signal: controller.signal, fetchImpl }
+    );
+    opencodeDebug("prompt submitted");
+    let finished = false;
+    while (!finished) {
+      let next;
+      try {
+        next = await stream.next();
+      } catch (error) {
+        if (controller.signal.aborted) break;
+        throw error;
+      }
+      if (next.done) break;
+      const event = next.value;
+      const type = event.type;
+      const data = event.data ?? {};
+      if (type && !type.endsWith(".delta")) opencodeDebug("event", type);
+      if (type === "session.reasoning.delta" && typeof data.delta === "string" && data.delta) {
+        if (textOpen) {
+          yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+          textOpen = false;
+        }
+        if (!reasoning) {
+          reasoning = { index: nextIndex++, text: "" };
+          yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+        }
+        reasoning.text += data.delta;
+        yield { type: "reasoning-delta", index: reasoning.index, text: data.delta };
+      } else if (type === "session.text.delta" && typeof data.delta === "string" && data.delta) {
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        if (!textOpen) {
+          textIndex = nextIndex++;
+          text3 = "";
+          textOpen = true;
+          yield { type: "block-start", index: textIndex, blockType: "text" };
+        }
+        text3 += data.delta;
+        yield { type: "text-delta", index: textIndex, text: data.delta };
+      } else if (type === "session.usage.updated" && data.tokens) {
+        rawUsage = opencodeUsageFromTokens(data.tokens);
+      } else if (type === "session.step.ended") {
+        if (typeof data.finish === "string" && data.finish) stop = data.finish;
+        if (data.tokens) rawUsage = opencodeUsageFromTokens(data.tokens);
+      } else if (type === "session.execution.succeeded") {
+        finished = true;
+      } else if (type === "session.execution.failed" || type === "session.execution.error") {
+        throw nativeProviderError(PROVIDER_ID10, opencodeEventMessage(data) || "OpenCode \u6267\u884C\u5931\u8D25");
+      } else if (isPermissionRequestEvent(type, data, sessionId)) {
+        const requestId = data.id ?? data.requestID;
+        if (requestId) {
+          pendingReplies.add(
+            opencodeServerRequest(
+              server,
+              "POST",
+              `/api/session/${sessionId}/permission/${requestId}/reply`,
+              { decision: "always" },
+              { fetchImpl }
+            ).catch(() => {
+            })
+          );
+        }
+      }
+    }
+  } finally {
+    if (stream) await stream.close();
+    if (sessionId) {
+      await opencodeServerRequest(server, "DELETE", `/api/session/${sessionId}`, void 0, { fetchImpl }).catch(() => {
+      });
+    }
+    signal?.removeEventListener?.("abort", onAbort);
+    if (pendingReplies.size > 0) await Promise.allSettled([...pendingReplies]);
+  }
+  if (reasoning) {
+    yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+  }
+  if (textOpen) {
+    yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+  }
+  if (rawUsage) {
+    yield { type: "usage", usage: normalizeUsage(rawUsage) };
+  }
+  yield {
+    type: "finish",
+    reason: aborted ? { kind: "stop" } : finishReason(stop),
+    ...rawUsage ? { usage: normalizeUsage(rawUsage) } : {}
+  };
+}
+function createOpencodeNativeExecutor({
+  endpoint: endpoint2 = DEFAULT_ENDPOINT5,
+  apiKey = null,
+  fetchImpl = fetch,
+  timeoutMs = 6e4
+} = {}) {
+  const validatedEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID10 });
+  return async function* opencodeNativeExecutor(envelope2 = {}) {
+    const { request, attachments, credential, signal } = envelope2;
+    const token = apiKey ?? (credential?.access && credential.access !== "free-tier" ? credential.access : null) ?? credential?.apiKey ?? credential?.token ?? process.env.OPENCODE_API_KEY ?? null;
+    const cliPath = !token ? findOpencodeCliPath() : null;
+    if (cliPath) {
+      let server = null;
+      try {
+        server = await ensureOpencodeServer(cliPath);
+      } catch {
+        server = null;
+      }
+      if (server) {
+        let emitted = false;
+        try {
+          for await (const event of runViaOpencodeServer({ server, request, signal, fetchImpl })) {
+            emitted = true;
+            yield event;
+          }
+          return;
+        } catch (error) {
+          if (emitted || signal?.aborted) throw error;
+        }
+      }
+    }
+    if (cliPath) {
+      const baseModel = request.model?.startsWith("opencode/") ? request.model : `opencode/${request.model}`;
+      const effort = request.purpose === "compaction" ? null : request.reasoningEffort ?? request.reasoning_effort;
+      const model = effort && effort !== "medium" ? `${baseModel}#${effort}` : baseModel;
+      const prompt = promptFromRequest(request);
+      const child = spawn6(cliPath, ["run", "--model", model, "--thinking", "--format", "json", prompt], {
+        signal,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env }
+      });
+      const rl = readline.createInterface({ input: child.stdout });
+      let text4 = "";
+      let textIndex2 = 0;
+      let textOpen2 = false;
+      let nextIndex2 = 1;
+      let reasoning2 = null;
+      let rawUsage2 = null;
+      let stderrOutput = "";
+      child.stderr?.on?.("data", (chunk) => {
+        stderrOutput += String(chunk);
+      });
+      for await (const line of rl) {
+        if (!line.trim()) continue;
+        let parsed;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (parsed.type === "reasoning" && parsed.part?.text) {
+          if (textOpen2) {
+            yield { type: "block-end", index: textIndex2, block: { type: "text", text: text4 } };
+            textOpen2 = false;
+          }
+          if (!reasoning2) {
+            reasoning2 = { index: nextIndex2++, text: "" };
+            yield { type: "block-start", index: reasoning2.index, blockType: "reasoning" };
+          }
+          const chunk = parsed.part.text;
+          reasoning2.text += chunk;
+          yield { type: "reasoning-delta", index: reasoning2.index, text: chunk };
+        } else if (parsed.type === "text" && parsed.part?.text) {
+          if (reasoning2) {
+            yield { type: "block-end", index: reasoning2.index, block: { type: "reasoning", text: reasoning2.text } };
+            reasoning2 = null;
+          }
+          if (!textOpen2) {
+            textIndex2 = nextIndex2++;
+            text4 = "";
+            textOpen2 = true;
+            yield { type: "block-start", index: textIndex2, blockType: "text" };
+          }
+          const chunk = parsed.part.text;
+          text4 += chunk;
+          yield { type: "text-delta", index: textIndex2, text: chunk };
+        } else if (parsed.type === "step_finish" && parsed.part?.tokens) {
+          rawUsage2 = {
+            prompt_tokens: parsed.part.tokens.input ?? 0,
+            completion_tokens: parsed.part.tokens.output ?? 0,
+            total_tokens: (parsed.part.tokens.input ?? 0) + (parsed.part.tokens.output ?? 0)
+          };
+        } else if (parsed.type === "error") {
+          throw nativeProviderError(PROVIDER_ID10, parsed.error?.message || "OpenCode CLI execution error");
+        }
+      }
+      if (!text4 && stderrOutput.trim()) {
+        throw nativeProviderError(PROVIDER_ID10, stderrOutput.trim());
+      }
+      if (reasoning2) {
+        yield { type: "block-end", index: reasoning2.index, block: { type: "reasoning", text: reasoning2.text } };
+      }
+      if (textOpen2) {
+        yield { type: "block-end", index: textIndex2, block: { type: "text", text: text4 } };
+      }
+      if (rawUsage2) {
+        yield {
+          type: "usage",
+          usage: normalizeUsage(rawUsage2)
+        };
+      }
+      yield {
+        type: "finish",
+        reason: { kind: "stop" },
+        ...rawUsage2 ? { usage: normalizeUsage(rawUsage2) } : {}
+      };
+      return;
+    }
+    if (!token) {
+      throw nativeProviderError(PROVIDER_ID10, "\u672A\u68C0\u6D4B\u5230\u672C\u5730 OpenCode CLI \u5BA2\u6237\u7AEF\uFF0C\u4E14\u672A\u914D\u7F6E OPENCODE_API_KEY");
+    }
+    const messages = await buildOpencodeMessages(request, attachments);
+    const body = {
+      model: request.model,
+      messages,
+      stream: true,
+      ...typeof request.temperature === "number" ? { temperature: request.temperature } : {},
+      ...typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {},
+      ...request.reasoningEffort ? { reasoning_effort: request.reasoningEffort } : {}
+    };
+    const headers = {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+      Authorization: `Bearer ${token}`
+    };
+    const response = await fetchNativeResponse(
+      validatedEndpoint,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal
+      },
+      {
+        providerId: PROVIDER_ID10,
+        timeoutMs,
+        fetchImpl
+      }
+    );
+    let text3 = "";
+    let textIndex = 0;
+    let textOpen = false;
+    let nextIndex = 1;
+    let reasoning = null;
+    let rawUsage = null;
+    let stop = "stop";
+    for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID10 })) {
+      if (event?.done) continue;
+      const parsed = event?.data;
+      if (!parsed || typeof parsed !== "object") continue;
+      if (parsed.usage) rawUsage = parsed.usage;
+      const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : null;
+      if (!choice) continue;
+      const delta = choice.delta ?? {};
+      const reasoningDelta = firstString9(delta.reasoning_content, delta.reasoning, delta.thought);
+      if (reasoningDelta) {
+        if (textOpen) {
+          yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+          textOpen = false;
+        }
+        if (!reasoning) {
+          reasoning = { index: nextIndex++, text: "" };
+          yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+        }
+        reasoning.text += reasoningDelta;
+        yield { type: "reasoning-delta", index: reasoning.index, text: reasoningDelta };
+      }
+      const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
+      if (content) {
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        if (!textOpen) {
+          textIndex = nextIndex++;
+          text3 = "";
+          textOpen = true;
+          yield { type: "block-start", index: textIndex, blockType: "text" };
+        }
+        text3 += content;
+        yield { type: "text-delta", index: textIndex, text: content };
+      }
+      if (choice.finish_reason) {
+        stop = choice.finish_reason;
+      }
+    }
+    if (reasoning) {
+      yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+    }
+    if (textOpen) {
+      yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+    }
+    if (rawUsage) {
+      yield {
+        type: "usage",
+        usage: normalizeUsage(rawUsage)
+      };
+    }
+    yield {
+      type: "finish",
+      reason: finishReason(stop),
+      ...rawUsage ? { usage: normalizeUsage(rawUsage) } : {}
+    };
+  };
+}
+
+// modules/provider-opencode/src/driver.mjs
+var PROVIDER_ID11 = "opencode";
+var DEFAULT_CATALOG_URL = "https://opencode.ai/zen/v1/models";
+var DEFAULT_ENDPOINT6 = "https://opencode.ai/inference/openai/v1/chat/completions";
+var BUILTIN_OPENCODE_FREE_MODELS = Object.freeze([
+  {
+    id: "big-pickle",
+    name: "Big Pickle (Free)",
+    contextWindow: 131072,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [
+        { id: "minimal", name: "Minimal" },
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" }
+      ],
+      defaultEffort: "medium"
+    }
+  },
+  {
+    id: "beam-free",
+    name: "Beam (Free)",
+    contextWindow: 131072,
+    maxTokens: 8192
+  },
+  {
+    id: "mimo-v2.6-flash-free",
+    name: "MIMO v2.6 Flash (Free)",
+    contextWindow: 131072,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [
+        { id: "minimal", name: "Minimal" },
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" }
+      ],
+      defaultEffort: "medium"
+    }
+  },
+  {
+    id: "nemotron-3.5-super-vl-free",
+    name: "Nemotron 3.5 Super VL (Free)",
+    contextWindow: 131072,
+    maxTokens: 8192,
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "nemotron-3.5-lightning-free",
+    name: "Nemotron 3.5 Lightning (Free)",
+    contextWindow: 131072,
+    maxTokens: 8192
+  },
+  {
+    id: "nemotron-3-ultra-free",
+    name: "Nemotron 3 Ultra (Free)",
+    contextWindow: 131072,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [
+        { id: "minimal", name: "Minimal" },
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" }
+      ],
+      defaultEffort: "medium"
+    }
+  },
+  {
+    id: "jev-1.13-free",
+    name: "JEV 1.13 (Free)",
+    contextWindow: 131072,
+    maxTokens: 8192
+  },
+  {
+    id: "longcat-2.5-preview-free",
+    name: "Longcat 2.5 Preview (Free)",
+    contextWindow: 131072,
+    maxTokens: 8192
+  },
+  {
+    id: "deepseek-v4.1-flash-free",
+    name: "DeepSeek v4.1 Flash (Free)",
+    contextWindow: 2e5,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [
+        { id: "high", name: "High" },
+        { id: "max", name: "Max" }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "glm-5.3-flash-free",
+    name: "GLM 5.3 Flash (Free)",
+    contextWindow: 204800,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [
+        { id: "high", name: "High" },
+        { id: "max", name: "Max" }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "minimax-m3.1-flash-free",
+    name: "MiniMax M3.1 Flash (Free)",
+    contextWindow: 131072,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [
+        { id: "minimal", name: "Minimal" },
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" }
+      ],
+      defaultEffort: "medium"
+    }
+  },
+  {
+    id: "qwen3.6-plus-free",
+    name: "Qwen 3.6 Plus (Free)",
+    contextWindow: 262144,
+    maxTokens: 8192,
+    reasoning: {
+      efforts: [
+        { id: "minimal", name: "Minimal" },
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" }
+      ],
+      defaultEffort: "medium"
+    }
+  },
+  {
+    id: "claude-sonnet-4-6",
+    name: "Claude Sonnet 4.6 (OpenCode)",
+    contextWindow: 1e6,
+    maxTokens: 16384,
+    reasoning: {
+      efforts: [
+        { id: "minimal", name: "Minimal" },
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" },
+        { id: "max", name: "Max" }
+      ],
+      defaultEffort: "medium"
+    }
+  },
+  {
+    id: "gemini-3.8-flash",
+    name: "Gemini 3.8 Flash (OpenCode)",
+    contextWindow: 1048576,
+    maxTokens: 16384
+  }
+]);
+function summarizeOpencodeCandidate(candidate2) {
+  return candidate2?.displayName ?? candidate2?.email ?? candidate2?.accountId ?? "OpenCode Free";
+}
+function findOpencodeRegistryModel(id, registry) {
+  if (!id || !Array.isArray(registry) || registry.length === 0) return null;
+  const exact = registry.find((m) => m.id === id);
+  if (exact) return exact;
+  const cleanId = id.replace(/-free$/, "");
+  const cleanMatch = registry.find((m) => m.id === cleanId);
+  if (cleanMatch) return cleanMatch;
+  if (id.startsWith("deepseek-v4")) {
+    return registry.find((m) => m.id === "deepseek-v4-flash-free" || m.id === "deepseek-v4-flash");
+  }
+  if (id.startsWith("claude-sonnet") || id.startsWith("claude-opus") || id.startsWith("claude-fable") || id.startsWith("claude-haiku")) {
+    const family = id.split("-").slice(0, 2).join("-");
+    return registry.find((m) => m.id.startsWith(family) && m.thinkingLevelMap);
+  }
+  if (id.startsWith("glm-5")) {
+    return registry.find((m) => m.id === "glm-5.2" || m.id.startsWith("glm-5") && m.thinkingLevelMap);
+  }
+  if (id.startsWith("gemini-")) {
+    return registry.find((m) => m.provider === "opencode" && m.id.startsWith("gemini-") && m.thinkingLevelMap);
+  }
+  if (id.startsWith("grok-")) {
+    return registry.find((m) => m.id === "grok-4.5" || m.id.startsWith("grok-") && m.thinkingLevelMap);
+  }
+  if (id.startsWith("gpt-5") || id.startsWith("gpt-6")) {
+    return registry.find((m) => m.provider === "opencode" && m.id.startsWith("gpt-5") && m.thinkingLevelMap);
+  }
+  if (id.startsWith("qwen")) {
+    return registry.find((m) => m.provider === "opencode" && m.id.startsWith("qwen"));
+  }
+  if (id.startsWith("minimax")) {
+    return registry.find((m) => m.provider === "opencode" && m.id.startsWith("minimax"));
+  }
+  return null;
+}
+function parseOpencodeCatalog(data, { registry = [] } = {}) {
+  const models = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
+  if (!models.length) {
+    return { models: [...BUILTIN_OPENCODE_FREE_MODELS] };
+  }
+  const builtinMap = new Map(BUILTIN_OPENCODE_FREE_MODELS.map((m) => [m.id, m]));
+  const result = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const item of models) {
+    const id = stringValue(item?.id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const regModel = findOpencodeRegistryModel(id, registry);
+    const builtin = builtinMap.get(id);
+    const isFree = id.includes("-free") || id === "big-pickle";
+    const name2 = stringValue(item?.name) ?? regModel?.name ?? builtin?.name ?? (isFree ? `${id} (Free)` : id);
+    const contextWindow = Number.isInteger(item?.contextWindow) ? item.contextWindow : Number.isInteger(regModel?.contextWindow) ? regModel.contextWindow : builtin?.contextWindow ?? 131072;
+    const maxTokens = Number.isInteger(item?.maxTokens) ? Math.min(item.maxTokens, 16384) : Number.isInteger(regModel?.maxTokens) ? Math.min(regModel.maxTokens, 16384) : builtin?.maxTokens ?? 8192;
+    const reasoning = item?.reasoning ? resolveReasoningFromModel(item) : regModel ? resolveReasoningFromModel(regModel) : builtin?.reasoning;
+    result.push({
+      id,
+      name: name2,
+      contextWindow,
+      maxTokens,
+      ...reasoning ? { reasoning } : {}
+    });
+  }
+  return { models: result.length > 0 ? result : [...BUILTIN_OPENCODE_FREE_MODELS] };
+}
+function createOpencodeCatalogLoader({
+  catalogUrl = DEFAULT_CATALOG_URL,
+  fetchImpl = fetch,
+  timeoutMs = 8e3,
+  cacheTtlMs = 6e4,
+  registryLoader = null
+} = {}) {
+  const validatedUrl = assertSecureEndpointUrl(catalogUrl, "OPENCODE_CATALOG_URL");
+  let cached = null;
+  let cachedAt = 0;
+  let pending = null;
+  return async function opencodeCatalogLoader({ force = false } = {}) {
+    const now = Date.now();
+    if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
+    if (pending) return pending;
+    pending = (async () => {
+      const registry = typeof registryLoader === "function" ? await registryLoader().catch(() => []) : [];
+      if (catalogUrl === DEFAULT_CATALOG_URL && fetchImpl === fetch) {
+        cached = parseOpencodeCatalog(null, { registry });
+        cachedAt = Date.now();
+        return cached;
+      }
+      try {
+        const data = await fetchJson(validatedUrl, {
+          headers: { Accept: "application/json" },
+          fetchImpl,
+          timeoutMs
+        });
+        cached = parseOpencodeCatalog(data, { registry });
+      } catch {
+        cached = parseOpencodeCatalog(null, { registry });
+      }
+      cachedAt = Date.now();
+      return cached;
+    })().finally(() => {
+      pending = null;
+    });
+    return pending;
+  };
+}
+var OpencodeDriver = class {
+  constructor({
+    endpoint: endpoint2 = DEFAULT_ENDPOINT6,
+    catalogUrl = DEFAULT_CATALOG_URL,
+    catalogLoader = null,
+    requestExecutor = null,
+    fetchImpl = fetch,
+    timeoutMs = 3e4,
+    registryLoader = null
+  } = {}) {
+    this.endpoint = endpoint2;
+    this.catalogUrl = catalogUrl;
+    this.fetchImpl = fetchImpl;
+    this.timeoutMs = timeoutMs;
+    this.catalogLoader = catalogLoader ?? createOpencodeCatalogLoader({
+      catalogUrl,
+      fetchImpl,
+      timeoutMs: 8e3,
+      registryLoader
+    });
+    this.requestExecutor = requestExecutor ?? createOpencodeNativeExecutor({
+      endpoint: endpoint2,
+      fetchImpl,
+      timeoutMs
+    });
+  }
+  async discover() {
+    return {
+      candidates: [
+        {
+          candidateId: "opencode-free",
+          accountId: "opencode-free",
+          displayName: "OpenCode Free",
+          email: "zen@opencode.ai",
+          subscription: {
+            plan: "Zen Free Rotation",
+            status: "active"
+          },
+          quota: {
+            remaining: 100,
+            limit: 100,
+            unit: "requests",
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+          },
+          source: "opencode_free_tier",
+          health: {
+            status: "healthy"
+          }
+        }
+      ],
+      source: "opencode_free_tier",
+      diagnostics: []
+    };
+  }
+  async importAccount(candidate2, context = {}) {
+    const accountId = candidate2?.accountId || "opencode-free";
+    const ref = createCredentialRef(PROVIDER_ID11, accountId);
+    if (context.secretStore) {
+      await context.secretStore.write(ref, {
+        type: "opencode_free",
+        access: "free-tier"
+      }).catch(() => {
+      });
+    }
+    return createAccountRecord({
+      accountId,
+      providerId: PROVIDER_ID11,
+      displayName: candidate2?.displayName || "OpenCode Free",
+      email: candidate2?.email || "zen@opencode.ai",
+      auth: {
+        kind: "opencode_free",
+        credentialRef: ref
+      },
+      subscription: {
+        plan: candidate2?.subscription?.plan || "Zen Free Rotation",
+        status: "active"
+      },
+      quota: createQuotaSnapshot(candidate2?.quota || {
+        remaining: 100,
+        limit: 100,
+        unit: "requests"
+      }),
+      health: {
+        status: "healthy"
+      }
+    });
+  }
+  async getActiveSession() {
+    return this.discover().then((res) => Array.isArray(res?.candidates) ? res.candidates[0] : Array.isArray(res) ? res[0] : null);
+  }
+  async refreshAccount(account) {
+    return {
+      quota: createQuotaSnapshot({
+        remaining: 100,
+        limit: 100,
+        unit: "requests",
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }),
+      health: {
+        status: "healthy",
+        lastCheckedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }
+    };
+  }
+  async getQuota() {
+    return createQuotaSnapshot({
+      remaining: 100,
+      limit: 100,
+      unit: "requests",
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  }
+  async getCatalog(context = {}) {
+    return this.catalogLoader({ force: Boolean(context.force) });
+  }
+  async invoke(request, invocation, context = {}) {
+    const executor = context.requestExecutor ?? this.requestExecutor;
+    let credential = null;
+    if (context.secretStore && invocation?.auth?.credentialRef) {
+      credential = await context.secretStore.read(invocation.auth.credentialRef).catch(() => null);
+    }
+    if (!credential) {
+      credential = invocation?.auth ?? { access: "free-tier" };
+    }
+    return executor({
+      request,
+      invocation,
+      context,
+      attachments: context.attachments ?? invocation?.attachments,
+      credential,
+      signal: context.signal ?? invocation?.signal
+    });
+  }
+  async stream(request, invocation, context = {}) {
+    return this.invoke(request, invocation, context);
+  }
+};
+function createOpencodeDriver(options = {}) {
+  return new OpencodeDriver(options);
+}
+
+// modules/provider-opencode/src/index.mjs
+function createOpencodeModule({ driver = {} } = {}) {
+  return defineProviderModule({
+    id: "opencode",
+    displayName: "OpenCode",
+    capabilities: [
+      "quota",
+      "catalog",
+      "invoke",
+      "stream"
+    ],
+    driver
+  });
+}
+
 // packages/runtime/src/dockyard-runtime.mjs
 var candidateSummarizers = /* @__PURE__ */ new Map([
   ["openai-codex", summarizeCodexCandidate],
   ["antigravity", summarizeAntigravityCandidate],
   ["grok", summarizeGrokCandidate],
   ["claude", summarizeClaudeCandidate],
-  ["cursor", summarizeCursorCandidate]
+  ["cursor", summarizeCursorCandidate],
+  ["opencode", summarizeOpencodeCandidate]
 ]);
 var DEFAULT_REFRESH_TIMEOUT_MS = 3e4;
 function numericOption(value, fallback) {
@@ -10835,6 +12779,15 @@ function createDefaultProviderEntries(options = {}) {
         })
       }),
       driver: options.cursorDriver
+    },
+    {
+      module: createOpencodeModule({
+        driver: options.opencodeDriver ?? createOpencodeDriver({
+          ...withRequestExecutor("opencode", options.opencode, requestExecutors),
+          ...catalogLoaders.opencode ? { catalogLoader: catalogLoaders.opencode } : {}
+        })
+      }),
+      driver: options.opencodeDriver
     }
   ];
 }
@@ -10894,10 +12847,12 @@ var DockyardRuntime = class {
     this.stateStore = stateStore;
     this.secretStore = secretStore;
     this.contextWindowOverrides = new ContextWindowOverrideStore({ stateStore });
+    this.modelSelection = new ModelSelectionStore({ stateStore });
     this.bridge = new DshInjectionBridge({
       runtime,
       adapter: dshAdapter,
-      contextWindowOverrides: this.contextWindowOverrides
+      contextWindowOverrides: this.contextWindowOverrides,
+      modelSelection: this.modelSelection
     });
     this.providers = providers;
     this.refreshTimeoutMs = refreshTimeoutMs;
@@ -10915,6 +12870,8 @@ var DockyardRuntime = class {
     this.#initPromise = (async () => {
       const state = await this.stateStore.load();
       await this.contextWindowOverrides.ready();
+      await this.modelSelection.ready();
+      const autoImported = /* @__PURE__ */ new Set();
       for (const entry of this.providers) {
         const providerId = entry.module.manifest.id;
         const stored = state.pools?.[providerId] ?? {};
@@ -10935,9 +12892,35 @@ var DockyardRuntime = class {
         if (stored.defaultAccountId && pool.get(stored.defaultAccountId)) {
           pool.setDefaultAccount(stored.defaultAccountId);
         }
+        const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
+        const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
+        if (providerId === "opencode" && pool.list().length === 0 || hasExpiredOfficialSession && hasNoEligible) {
+          try {
+            const discovery = await (entry.module?.discover?.(providerContext(this)) ?? entry.driver?.discover?.(providerContext(this)));
+            const candidate2 = Array.isArray(discovery?.candidates) ? discovery.candidates[0] : Array.isArray(discovery) ? discovery[0] : null;
+            if (candidate2 && candidate2.status !== "unavailable" && typeof entry.module?.importAccount === "function") {
+              const account = await entry.module.importAccount(candidate2, providerContext(this));
+              const obsoleteOfficial = pool.list().find((a) => a.resources?.accountScope === "active_official_session" && candidate2.resources?.accountScope === "active_official_session" && a.accountId !== account.accountId);
+              if (obsoleteOfficial) {
+                pool.remove(obsoleteOfficial.accountId);
+              }
+              pool.upsert(account, { resetHealth: true });
+              pool.setDefaultAccount(account.accountId);
+              autoImported.add(providerId);
+            }
+          } catch {
+          }
+        }
         this.#entries.set(providerId, { ...entry, pool });
         if (!this.runtime.has(providerId)) await this.runtime.register(entry.module);
         await this.bridge.mountProvider(entry.module, pool);
+      }
+      if (this.#entries.get("opencode")?.pool?.list()?.length > 0) {
+        autoImported.add("opencode");
+      }
+      if (autoImported.size > 0) {
+        await this.#saveState([...autoImported]).catch(() => {
+        });
       }
       this.#initialized = true;
       return this;
@@ -10979,7 +12962,22 @@ var DockyardRuntime = class {
         const existing = entry.pool.get(candidate2.accountId);
         const candidateIdentity = candidate2.resources ?? {};
         const existingIdentity = existing?.resources ?? {};
-        if (!existing) continue;
+        if (!existing) {
+          const obsoleteOfficial = entry.pool.list().find((a) => a.resources?.accountScope === "active_official_session" && candidate2.resources?.accountScope === "active_official_session" && a.accountId !== candidate2.accountId && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
+          if (obsoleteOfficial && typeof entry.module.importAccount === "function") {
+            try {
+              const imported = await entry.module.importAccount(candidate2, providerContext(this));
+              entry.pool.remove(obsoleteOfficial.accountId);
+              entry.pool.upsert(imported, { resetHealth: true });
+              if (entry.pool.getDefaultAccountId() === obsoleteOfficial.accountId) {
+                entry.pool.setDefaultAccount(imported.accountId);
+              }
+              changedProviderIds.add(currentProviderId);
+            } catch {
+            }
+          }
+          continue;
+        }
         const identityChanged = candidate2.email !== existing.email || candidate2.displayName !== existing.displayName || candidateIdentity.identitySource !== existingIdentity.identitySource || candidateIdentity.identityLabel !== existingIdentity.identityLabel || candidateIdentity.sessionFingerprint !== existingIdentity.sessionFingerprint || candidateIdentity.identityNote !== existingIdentity.identityNote || candidateIdentity.sessionPersistence !== existingIdentity.sessionPersistence;
         if (identityChanged) {
           entry.pool.upsert({
@@ -11274,6 +13272,13 @@ var DockyardRuntime = class {
     await this.init();
     return this.contextWindowOverrides.set(input, value);
   }
+  getModelSelection(providerId) {
+    return this.modelSelection.get(providerId);
+  }
+  async setModelSelection(providerId, enabledModelIds) {
+    await this.init();
+    return this.modelSelection.set(providerId, enabledModelIds);
+  }
   async getCatalog(providerId, context = {}) {
     await this.init();
     const entry = this.#entry(providerId);
@@ -11415,8 +13420,16 @@ var DockyardRuntime = class {
 // packages/dsh-plugin/src/codex-transport.mjs
 import { access, readFile as readFile7 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname as dirname4, join as join10, resolve } from "node:path";
+import { dirname as dirname5, join as join11, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+var activeCodexModels = /* @__PURE__ */ new Map();
+function recordCodexModels(models) {
+  if (Array.isArray(models)) {
+    for (const m of models) {
+      if (m?.id) activeCodexModels.set(m.id, m);
+    }
+  }
+}
 var DSH_LLM_PI_AI = "@deepseek-ai/dsh-llm-pi-ai";
 var PI_AI = "@earendil-works/pi-ai";
 var PI_AI_CODEX_API = "@earendil-works/pi-ai/api/openai-codex-responses.lazy";
@@ -11453,15 +13466,15 @@ async function findPackageRoot(startDirectory, packageName) {
   const packageParts = packageName.split("/");
   let current = resolve(startDirectory);
   while (true) {
-    const candidate2 = join10(current, "node_modules", ...packageParts);
-    if (await isFile(join10(candidate2, "package.json"))) return candidate2;
-    const parent = dirname4(current);
+    const candidate2 = join11(current, "node_modules", ...packageParts);
+    if (await isFile(join11(candidate2, "package.json"))) return candidate2;
+    const parent = dirname5(current);
     if (parent === current) return null;
     current = parent;
   }
 }
 async function packageImportUrl(packageRoot, subpath = null) {
-  const packageJson = JSON.parse(await readFile7(join10(packageRoot, "package.json"), "utf8"));
+  const packageJson = JSON.parse(await readFile7(join11(packageRoot, "package.json"), "utf8"));
   const exports = packageJson.exports;
   let target = null;
   if (!subpath) {
@@ -11483,13 +13496,13 @@ async function packageImportUrl(packageRoot, subpath = null) {
   if (typeof target !== "string") {
     throw new Error(`Cannot resolve ${subpath ?? "."} from ${packageRoot}`);
   }
-  return pathToFileURL(join10(packageRoot, target)).href;
+  return pathToFileURL(join11(packageRoot, target)).href;
 }
 async function importFromDshInstall(moduleAnchor) {
   const anchor = moduleAnchor ?? process.env.DOCKYARD_DSH_CLI_PATH ?? process.argv[1] ?? import.meta.url;
   const dshRequire = createRequire(anchor);
   const dshLlmPath = dshRequire.resolve(DSH_LLM_PI_AI);
-  const dshPackageRoot = dirname4(dirname4(dshLlmPath));
+  const dshPackageRoot = dirname5(dirname5(dshLlmPath));
   const piRoot = await findPackageRoot(dshPackageRoot, PI_AI);
   if (!piRoot) throw new Error(`Cannot find ${PI_AI} beside ${DSH_LLM_PI_AI}`);
   const [{ PiAiAdapter }, { createProvider }, { openAICodexResponsesApi }, { openaiCodexProvider }, builtinProviders2] = await Promise.all([
@@ -11515,7 +13528,7 @@ async function loadExecutor(moduleAnchor) {
     PiAiAdapter,
     createProvider,
     openAICodexResponsesApi,
-    modelResolver: (modelId) => modelById.get(modelId)
+    modelResolver: (modelId) => modelById.get(modelId) ?? activeCodexModels.get(modelId) ?? null
   });
 }
 async function loadDependencies(moduleAnchor) {
@@ -11542,29 +13555,9 @@ function createPiAiModelRegistryLoader({ moduleAnchor = null } = {}) {
     return registryPromise;
   };
 }
-function reasoningFromThinkingLevelMap(thinkingLevelMap) {
-  if (!thinkingLevelMap || typeof thinkingLevelMap !== "object") return void 0;
-  const efforts = Object.entries(thinkingLevelMap).filter(([id, providerValue]) => id !== "off" && typeof providerValue === "string" && providerValue.length > 0).map(([id, providerValue]) => ({
-    id,
-    name: id.replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase()),
-    ...providerValue === id ? {} : { description: `provider value: ${providerValue}` }
-  }));
-  return efforts.length > 0 ? { efforts } : void 0;
-}
-function codexModelToDshCatalog(model) {
-  const reasoning = reasoningFromThinkingLevelMap(model?.thinkingLevelMap);
-  return {
-    id: model.id,
-    name: model.name,
-    ...Array.isArray(model.input) ? { inputModalities: [...model.input] } : {},
-    ...Number.isInteger(model.contextWindow) ? { contextWindow: model.contextWindow } : {},
-    ...Number.isInteger(model.maxTokens) ? { maxTokens: model.maxTokens } : {},
-    ...reasoning ? { reasoning } : {}
-  };
-}
-function createCodexDshCatalogLoader({ moduleAnchor = null } = {}) {
+function createCodexDshCatalogLoader({ moduleAnchor = null, ...options } = {}) {
   let dependenciesPromise;
-  return async () => {
+  const fallbackLoader = async () => {
     dependenciesPromise ??= loadDependencies(moduleAnchor);
     const { openaiCodexProvider } = await dependenciesPromise;
     const models = openaiCodexProvider().getModels();
@@ -11573,10 +13566,19 @@ function createCodexDshCatalogLoader({ moduleAnchor = null } = {}) {
       source: "dsh_pi_ai_provider_catalog"
     };
   };
+  const loader = createCodexCatalogLoader({
+    fallbackLoader,
+    ...options
+  });
+  return async (context = {}) => {
+    const result = await loader(context);
+    recordCodexModels(result?.models);
+    return result;
+  };
 }
 
 // packages/dsh-plugin/src/dockyard-service.mjs
-import { spawn as spawn6 } from "node:child_process";
+import { spawn as spawn7 } from "node:child_process";
 var DEFAULT_REFRESH_INTERVAL_MS = 5 * 60 * 1e3;
 var AUTH_POLL_INTERVAL_MS = 750;
 var AUTH_URL_WAIT_MS = 2e3;
@@ -11658,7 +13660,7 @@ function commandError(text3) {
 function openDefaultBrowser(url) {
   if (process.platform !== "darwin" || !url) return;
   try {
-    const child = spawn6("open", [url], { detached: true, stdio: "ignore" });
+    const child = spawn7("open", [url], { detached: true, stdio: "ignore" });
     child.unref();
   } catch {
   }
@@ -11676,7 +13678,8 @@ var DockyardDshService = class {
     refreshIntervalMs = numericOption2(process.env.DOCKYARD_DSH_REFRESH_INTERVAL_MS, DEFAULT_REFRESH_INTERVAL_MS),
     autoRefresh = true,
     openBrowser = openDefaultBrowser,
-    logger = console
+    logger = console,
+    notifyAdaptersUpdated = null
   } = {}) {
     if (!runtime) throw new Error("Dockyard DSH service requires a runtime");
     this.runtime = runtime;
@@ -11684,6 +13687,7 @@ var DockyardDshService = class {
     this.autoRefresh = autoRefresh;
     this.openBrowser = openBrowser;
     this.logger = logger;
+    this.notifyAdaptersUpdated = notifyAdaptersUpdated;
     this.ready = runtime.init();
   }
   async start() {
@@ -11804,6 +13808,29 @@ var DockyardDshService = class {
   async setContextWindowOverride(input, value) {
     await this.ready;
     return this.runtime.setContextWindowOverride(input, value);
+  }
+  async getModelSelection(providerId) {
+    await this.ready;
+    const catalog = await this.runtime.getCatalog(providerId).catch(() => ({ models: [] }));
+    const enabledModelIds = this.runtime.getModelSelection(providerId);
+    return {
+      providerId,
+      models: catalog?.models ?? [],
+      enabledModelIds
+    };
+  }
+  async setModelSelection(providerId, enabledModelIds) {
+    await this.ready;
+    const saved = await this.runtime.setModelSelection(providerId, enabledModelIds);
+    try {
+      this.notifyAdaptersUpdated?.();
+    } catch {
+    }
+    return {
+      providerId,
+      enabledModelIds: saved,
+      saved: true
+    };
   }
   async startAuthorization(providerInput, { openBrowser = true } = {}) {
     await this.ready;
@@ -12134,7 +14161,7 @@ function createDockyardCredentialStore(credentials, fallback = null) {
 // packages/dsh-plugin/src/native-key-pool-host.mjs
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAgentLoopRequest, markAgentLoopRequest } from "@deepseek-ai/dsh-llm";
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 
 // packages/dsh-plugin/src/native-usage.mjs
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -12414,7 +14441,7 @@ var NativeKeyPoolHost = class {
     this.logger = logger ?? console;
     this.contextWindowOverrides = contextWindowOverrides;
     this.stateStore = stateStore ?? new JsonStateStore({
-      filePath: join11(defaultDockyardHome(), "native-key-pools.json")
+      filePath: join12(defaultDockyardHome(), "native-key-pools.json")
     });
     this.readyPromise = this.loadState();
   }
@@ -12808,18 +14835,24 @@ function apply(ctx, config = {}) {
       }),
       claude: runtimeOptions.requestExecutors?.claude ?? createClaudeNativeExecutor(runtimeOptions.claude ?? {}),
       cursor: runtimeOptions.requestExecutors?.cursor ?? createCursorNativeExecutor(runtimeOptions.cursor ?? {}),
-      grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {})
+      grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
+      opencode: runtimeOptions.requestExecutors?.opencode ?? createOpencodeNativeExecutor(runtimeOptions.opencode ?? {})
     };
     runtimeOptions.catalogLoaders = {
       ...runtimeOptions.catalogLoaders ?? {},
-      "openai-codex": createCodexDshCatalogLoader(),
+      "openai-codex": runtimeOptions.catalogLoaders?.["openai-codex"] ?? createCodexDshCatalogLoader(runtimeOptions.codex ?? {}),
       antigravity: antigravityCatalogLoader,
       grok: runtimeOptions.catalogLoaders?.grok ?? createGrokCatalogLoader({
         ...runtimeOptions.grok ?? {},
-        commandRunner: runtimeOptions.grok?.commandRunner ?? runCliCommand
+        commandRunner: runtimeOptions.grok?.commandRunner ?? runCliCommand,
+        registryLoader: modelRegistryLoader
       }),
       claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
-      cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {})
+      cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
+      opencode: runtimeOptions.catalogLoaders?.opencode ?? createOpencodeCatalogLoader({
+        ...runtimeOptions.opencode ?? {},
+        registryLoader: modelRegistryLoader
+      })
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders).filter(([, loader]) => typeof loader === "function");
@@ -12833,7 +14866,7 @@ function apply(ctx, config = {}) {
         providers.filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length > 0).map((provider) => provider.providerId)
       );
       const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
-      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || connected.has(providerId)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
+      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || providerId === "opencode" || connected.has(providerId)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
     });
@@ -12870,10 +14903,18 @@ function apply(ctx, config = {}) {
     installAdapter();
   }
   if (typeof runtime.init === "function") {
+    const notifyAdaptersUpdated = () => {
+      try {
+        ctx.emit("llm/adapters-updated");
+        ctx.llm?.emitAdaptersUpdated?.();
+      } catch {
+      }
+    };
     const service = config.service ?? new DockyardDshService({
       runtime,
       ...config.serviceOptions ?? {},
-      logger: config.serviceOptions?.logger ?? contextLogger(ctx, "dockyard-dsh")
+      logger: config.serviceOptions?.logger ?? contextLogger(ctx, "dockyard-dsh"),
+      notifyAdaptersUpdated
     });
     if (typeof ctx.provide === "function") ctx.provide("dockyard", service);
     let nativeKeyPool = config.nativeKeyPool ?? null;
@@ -12921,8 +14962,8 @@ function apply(ctx, config = {}) {
                   res.end("Forbidden");
                   return;
                 }
-                const filePath = join12(process.cwd(), "artifacts", cleanPath);
-                if (!existsSync(filePath)) {
+                const filePath = join13(process.cwd(), "artifacts", cleanPath);
+                if (!existsSync3(filePath)) {
                   res.writeHead(404);
                   res.end("Not Found");
                   return;

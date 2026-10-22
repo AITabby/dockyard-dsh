@@ -634,6 +634,139 @@ test("DSH LLM adapter does not replay an empty-output failure after forwarding o
   );
 });
 
+test("DSH LLM adapter implements imageRequestPricing and imageRequestTarget for DSH token meter and compaction", () => {
+  const adapter = createDockyardLlmAdapter({
+    runtime: {
+      listProviderIds: () => ["opencode"],
+      listProviderManifests: () => [],
+    },
+  });
+
+  assert.equal(typeof adapter.imageRequestPricing, "function");
+  assert.equal(adapter.imageRequestPricing("opencode", "deepseek-v4.1-flash-free"), undefined);
+
+  assert.equal(typeof adapter.imageRequestTarget, "function");
+  const target = adapter.imageRequestTarget("opencode", "deepseek-v4.1-flash-free", {
+    width: 800,
+    height: 600,
+    bytes: 12345,
+  });
+  assert.deepEqual(target, { width: 800, height: 600, maxBytes: 12345 });
+});
+
+test("DSH LLM adapter clamps defaultMaxTokens to preserve conversation compaction budget", async () => {
+  const adapter = createDockyardLlmAdapter({
+    runtime: {
+      listProviderIds: () => ["opencode"],
+      listProviderManifests: () => [{ id: "opencode", displayName: "OpenCode" }],
+      async getCatalog() {
+        return {
+          models: [
+            {
+              id: "deepseek-v4.1-flash-free",
+              name: "DeepSeek v4.1 Flash",
+              contextWindow: 200000,
+              maxTokens: 128000,
+            },
+            {
+              id: "small-model",
+              name: "Small Model",
+              contextWindow: 32000,
+              maxTokens: 16000,
+            },
+          ],
+        };
+      },
+    },
+  });
+
+  const models = await adapter.listModels("opencode");
+  assert.equal(models.length, 2);
+
+  const deepseek = models.find((m) => m.id === "deepseek-v4.1-flash-free");
+  assert.equal(deepseek.context.contextWindow, 200000);
+  assert.equal(deepseek.defaultMaxTokens, 16384);
+
+  const small = models.find((m) => m.id === "small-model");
+  assert.equal(small.context.contextWindow, 32000);
+  assert.equal(small.defaultMaxTokens, 6400);
+});
+
+test("DSH LLM adapter normalizes context overflow error and stream finish to CONTEXT_WINDOW_EXCEEDED", async () => {
+  const adapter = createDockyardLlmAdapter({
+    runtime: {
+      listProviderIds: () => ["opencode"],
+      listProviderManifests: () => [{ id: "opencode", displayName: "OpenCode" }],
+      async getCatalog() {
+        return { models: [{ id: "deepseek-v4.1-flash-free", name: "DeepSeek" }] };
+      },
+      async stream(_provider, request) {
+        if (request.testCase === "thrown") {
+          return (async function* chunks() {
+            const err = new Error("This model's maximum context length is 200000 tokens. However, your request resulted in 263100 tokens.");
+            err.code = "CONTEXT_LENGTH_EXCEEDED";
+            throw err;
+          })();
+        }
+        return (async function* chunks() {
+          yield {
+            type: "finish",
+            reason: {
+              kind: "error",
+              failure: {
+                code: "BAD_REQUEST",
+                message: "input is too large for the model's context window",
+              },
+            },
+          };
+        })();
+      },
+    },
+  });
+
+  const thrownStream = adapter.stream({ provider: "opencode", model: "deepseek-v4.1-flash-free", testCase: "thrown" });
+  const thrownChunks = [];
+  for await (const chunk of thrownStream) thrownChunks.push(chunk);
+  assert.equal(thrownChunks.length, 1);
+  assert.equal(thrownChunks[0].type, "finish");
+  assert.equal(thrownChunks[0].reason.kind, "error");
+  assert.equal(thrownChunks[0].reason.failure.code, "CONTEXT_WINDOW_EXCEEDED");
+
+  const finishStream = adapter.stream({ provider: "opencode", model: "deepseek-v4.1-flash-free", testCase: "finish" });
+  const finishChunks = [];
+  for await (const chunk of finishStream) finishChunks.push(chunk);
+  assert.equal(finishChunks.length, 1);
+  assert.equal(finishChunks[0].type, "finish");
+  assert.equal(finishChunks[0].reason.kind, "error");
+  assert.equal(finishChunks[0].reason.failure.code, "CONTEXT_WINDOW_EXCEEDED");
+});
+
+test("DSH LLM adapter fallback resolution supplies valid context window and defaultMaxTokens for all providers", async () => {
+  const adapter = createDockyardLlmAdapter({
+    runtime: {
+      listProviderIds: () => ["opencode", "grok", "openai-codex", "claude"],
+      listProviderManifests: () => [],
+      async getCatalog() { return { models: [] }; },
+    },
+  });
+
+  const deepseek = await adapter.resolveModel("opencode", "deepseek-v4.1-flash-free");
+  assert.equal(deepseek.context.contextWindow, 200000);
+  assert.equal(deepseek.defaultMaxTokens, 8192);
+
+  const grok = await adapter.resolveModel("grok", "grok-4.7");
+  assert.equal(grok.context.contextWindow, 256000);
+  assert.equal(grok.defaultMaxTokens, 8192);
+
+  const codex = await adapter.resolveModel("openai-codex", "gpt-5.6-luna");
+  assert.equal(codex.context.contextWindow, 200000);
+  assert.equal(codex.defaultMaxTokens, 8192);
+
+  const claude = await adapter.resolveModel("claude", "claude-3-7-sonnet");
+  assert.equal(claude.context.contextWindow, 200000);
+  assert.equal(claude.defaultMaxTokens, 8192);
+});
+
 test("DSH LLM adapter does not expose duplicate provider model rows", async () => {
   const adapter = createDockyardLlmAdapter({
     runtime: {
