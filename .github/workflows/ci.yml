@@ -22,8 +22,16 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm test
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            packages/dsh-plugin/pnpm-lock.yaml
+      - name: Install root dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install plugin dependencies
+        working-directory: packages/dsh-plugin
+        run: pnpm install --frozen-lockfile
+      - name: Run test suite
+        run: pnpm test
 
   plugin-bundle:
     # The published bundle builds from packages/dsh-plugin with its own
@@ -57,7 +65,14 @@ jobs:
         with:
           node-version: "24"
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            packages/dsh-plugin/pnpm-lock.yaml
+      - name: Install root dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install plugin dependencies
+        working-directory: packages/dsh-plugin
+        run: pnpm install --frozen-lockfile
       - name: Full suite (Keychain tests execute for real on macOS)
         run: pnpm test
       - name: Swift syntax gates
