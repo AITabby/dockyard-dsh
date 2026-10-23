@@ -15,13 +15,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-          cache: npm
-      # package-lock.json pins the documented dev flow (`npm install && npm test`).
-      - run: npm ci
-      - run: node --test
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
 
   plugin-bundle:
     # The published bundle builds from packages/dsh-plugin with its own
@@ -48,13 +50,16 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Full suite (Keychain tests execute for real on macOS)
-        run: node --test
+        run: pnpm test
       - name: Swift syntax gates
         run: |
           xcrun swiftc -parse apps/macos/DockyardDSH/Sources/main.swift
