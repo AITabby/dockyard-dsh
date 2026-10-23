@@ -77,32 +77,7 @@ jobs:
         run: pnpm test
       - name: Swift syntax gates
         run: |
-          diag() {
-            local title="$1"
-            local msg="$2"
-            # Escape newlines for GitHub Actions annotation
-            local escaped="${msg//$'\n'/%0A}"
-            echo "::error title=${title}::${escaped}"
-          }
-          INFO="xcode: $(xcode-select -p 2>&1); which: $(which swiftc 2>&1); ver: $(swiftc --version 2>&1 | head -n 1)"
-          diag "Environment" "$INFO"
-          
-          ERR1=""
-          swiftc -parse apps/macos/DockyardDSH/Sources/main.swift 2>&1 || ERR1=$?
-          if [ -n "$ERR1" ]; then
-            OUT1=$(swiftc -parse apps/macos/DockyardDSH/Sources/main.swift 2>&1 || true)
-            diag "MainSwift" "$OUT1"
-          fi
-          
-          ERR2=""
-          swiftc -parse packages/vault/src/macos-keychain-helper.swift 2>&1 || ERR2=$?
-          if [ -n "$ERR2" ]; then
-            OUT2=$(swiftc -parse packages/vault/src/macos-keychain-helper.swift 2>&1 || true)
-            diag "VaultSwift" "$OUT2"
-          fi
-          
-          if [ -n "$ERR1" ] || [ -n "$ERR2" ]; then
-            exit 1
-          fi
+          xcrun swiftc -parse apps/macos/DockyardDSH/Sources/main.swift
+          xcrun swiftc -parse packages/vault/src/macos-keychain-helper.swift
       - name: Build script syntax gate
         run: bash -n apps/macos/build-dmg.sh

@@ -385,7 +385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             FileManager.default.createFile(
                 atPath: logURL.path,
                 contents: nil,
-                attributes: [.posixPermissions: 0o600],
+                attributes: [.posixPermissions: 0o600]
             )
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logURL.path)
             logHandle = try FileHandle(forWritingTo: logURL)
