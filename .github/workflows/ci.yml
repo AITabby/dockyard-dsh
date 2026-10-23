@@ -77,14 +77,20 @@ jobs:
         run: pnpm test
       - name: Swift syntax gates
         run: |
+          set -x
           if [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
             sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          else
+            LATEST_XCODE="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n 1)"
+            if [ -n "$LATEST_XCODE" ] && [ -d "$LATEST_XCODE/Contents/Developer" ]; then
+              sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
+            else
+              sudo xcode-select -r 2>/dev/null || true
+            fi
           fi
-          SWIFTC_CMD="xcrun --sdk macosx swiftc"
-          if ! xcrun --find swiftc >/dev/null 2>&1; then
-            SWIFTC_CMD="swiftc"
-          fi
-          $SWIFTC_CMD -parse apps/macos/DockyardDSH/Sources/main.swift
-          $SWIFTC_CMD -parse packages/vault/src/macos-keychain-helper.swift
+          xcode-select -p || true
+          swiftc --version || true
+          swiftc -parse apps/macos/DockyardDSH/Sources/main.swift
+          swiftc -parse packages/vault/src/macos-keychain-helper.swift
       - name: Build script syntax gate
         run: bash -n apps/macos/build-dmg.sh
