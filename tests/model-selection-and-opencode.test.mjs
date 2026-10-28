@@ -84,7 +84,7 @@ test("DockyardRuntime auto-imports OpenCode free account and LLM adapter filters
   assert.equal(opencodeEntry.accounts.length, 1, "OpenCode should auto-provision the free account");
   assert.equal(opencodeEntry.accounts[0].accountId, "opencode-free");
 
-  const adapter = createDockyardLlmAdapter({ runtime });
+  const adapter = createDockyardLlmAdapter({ runtime, providerIds: ["opencode"] });
 
   // Initially all models returned
   const allModels = await adapter.listModels("opencode");
@@ -215,5 +215,152 @@ test("textFromContent and promptFromRequest exclude reasoning blocks and strip r
   });
   assert.equal(messages.length, 1);
   assert.equal(messages[0].content, "Here is the answer.");
+});
+
+test("compactMessagesForOpencode applies sliding window preserving initial context and milestone", async () => {
+  const { compactMessagesForOpencode } = await import("../modules/provider-opencode/src/native-transport.mjs");
+  const messages = [
+    { role: "user", content: "Initial requirement" },
+  ];
+  for (let i = 1; i <= 60; i++) {
+    messages.push({ role: i % 2 === 1 ? "assistant" : "user", content: `Turn ${i}` });
+  }
+
+  const compacted = compactMessagesForOpencode(messages, { maxMessages: 20, quantum: 5 });
+  assert.ok(compacted.length <= 25);
+  assert.equal(compacted[0].content, "Initial requirement");
+  assert.ok(compacted[1].content.includes("[System Note: Context sliding window active"));
+  assert.equal(compacted[compacted.length - 1].content, "Turn 60");
+});
+
+test("parseOpencodeCatalog filters by installedIds when CLI is present", async () => {
+  const installedIds = ["beam-free", "deepseek-v4.1-flash-free", "flint-40b-free"];
+  const parsed = parseOpencodeCatalog(null, { installedIds });
+  assert.equal(parsed.models.length, 3);
+  assert.deepEqual(parsed.models.map((m) => m.id), installedIds);
+});
+
+test("DSH LLM adapter prepares compaction request with minimal reasoning and no thinking", async () => {
+  const { createDockyardLlmAdapter } = await import("../packages/dsh-bridge/src/llm-adapter.mjs");
+
+  let capturedRequest = null;
+  const runtime = {
+    async stream(provider, request, options) {
+      capturedRequest = request;
+      return (async function* () {
+        yield { type: "block-start", index: 0, blockType: "text" };
+        yield { type: "text-delta", index: 0, text: "summary text" };
+        yield { type: "block-end", index: 0, block: { type: "text", text: "summary text" } };
+        yield { type: "finish", reason: { kind: "stop" } };
+      })();
+    },
+    snapshot() {
+      return { providers: [{ providerId: "opencode", accounts: [{ accountId: "opencode-free" }] }] };
+    },
+    async listModels() {
+      return [{ id: "deepseek-v4.1-flash-free", maxTokens: 8192, contextWindow: 200000 }];
+    },
+  };
+
+  const adapter = createDockyardLlmAdapter({ runtime, providerIds: ["opencode"] });
+  const stream = adapter.stream({
+    provider: "opencode",
+    model: "deepseek-v4.1-flash-free",
+    messages: [{ role: "user", content: "Summarize this" }],
+    purpose: "compaction",
+    reasoningEffort: "high",
+  });
+
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+
+  assert.ok(capturedRequest);
+  assert.equal(capturedRequest.purpose, "compaction");
+  assert.equal(capturedRequest.reasoningEffort, "minimal");
+  assert.equal(capturedRequest.thinking, false);
+});
+
+test("runViaOpencodeServer suppresses reasoning, denies permissions, and completes in 1 step during compaction", async () => {
+  const { createOpencodeNativeExecutor } = await import("../modules/provider-opencode/src/native-transport.mjs");
+
+  const recordedReplies = [];
+  let sessionRequestBody = null;
+  const sseEvents = [
+    { type: "session.reasoning.delta", data: { sessionID: "sess-123", delta: "Internal reasoning" } },
+    { type: "session.text.delta", data: { sessionID: "sess-123", delta: "Compacted summary text" } },
+    { type: "permission.request", data: { sessionID: "sess-123", id: "perm-1" } },
+    { type: "session.step.ended", data: { sessionID: "sess-123", finish: "stop", tokens: { input: 100, output: 20 } } },
+    // Notice: no session.execution.succeeded sent! Simulating autonomous agent that would keep running
+  ];
+
+  const ssePayload = sseEvents.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+
+  const mockFetch = async (url, options = {}) => {
+    const urlStr = String(url);
+    if (urlStr.includes("/api/session/sess-123/permission/")) {
+      const body = JSON.parse(options.body || "{}");
+      recordedReplies.push(body);
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) };
+    }
+    if (urlStr.endsWith("/api/session") && options.method === "POST") {
+      sessionRequestBody = JSON.parse(options.body || "{}");
+      return { ok: true, status: 200, text: async () => JSON.stringify({ id: "sess-123" }) };
+    }
+    if (urlStr.endsWith("/api/event")) {
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(ssePayload));
+            controller.close();
+          },
+        }),
+      };
+    }
+    if (urlStr.includes("/api/session/sess-123/prompt")) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) };
+    }
+    if (options.method === "DELETE") {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) };
+    }
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+
+  const { runViaOpencodeServer } = await import("../modules/provider-opencode/src/native-transport.mjs");
+  const server = { url: "http://127.0.0.1:9999", auth: "Basic test" };
+  const chunks = [];
+  for await (const chunk of runViaOpencodeServer({
+    server,
+    request: { model: "deepseek-v4.1-flash-free", purpose: "compaction", prompt: "Summarize" },
+    fetchImpl: mockFetch,
+  })) {
+    chunks.push(chunk);
+  }
+
+  // Verify: reasoning deltas were suppressed during compaction
+  assert.equal(chunks.some((c) => c.type === "reasoning-delta"), false);
+  assert.equal(chunks.some((c) => c.type === "block-start" && c.blockType === "reasoning"), false);
+
+  // Verify: text delta was yielded
+  const textDeltas = chunks.filter((c) => c.type === "text-delta").map((c) => c.text).join("");
+  assert.equal(textDeltas, "Compacted summary text");
+
+  // Verify: finished immediately on step ended, did not wait indefinitely
+  const finishChunk = chunks.find((c) => c.type === "finish");
+  assert.ok(finishChunk);
+  assert.deepEqual(finishChunk.reason, { kind: "stop" });
+
+  // Verify: permission request was denied during compaction
+  assert.equal(recordedReplies.length, 1);
+  assert.deepEqual(recordedReplies[0], { decision: "deny" });
+
+  // Verify: compaction does not force a model-specific reasoning variant.
+  // Unsupported variants (e.g. "minimal" on deepseek-v4.1-flash-free) fail the
+  // whole session with provider.no-route.
+  assert.ok(sessionRequestBody);
+  assert.equal(sessionRequestBody.model.id, "deepseek-v4.1-flash-free");
+  assert.equal(sessionRequestBody.model.variant, undefined);
 });
 

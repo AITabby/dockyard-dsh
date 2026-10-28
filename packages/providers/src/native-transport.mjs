@@ -135,6 +135,8 @@ export function nativeProviderError(providerId, message, { status, body, code } 
   const quotaExhausted = codeText === "RESOURCE_EXHAUSTED"
     || /\bresources?\b[\s\S]{0,80}\bexhausted\b/.test(exhaustionText)
     || /\bquota\b[\s\S]{0,80}\b(?:exhausted|depleted|exceeded)\b/.test(exhaustionText)
+    || /\busage limit\b[\s\S]{0,80}\breached\b/.test(exhaustionText)
+    || /\bfree[\s\S]{0,40}limit reached\b/.test(exhaustionText)
     || /\bcapacity\b[\s\S]{0,80}\bexhausted\b/.test(exhaustionText);
   const rateLimited = statusCode === 429
     || numericStatus(resolvedCode) === 429

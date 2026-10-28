@@ -463,8 +463,10 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
       if (options.purpose === "compaction") {
         // Strip heavy reasoning effort during compaction so summarization runs swiftly
         // without timing out or spending minutes in chain-of-thought exploration.
-        delete request.reasoningEffort;
-        delete request.reasoning_effort;
+        request.purpose = "compaction";
+        request.reasoningEffort = "minimal";
+        request.reasoning_effort = "minimal";
+        request.thinking = false;
       }
       const attachments = typeof attachmentsResolver === "function"
         ? attachmentsResolver()

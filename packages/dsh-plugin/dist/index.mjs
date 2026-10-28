@@ -1570,8 +1570,10 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
         ...model.defaultMaxTokens !== void 0 ? { modelContext: { ...model.context ?? {}, maxTokens: model.defaultMaxTokens } } : {}
       } : { ...options };
       if (options.purpose === "compaction") {
-        delete request.reasoningEffort;
-        delete request.reasoning_effort;
+        request.purpose = "compaction";
+        request.reasoningEffort = "minimal";
+        request.reasoning_effort = "minimal";
+        request.thinking = false;
       }
       const attachments = typeof attachmentsResolver === "function" ? attachmentsResolver() : void 0;
       const stream = await runtime.stream(options.provider, request, {
@@ -3997,7 +3999,7 @@ function nativeProviderError(providerId, message, { status, body, code } = {}) {
   const statusCode = numericStatus(status);
   const codeText = String(upstreamStatus ?? resolvedCode ?? "").toUpperCase();
   const exhaustionText = `${resolvedMessage ?? ""} ${diagnosticText(body)} ${diagnosticText(upstreamStatus)} ${diagnosticText(resolvedCode)}`.toLowerCase();
-  const quotaExhausted = codeText === "RESOURCE_EXHAUSTED" || /\bresources?\b[\s\S]{0,80}\bexhausted\b/.test(exhaustionText) || /\bquota\b[\s\S]{0,80}\b(?:exhausted|depleted|exceeded)\b/.test(exhaustionText) || /\bcapacity\b[\s\S]{0,80}\bexhausted\b/.test(exhaustionText);
+  const quotaExhausted = codeText === "RESOURCE_EXHAUSTED" || /\bresources?\b[\s\S]{0,80}\bexhausted\b/.test(exhaustionText) || /\bquota\b[\s\S]{0,80}\b(?:exhausted|depleted|exceeded)\b/.test(exhaustionText) || /\busage limit\b[\s\S]{0,80}\breached\b/.test(exhaustionText) || /\bfree[\s\S]{0,40}limit reached\b/.test(exhaustionText) || /\bcapacity\b[\s\S]{0,80}\bexhausted\b/.test(exhaustionText);
   const rateLimited = statusCode === 429 || numericStatus(resolvedCode) === 429 || numericStatus(upstreamStatus) === 429 || codeText === "RESOURCE_EXHAUSTED" || codeText === "RATE_LIMITED" || quotaExhausted;
   const displayMessage = quotaExhausted ? "\u989D\u5EA6\u6216\u4E0A\u6E38\u8D44\u6E90\u5DF2\u8017\u5C3D\uFF0C\u8BF7\u5237\u65B0\u989D\u5EA6\u3001\u5207\u6362\u8D26\u53F7\u6216\u7A0D\u540E\u91CD\u8BD5" : rateLimited ? "\u8BF7\u6C42\u9891\u7387\u53D7\u9650\uFF0C\u8BF7\u5207\u6362\u8D26\u53F7\u6216\u7A0D\u540E\u91CD\u8BD5" : resolvedMessage;
   const error = new Error(`${providerId ?? "provider"} native request failed${displayMessage ? `: ${displayMessage}` : ""}`);
@@ -11452,7 +11454,7 @@ function createCursorModule({ driver = {} } = {}) {
 }
 
 // modules/provider-opencode/src/native-transport.mjs
-import { spawn as spawn6 } from "node:child_process";
+import { execFileSync as execFileSync3, spawn as spawn6 } from "node:child_process";
 import { randomBytes as randomBytes4 } from "node:crypto";
 import { existsSync as existsSync2, readdirSync } from "node:fs";
 import { homedir as homedir10 } from "node:os";
@@ -11474,6 +11476,53 @@ function findOpencodeCliPath() {
   }
   return null;
 }
+function queryInstalledOpencodeCliModelIds(cliPath) {
+  if (!cliPath || !existsSync2(cliPath)) return null;
+  try {
+    const stdout = execFileSync3(cliPath, ["models"], { encoding: "utf8", timeout: 5e3 });
+    const ids = stdout.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.startsWith("opencode/") ? line.slice("opencode/".length) : line);
+    if (ids.length > 0) return ids;
+  } catch {
+  }
+  return null;
+}
+var DEFAULT_OPENCODE_MAX_MESSAGES = 40;
+var OPENCODE_SLIDING_WINDOW_QUANTUM = 10;
+function resolveOpencodeMaxMessages(request = {}) {
+  const envLimit = Number.parseInt(process.env.DOCKYARD_OPENCODE_MAX_MESSAGES ?? "", 10);
+  if (Number.isSafeInteger(envLimit) && envLimit > 0) return envLimit;
+  if (Number.isSafeInteger(request?.maxMessages) && request.maxMessages > 0) return request.maxMessages;
+  const contextWindow = request?.modelContext?.contextWindow ?? request?.contextWindow;
+  if (Number.isSafeInteger(contextWindow) && contextWindow >= 5e5) {
+    return 500;
+  }
+  return DEFAULT_OPENCODE_MAX_MESSAGES;
+}
+function compactMessagesForOpencode(messages, { maxMessages = DEFAULT_OPENCODE_MAX_MESSAGES, quantum = OPENCODE_SLIDING_WINDOW_QUANTUM } = {}) {
+  if (!Array.isArray(messages) || messages.length <= maxMessages) return messages;
+  const initialIndex = messages.findIndex((m) => m?.role === "user" || m?.role === "system");
+  const prefix = initialIndex >= 0 ? [messages[initialIndex]] : [];
+  const rawWindowCount = Math.max(10, maxMessages - prefix.length - 1);
+  const excess = messages.length - maxMessages;
+  const quantOffset = excess > 0 ? Math.floor(excess / quantum) * quantum : 0;
+  const windowCount = Math.max(10, rawWindowCount + (excess - quantOffset));
+  const recent = messages.slice(-windowCount);
+  const startIndex = messages.length - windowCount;
+  if (startIndex > 0) {
+    const firstRecent = recent[0];
+    const isToolResult = firstRecent?.role === "tool" || Array.isArray(firstRecent?.content) && firstRecent.content.some((part) => part?.type === "tool-result" || part?.type === "tool_result");
+    if (isToolResult && messages[startIndex - 1]) {
+      recent.unshift(messages[startIndex - 1]);
+    }
+  }
+  const compactedCount = messages.length - prefix.length - recent.length;
+  if (compactedCount <= 0) return messages;
+  const milestone = {
+    role: "user",
+    content: "[System Note: Context sliding window active. Intermediate messages were compacted to maintain low latency and prevent token exhaustion. Initial requirements and recent active turns are preserved.]"
+  };
+  return [...prefix, milestone, ...recent];
+}
 function contentPartText(part) {
   if (typeof part === "string") return part;
   if (!part || typeof part !== "object") return "";
@@ -11494,16 +11543,15 @@ function promptFromRequest(request) {
   if (typeof request.prompt === "string" && request.prompt.trim()) {
     return request.prompt;
   }
-  const messages = Array.isArray(request.messages) ? request.messages : [];
-  if (messages.length === 1 && !request.system) {
-    const msg = messages[0];
-    const text3 = typeof msg?.content === "string" ? msg.content : Array.isArray(msg?.content) ? msg.content.map(contentPartText).filter(Boolean).join("\n") : contentPartText(msg?.content);
-    if (text3) return text3;
-  }
+  const isCompaction = request.purpose === "compaction";
+  const defaultInstruction = isCompaction ? "You are an AI assistant summarizing the conversation. Reply directly with a concise text summary. Do not invoke tools or commands." : "You are an AI assistant. Reply directly to the user in text. Do not invoke tools or commands under any circumstances.";
+  const rawMessages = Array.isArray(request.messages) ? request.messages : [];
+  const messages = isCompaction ? rawMessages : compactMessagesForOpencode(rawMessages, { maxMessages: resolveOpencodeMaxMessages(request) });
   const parts = [];
-  if (typeof request.system === "string" && request.system.trim()) {
-    parts.push(`[System instructions: ${request.system.trim()}]`);
-  }
+  const systemText = typeof request.system === "string" && request.system.trim() ? `${defaultInstruction}
+
+${request.system.trim()}` : defaultInstruction;
+  parts.push(`[System instructions: ${systemText}]`);
   for (const msg of messages) {
     const role = msg?.role === "assistant" ? "Assistant" : msg?.role === "system" ? "System" : "User";
     const text3 = typeof msg?.content === "string" ? msg.content : Array.isArray(msg?.content) ? msg.content.map(contentPartText).filter(Boolean).join("\n") : contentPartText(msg?.content);
@@ -11562,7 +11610,9 @@ async function buildOpencodeMessages(request, attachments) {
   if (typeof request.system === "string" && request.system.length > 0) {
     result.push({ role: "system", content: request.system });
   }
-  for (const message of Array.isArray(request.messages) ? request.messages : []) {
+  const rawMessages = Array.isArray(request.messages) ? request.messages : [];
+  const messages = request.purpose === "compaction" ? rawMessages : compactMessagesForOpencode(rawMessages, { maxMessages: resolveOpencodeMaxMessages(request) });
+  for (const message of messages) {
     const role = message?.role === "assistant" ? "assistant" : message?.role === "tool" ? "tool" : "user";
     if (role === "tool") {
       result.push({
@@ -11728,7 +11778,7 @@ async function opencodeServerRequest(server, method, path, body, { signal, fetch
     return null;
   }
 }
-async function openOpencodeEventStream(server, sessionId, { signal, fetchImpl = fetch } = {}) {
+async function openOpencodeEventStream(server, sessionId, { signal, fetchImpl = fetch, idleTimeoutMs = 6e4 } = {}) {
   let response;
   try {
     response = await fetchImpl(`${server.url}/api/event`, {
@@ -11756,12 +11806,29 @@ async function openOpencodeEventStream(server, sessionId, { signal, fetchImpl = 
   const decoder = new TextDecoder();
   let buffer = "";
   let closed = false;
+  async function readChunkWithTimeout() {
+    if (!idleTimeoutMs || idleTimeoutMs <= 0) return reader.read();
+    let timer = null;
+    try {
+      return await Promise.race([
+        reader.read(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            const err = nativeProviderError(PROVIDER_ID10, "OpenCode \u4E8B\u4EF6\u6D41\u54CD\u5E94\u8D85\u65F6", { code: "TIMEOUT" });
+            reject(err);
+          }, idleTimeoutMs);
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
   return {
     async next() {
       while (!closed) {
         let boundary = buffer.indexOf("\n\n");
         while (boundary === -1) {
-          const { value, done } = await reader.read();
+          const { value, done } = await readChunkWithTimeout();
           if (done) {
             closed = true;
             return { done: true };
@@ -11802,7 +11869,7 @@ function opencodeServerModel(request) {
   const [baseRaw, embeddedVariant] = raw.split("#");
   const base = baseRaw.startsWith("opencode/") ? baseRaw.slice("opencode/".length) : baseRaw;
   if (!base) return null;
-  if (request?.purpose === "compaction") {
+  if (request?.purpose === "compaction" || request?.thinking === false) {
     return { providerID: PROVIDER_ID10, id: base };
   }
   const effort = request.reasoningEffort ?? request.reasoning_effort ?? embeddedVariant;
@@ -11837,7 +11904,7 @@ function isPermissionRequestEvent(type, data, sessionId) {
   if (data?.sessionID !== sessionId) return false;
   return type.includes("request") || type.endsWith(".updated") || type.endsWith(".asked");
 }
-async function* runViaOpencodeServer({ server, request, signal, fetchImpl }) {
+async function* runViaOpencodeServer({ server, request, signal, fetchImpl, timeoutMs = 6e4 }) {
   const prompt = promptFromRequest(request);
   const model = opencodeServerModel(request);
   const controller = new AbortController();
@@ -11845,6 +11912,7 @@ async function* runViaOpencodeServer({ server, request, signal, fetchImpl }) {
   let stream = null;
   let aborted = false;
   const pendingReplies = /* @__PURE__ */ new Set();
+  const isCompaction = request.purpose === "compaction";
   const onAbort = () => {
     aborted = true;
     controller.abort();
@@ -11864,6 +11932,7 @@ async function* runViaOpencodeServer({ server, request, signal, fetchImpl }) {
   let reasoning = null;
   let rawUsage = null;
   let stop = "stop";
+  let stepCount = 0;
   try {
     const created = await opencodeServerRequest(
       server,
@@ -11880,7 +11949,11 @@ async function* runViaOpencodeServer({ server, request, signal, fetchImpl }) {
       throw nativeProviderError(PROVIDER_ID10, "OpenCode \u4F1A\u8BDD\u521B\u5EFA\u5931\u8D25\uFF1A\u54CD\u5E94\u4E2D\u6CA1\u6709\u4F1A\u8BDD ID");
     }
     opencodeDebug("session created", sessionId);
-    stream = await openOpencodeEventStream(server, sessionId, { signal: controller.signal, fetchImpl });
+    stream = await openOpencodeEventStream(server, sessionId, {
+      signal: controller.signal,
+      fetchImpl,
+      idleTimeoutMs: timeoutMs
+    });
     opencodeDebug("event stream connected");
     await opencodeServerRequest(
       server,
@@ -11896,25 +11969,32 @@ async function* runViaOpencodeServer({ server, request, signal, fetchImpl }) {
       try {
         next = await stream.next();
       } catch (error) {
-        if (controller.signal.aborted) break;
+        if (controller.signal.aborted || signal?.aborted) break;
         throw error;
       }
-      if (next.done) break;
+      if (next.done) {
+        if (!finished && !text3 && !reasoning) {
+          throw nativeProviderError(PROVIDER_ID10, "OpenCode \u4E8B\u4EF6\u6D41\u5F02\u5E38\u7ED3\u675F\uFF0C\u672A\u8FD4\u56DE\u6709\u6548\u5185\u5BB9", { code: "EMPTY_RESPONSE" });
+        }
+        break;
+      }
       const event = next.value;
       const type = event.type;
       const data = event.data ?? {};
       if (type && !type.endsWith(".delta")) opencodeDebug("event", type);
       if (type === "session.reasoning.delta" && typeof data.delta === "string" && data.delta) {
-        if (textOpen) {
-          yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
-          textOpen = false;
+        if (!isCompaction) {
+          if (textOpen) {
+            yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+            textOpen = false;
+          }
+          if (!reasoning) {
+            reasoning = { index: nextIndex++, text: "" };
+            yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+          }
+          reasoning.text += data.delta;
+          yield { type: "reasoning-delta", index: reasoning.index, text: data.delta };
         }
-        if (!reasoning) {
-          reasoning = { index: nextIndex++, text: "" };
-          yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
-        }
-        reasoning.text += data.delta;
-        yield { type: "reasoning-delta", index: reasoning.index, text: data.delta };
       } else if (type === "session.text.delta" && typeof data.delta === "string" && data.delta) {
         if (reasoning) {
           yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
@@ -11931,12 +12011,33 @@ async function* runViaOpencodeServer({ server, request, signal, fetchImpl }) {
       } else if (type === "session.usage.updated" && data.tokens) {
         rawUsage = opencodeUsageFromTokens(data.tokens);
       } else if (type === "session.step.ended") {
+        stepCount++;
         if (typeof data.finish === "string" && data.finish) stop = data.finish;
         if (data.tokens) rawUsage = opencodeUsageFromTokens(data.tokens);
+        if (isCompaction) {
+          if (text3 || data.finish === "stop") {
+            finished = true;
+          }
+        } else if (data.finish === "stop" && text3) {
+          finished = true;
+        } else if (stepCount >= 5 && text3) {
+          finished = true;
+        }
+      } else if (type === "session.step.failed") {
+        const msg = opencodeEventMessage(data) || "OpenCode \u6B65\u9AA4\u6267\u884C\u5931\u8D25";
+        const status = data.error?.status ?? data.status;
+        const code = data.error?.type ?? data.type;
+        throw nativeProviderError(PROVIDER_ID10, msg, { status, code });
       } else if (type === "session.execution.succeeded") {
         finished = true;
-      } else if (type === "session.execution.failed" || type === "session.execution.error") {
-        throw nativeProviderError(PROVIDER_ID10, opencodeEventMessage(data) || "OpenCode \u6267\u884C\u5931\u8D25");
+      } else if (type === "session.execution.failed" || type === "session.execution.error" || type === "session.error") {
+        const msg = opencodeEventMessage(data) || "OpenCode \u6267\u884C\u5931\u8D25";
+        const status = data.error?.status ?? data.status;
+        const code = data.error?.type ?? data.type;
+        throw nativeProviderError(PROVIDER_ID10, msg, { status, code });
+      } else if (type === "session.execution.interrupted") {
+        aborted = true;
+        finished = true;
       } else if (isPermissionRequestEvent(type, data, sessionId)) {
         const requestId = data.id ?? data.requestID;
         if (requestId) {
@@ -11945,7 +12046,7 @@ async function* runViaOpencodeServer({ server, request, signal, fetchImpl }) {
               server,
               "POST",
               `/api/session/${sessionId}/permission/${requestId}/reply`,
-              { decision: "always" },
+              { decision: "deny" },
               { fetchImpl }
             ).catch(() => {
             })
@@ -11998,7 +12099,7 @@ function createOpencodeNativeExecutor({
       if (server) {
         let emitted = false;
         try {
-          for await (const event of runViaOpencodeServer({ server, request, signal, fetchImpl })) {
+          for await (const event of runViaOpencodeServer({ server, request, signal, fetchImpl, timeoutMs })) {
             emitted = true;
             yield event;
           }
@@ -12010,14 +12111,32 @@ function createOpencodeNativeExecutor({
     }
     if (cliPath) {
       const baseModel = request.model?.startsWith("opencode/") ? request.model : `opencode/${request.model}`;
-      const effort = request.purpose === "compaction" ? null : request.reasoningEffort ?? request.reasoning_effort;
+      const isCompaction = request.purpose === "compaction";
+      const thinkingDisabled = isCompaction || request.thinking === false;
+      const effort = thinkingDisabled ? null : request.reasoningEffort ?? request.reasoning_effort;
       const model = effort && effort !== "medium" ? `${baseModel}#${effort}` : baseModel;
       const prompt = promptFromRequest(request);
-      const child = spawn6(cliPath, ["run", "--model", model, "--thinking", "--format", "json", prompt], {
+      const args = ["run", "--model", model];
+      if (!thinkingDisabled) {
+        args.push("--thinking");
+      }
+      args.push("--format", "json", prompt);
+      const child = spawn6(cliPath, args, {
         signal,
         stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env }
       });
+      let timeoutTimer = null;
+      let timedOut = false;
+      if (timeoutMs > 0) {
+        timeoutTimer = setTimeout(() => {
+          timedOut = true;
+          try {
+            child.kill("SIGTERM");
+          } catch {
+          }
+        }, timeoutMs);
+      }
       const rl = readline.createInterface({ input: child.stdout });
       let text4 = "";
       let textIndex2 = 0;
@@ -12029,52 +12148,74 @@ function createOpencodeNativeExecutor({
       child.stderr?.on?.("data", (chunk) => {
         stderrOutput += String(chunk);
       });
-      for await (const line of rl) {
-        if (!line.trim()) continue;
-        let parsed;
-        try {
-          parsed = JSON.parse(line);
-        } catch {
-          continue;
+      try {
+        for await (const line of rl) {
+          if (!line.trim()) continue;
+          let parsed;
+          try {
+            parsed = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (parsed.type === "reasoning" && parsed.part?.text) {
+            if (!isCompaction) {
+              if (textOpen2) {
+                yield { type: "block-end", index: textIndex2, block: { type: "text", text: text4 } };
+                textOpen2 = false;
+              }
+              if (!reasoning2) {
+                reasoning2 = { index: nextIndex2++, text: "" };
+                yield { type: "block-start", index: reasoning2.index, blockType: "reasoning" };
+              }
+              const chunk = parsed.part.text;
+              reasoning2.text += chunk;
+              yield { type: "reasoning-delta", index: reasoning2.index, text: chunk };
+            }
+          } else if (parsed.type === "text" && parsed.part?.text) {
+            if (reasoning2) {
+              yield { type: "block-end", index: reasoning2.index, block: { type: "reasoning", text: reasoning2.text } };
+              reasoning2 = null;
+            }
+            if (!textOpen2) {
+              textIndex2 = nextIndex2++;
+              text4 = "";
+              textOpen2 = true;
+              yield { type: "block-start", index: textIndex2, blockType: "text" };
+            }
+            const chunk = parsed.part.text;
+            text4 += chunk;
+            yield { type: "text-delta", index: textIndex2, text: chunk };
+          } else if (parsed.type === "step_finish" && parsed.part?.tokens) {
+            rawUsage2 = {
+              prompt_tokens: parsed.part.tokens.input ?? 0,
+              completion_tokens: parsed.part.tokens.output ?? 0,
+              total_tokens: (parsed.part.tokens.input ?? 0) + (parsed.part.tokens.output ?? 0)
+            };
+            if (isCompaction) {
+              break;
+            }
+          } else if (parsed.type === "error") {
+            const msg = parsed.error?.message || "OpenCode CLI execution error";
+            const status = parsed.error?.status;
+            const code = parsed.error?.type;
+            throw nativeProviderError(PROVIDER_ID10, msg, { status, code });
+          }
         }
-        if (parsed.type === "reasoning" && parsed.part?.text) {
-          if (textOpen2) {
-            yield { type: "block-end", index: textIndex2, block: { type: "text", text: text4 } };
-            textOpen2 = false;
-          }
-          if (!reasoning2) {
-            reasoning2 = { index: nextIndex2++, text: "" };
-            yield { type: "block-start", index: reasoning2.index, blockType: "reasoning" };
-          }
-          const chunk = parsed.part.text;
-          reasoning2.text += chunk;
-          yield { type: "reasoning-delta", index: reasoning2.index, text: chunk };
-        } else if (parsed.type === "text" && parsed.part?.text) {
-          if (reasoning2) {
-            yield { type: "block-end", index: reasoning2.index, block: { type: "reasoning", text: reasoning2.text } };
-            reasoning2 = null;
-          }
-          if (!textOpen2) {
-            textIndex2 = nextIndex2++;
-            text4 = "";
-            textOpen2 = true;
-            yield { type: "block-start", index: textIndex2, blockType: "text" };
-          }
-          const chunk = parsed.part.text;
-          text4 += chunk;
-          yield { type: "text-delta", index: textIndex2, text: chunk };
-        } else if (parsed.type === "step_finish" && parsed.part?.tokens) {
-          rawUsage2 = {
-            prompt_tokens: parsed.part.tokens.input ?? 0,
-            completion_tokens: parsed.part.tokens.output ?? 0,
-            total_tokens: (parsed.part.tokens.input ?? 0) + (parsed.part.tokens.output ?? 0)
-          };
-        } else if (parsed.type === "error") {
-          throw nativeProviderError(PROVIDER_ID10, parsed.error?.message || "OpenCode CLI execution error");
+      } finally {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        try {
+          child.kill();
+        } catch {
         }
       }
-      if (!text4 && stderrOutput.trim()) {
-        throw nativeProviderError(PROVIDER_ID10, stderrOutput.trim());
+      if (timedOut) {
+        throw nativeProviderError(PROVIDER_ID10, `OpenCode CLI \u6267\u884C\u8D85\u65F6 (${timeoutMs}ms)`, { code: "TIMEOUT" });
+      }
+      if (!text4 && !reasoning2) {
+        if (stderrOutput.trim()) {
+          throw nativeProviderError(PROVIDER_ID10, stderrOutput.trim());
+        }
+        throw nativeProviderError(PROVIDER_ID10, "OpenCode CLI \u672A\u8FD4\u56DE\u6709\u6548\u5185\u5BB9", { code: "EMPTY_RESPONSE" });
       }
       if (reasoning2) {
         yield { type: "block-end", index: reasoning2.index, block: { type: "reasoning", text: reasoning2.text } };
@@ -12105,7 +12246,7 @@ function createOpencodeNativeExecutor({
       stream: true,
       ...typeof request.temperature === "number" ? { temperature: request.temperature } : {},
       ...typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {},
-      ...request.reasoningEffort ? { reasoning_effort: request.reasoningEffort } : {}
+      ...request.reasoningEffort && request.purpose !== "compaction" && request.thinking !== false ? { reasoning_effort: request.reasoningEffort } : {}
     };
     const headers = {
       "Content-Type": "application/json",
@@ -12275,6 +12416,12 @@ var BUILTIN_OPENCODE_FREE_MODELS = Object.freeze([
     maxTokens: 8192
   },
   {
+    id: "flint-40b-free",
+    name: "Flint 40B (Free)",
+    contextWindow: 131072,
+    maxTokens: 8192
+  },
+  {
     id: "deepseek-v4.1-flash-free",
     name: "DeepSeek v4.1 Flash (Free)",
     contextWindow: 2e5,
@@ -12390,9 +12537,23 @@ function findOpencodeRegistryModel(id, registry) {
   }
   return null;
 }
-function parseOpencodeCatalog(data, { registry = [] } = {}) {
+function parseOpencodeCatalog(data, { registry = [], installedIds = null } = {}) {
   const models = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
   if (!models.length) {
+    if (Array.isArray(installedIds) && installedIds.length > 0) {
+      const builtinMap2 = new Map(BUILTIN_OPENCODE_FREE_MODELS.map((m) => [m.id, m]));
+      const installedModels = installedIds.map((id) => {
+        const builtin = builtinMap2.get(id);
+        if (builtin) return builtin;
+        return {
+          id,
+          name: `${id} (Free)`,
+          contextWindow: 131072,
+          maxTokens: 8192
+        };
+      });
+      return { models: installedModels };
+    }
     return { models: [...BUILTIN_OPENCODE_FREE_MODELS] };
   }
   const builtinMap = new Map(BUILTIN_OPENCODE_FREE_MODELS.map((m) => [m.id, m]));
@@ -12436,8 +12597,10 @@ function createOpencodeCatalogLoader({
     if (pending) return pending;
     pending = (async () => {
       const registry = typeof registryLoader === "function" ? await registryLoader().catch(() => []) : [];
+      const cliPath = findOpencodeCliPath();
+      const installedIds = cliPath ? queryInstalledOpencodeCliModelIds(cliPath) : null;
       if (catalogUrl === DEFAULT_CATALOG_URL && fetchImpl === fetch) {
-        cached = parseOpencodeCatalog(null, { registry });
+        cached = parseOpencodeCatalog(null, { registry, installedIds });
         cachedAt = Date.now();
         return cached;
       }
@@ -12447,9 +12610,9 @@ function createOpencodeCatalogLoader({
           fetchImpl,
           timeoutMs
         });
-        cached = parseOpencodeCatalog(data, { registry });
+        cached = parseOpencodeCatalog(data, { registry, installedIds });
       } catch {
-        cached = parseOpencodeCatalog(null, { registry });
+        cached = parseOpencodeCatalog(null, { registry, installedIds });
       }
       cachedAt = Date.now();
       return cached;

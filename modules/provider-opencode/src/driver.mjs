@@ -9,7 +9,11 @@ import {
   resolveReasoningFromModel,
   stringValue,
 } from "../../../packages/providers/src/provider-utils.mjs";
-import { createOpencodeNativeExecutor } from "./native-transport.mjs";
+import {
+  createOpencodeNativeExecutor,
+  findOpencodeCliPath,
+  queryInstalledOpencodeCliModelIds,
+} from "./native-transport.mjs";
 
 const PROVIDER_ID = "opencode";
 const DEFAULT_CATALOG_URL = "https://opencode.ai/zen/v1/models";
@@ -89,6 +93,12 @@ export const BUILTIN_OPENCODE_FREE_MODELS = Object.freeze([
   {
     id: "longcat-2.5-preview-free",
     name: "Longcat 2.5 Preview (Free)",
+    contextWindow: 131072,
+    maxTokens: 8192,
+  },
+  {
+    id: "flint-40b-free",
+    name: "Flint 40B (Free)",
     contextWindow: 131072,
     maxTokens: 8192,
   },
@@ -213,9 +223,23 @@ function findOpencodeRegistryModel(id, registry) {
   return null;
 }
 
-export function parseOpencodeCatalog(data, { registry = [] } = {}) {
+export function parseOpencodeCatalog(data, { registry = [], installedIds = null } = {}) {
   const models = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
   if (!models.length) {
+    if (Array.isArray(installedIds) && installedIds.length > 0) {
+      const builtinMap = new Map(BUILTIN_OPENCODE_FREE_MODELS.map((m) => [m.id, m]));
+      const installedModels = installedIds.map((id) => {
+        const builtin = builtinMap.get(id);
+        if (builtin) return builtin;
+        return {
+          id,
+          name: `${id} (Free)`,
+          contextWindow: 131072,
+          maxTokens: 8192,
+        };
+      });
+      return { models: installedModels };
+    }
     return { models: [...BUILTIN_OPENCODE_FREE_MODELS] };
   }
 
@@ -279,8 +303,10 @@ export function createOpencodeCatalogLoader({
 
     pending = (async () => {
       const registry = typeof registryLoader === "function" ? await registryLoader().catch(() => []) : [];
+      const cliPath = findOpencodeCliPath();
+      const installedIds = cliPath ? queryInstalledOpencodeCliModelIds(cliPath) : null;
       if (catalogUrl === DEFAULT_CATALOG_URL && fetchImpl === fetch) {
-        cached = parseOpencodeCatalog(null, { registry });
+        cached = parseOpencodeCatalog(null, { registry, installedIds });
         cachedAt = Date.now();
         return cached;
       }
@@ -290,9 +316,9 @@ export function createOpencodeCatalogLoader({
           fetchImpl,
           timeoutMs,
         });
-        cached = parseOpencodeCatalog(data, { registry });
+        cached = parseOpencodeCatalog(data, { registry, installedIds });
       } catch {
-        cached = parseOpencodeCatalog(null, { registry });
+        cached = parseOpencodeCatalog(null, { registry, installedIds });
       }
       cachedAt = Date.now();
       return cached;
