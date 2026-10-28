@@ -1,7 +1,53 @@
 import { execSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+const SEMVER_RE =
+  /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$/;
+const COMMIT_RE = /^[0-9a-f]{40}$/;
+const PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+
+function validateFormat1SelfContained(doc) {
+  if (doc.format !== 1) throw new Error("$.format must be 1");
+  if (!doc.title || (typeof doc.title !== "string" && typeof doc.title.en !== "string")) {
+    throw new Error("$.title must have 'en' or be a string");
+  }
+  if (!Array.isArray(doc.plugins) || doc.plugins.length === 0) {
+    throw new Error("$.plugins must be a non-empty array");
+  }
+
+  for (const [i, plugin] of doc.plugins.entries()) {
+    if (!PACKAGE_NAME_RE.test(plugin.name)) {
+      throw new Error(`$.plugins[${i}].name must be a valid package name`);
+    }
+    if (!Array.isArray(plugin.versions) || plugin.versions.length === 0) {
+      throw new Error(`$.plugins[${i}].versions must be non-empty`);
+    }
+
+    for (const [j, v] of plugin.versions.entries()) {
+      if (!SEMVER_RE.test(v.version)) {
+        throw new Error(`$.plugins[${i}].versions[${j}].version must follow SemVer 2.0.0`);
+      }
+      if (!Number.isInteger(v.publishTimestamp) || v.publishTimestamp < 0 || v.publishTimestamp >= 1e11) {
+        throw new Error(`$.plugins[${i}].versions[${j}].publishTimestamp must be a Unix seconds integer`);
+      }
+      if (!v.source || (v.source.type !== "git" && v.source.type !== "npm")) {
+        throw new Error(`$.plugins[${i}].versions[${j}].source must be git or npm`);
+      }
+      if (v.source.type === "git") {
+        if (!v.source.url.startsWith("https://")) {
+          throw new Error(`$.plugins[${i}].versions[${j}].source.url must use https`);
+        }
+        if (!COMMIT_RE.test(v.source.commit)) {
+          throw new Error(`$.plugins[${i}].versions[${j}].source.commit must be 40-char lowercase hex SHA`);
+        }
+      }
+    }
+  }
+
+  return doc;
+}
 
 async function loadMarketIndexParser() {
   try {
@@ -10,15 +56,22 @@ async function loadMarketIndexParser() {
   } catch {}
 
   try {
-    const dshBin = execSync("which dsh", { encoding: "utf8" }).trim();
-    const dshReal = execSync(`node -e "console.log(require('fs').realpathSync('${dshBin}'))"`, { encoding: "utf8" }).trim();
-    const dshPkgDir = resolve(dirname(dshReal), "..");
-    const candidate = resolve(dshPkgDir, "node_modules/@deepseek-ai/dsh-plugin-market-index/lib/index.js");
-    const mod = await import(candidate);
-    return mod.parseMarketIndex;
-  } catch (err) {
-    throw new Error("Could not find @deepseek-ai/dsh-plugin-market-index: " + err.message);
-  }
+    const dshBin = execSync("which dsh", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    if (dshBin) {
+      const dshReal = execSync(`node -e "console.log(require('fs').realpathSync('${dshBin}'))"`, {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      const dshPkgDir = resolve(dirname(dshReal), "..");
+      const candidate = resolve(dshPkgDir, "node_modules/@deepseek-ai/dsh-plugin-market-index/lib/index.js");
+      if (existsSync(candidate)) {
+        const mod = await import(candidate);
+        return mod.parseMarketIndex;
+      }
+    }
+  } catch {}
+
+  return (doc) => validateFormat1SelfContained(doc);
 }
 
 const parseMarketIndex = await loadMarketIndexParser();
