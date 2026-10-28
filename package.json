@@ -30,6 +30,7 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs && node packages/dsh-plugin/scripts/build-package.mjs",
+    "build:market": "node scripts/generate-market-index.mjs",
     "build:plugin": "node packages/dsh-plugin/scripts/build-package.mjs",
     "build:macos": "./apps/macos/build-dmg.sh",
     "prepack": "node packages/dsh-plugin/scripts/build-package.mjs",
