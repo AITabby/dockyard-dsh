@@ -213,18 +213,6 @@ export class WorkbuddyDriver {
   }
 
   async discover() {
-    const electronPath = findWorkbuddyElectronPath();
-    const authPath = findWorkbuddyAuthFilePath();
-    const hasEnvToken = Boolean(process.env.WORKBUDDY_ACCESS_TOKEN);
-
-    if (!electronPath && !authPath && !hasEnvToken) {
-      return {
-        candidates: [],
-        source: "workbuddy_free_tier",
-        diagnostics: ["No WorkBuddy installation or session found on macOS"],
-      };
-    }
-
     let session = null;
     try {
       session = extractWorkbuddySession();
