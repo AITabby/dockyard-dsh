@@ -55,7 +55,7 @@ jobs:
   macos-gates:
     # Native surfaces that only exercise on macOS: the real Keychain helper
     # round-trip and Swift syntax gates for the app + keychain helper sources.
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
