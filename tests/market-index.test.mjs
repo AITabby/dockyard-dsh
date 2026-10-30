@@ -100,7 +100,7 @@ test("market/index.json conforms strictly to DSH plugin market format 1", async 
   assert.ok(dockyard.versions.length >= 1);
 
   const defaultVersion = dockyard.versions[0];
-  assert.equal(defaultVersion.version, "0.1.2");
+  assert.equal(defaultVersion.version, "0.1.3");
   assert.equal(defaultVersion.source.type, "git");
   assert.equal(defaultVersion.source.url, "https://github.com/AITabby/dockyard-dsh");
   assert.match(defaultVersion.source.commit, COMMIT_RE);

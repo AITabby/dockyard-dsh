@@ -15,6 +15,7 @@ import { createGrokDriver, createGrokModule, summarizeGrokCandidate } from "../.
 import { createClaudeDriver, createClaudeModule, summarizeClaudeCandidate } from "../../../modules/provider-claude/src/index.mjs";
 import { createCursorDriver, createCursorModule, summarizeCursorCandidate } from "../../../modules/provider-cursor/src/index.mjs";
 import { createOpencodeDriver, createOpencodeModule, summarizeOpencodeCandidate } from "../../../modules/provider-opencode/src/index.mjs";
+import { createWorkbuddyDriver, createWorkbuddyModule, summarizeWorkbuddyCandidate } from "../../../modules/provider-workbuddy/src/index.mjs";
 import { redactError } from "../../providers/src/provider-utils.mjs";
 
 const candidateSummarizers = new Map([
@@ -24,6 +25,7 @@ const candidateSummarizers = new Map([
   ["claude", summarizeClaudeCandidate],
   ["cursor", summarizeCursorCandidate],
   ["opencode", summarizeOpencodeCandidate],
+  ["workbuddy", summarizeWorkbuddyCandidate],
 ]);
 
 // Official provider CLIs may need a network round-trip to rotate OAuth
@@ -233,6 +235,15 @@ export function createDefaultProviderEntries(options = {}) {
       }),
       driver: options.opencodeDriver,
     },
+    {
+      module: createWorkbuddyModule({
+        driver: options.workbuddyDriver ?? createWorkbuddyDriver({
+          ...withRequestExecutor("workbuddy", options.workbuddy, requestExecutors),
+          ...(catalogLoaders.workbuddy ? { catalogLoader: catalogLoaders.workbuddy } : {}),
+        }),
+      }),
+      driver: options.workbuddyDriver,
+    },
   ];
 }
 
@@ -344,7 +355,7 @@ export class DockyardRuntime {
         }
         const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
         const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
-        if ((providerId === "opencode" && pool.list().length === 0) || (hasExpiredOfficialSession && hasNoEligible)) {
+        if (((providerId === "opencode" || providerId === "workbuddy") && pool.list().length === 0) || (hasExpiredOfficialSession && hasNoEligible)) {
           try {
             const discovery = await (entry.module?.discover?.(providerContext(this)) ?? entry.driver?.discover?.(providerContext(this)));
             const candidate = Array.isArray(discovery?.candidates)
@@ -377,6 +388,9 @@ export class DockyardRuntime {
       }
       if (this.#entries.get("opencode")?.pool?.list()?.length > 0) {
         autoImported.add("opencode");
+      }
+      if (this.#entries.get("workbuddy")?.pool?.list()?.length > 0) {
+        autoImported.add("workbuddy");
       }
       if (autoImported.size > 0) {
         await this.#saveState([...autoImported]).catch(() => {});

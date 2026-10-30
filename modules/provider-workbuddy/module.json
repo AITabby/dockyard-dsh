@@ -1,0 +1,11 @@
+{
+  "id": "workbuddy",
+  "kind": "provider",
+  "dataSource": "live_catalog",
+  "capabilities": [
+    "quota",
+    "catalog",
+    "invoke",
+    "stream"
+  ]
+}

@@ -9,6 +9,7 @@ import { createGrokModule } from "../modules/provider-grok/src/index.mjs";
 import { createClaudeModule } from "../modules/provider-claude/src/index.mjs";
 import { createCursorModule } from "../modules/provider-cursor/src/index.mjs";
 import { createOpencodeModule } from "../modules/provider-opencode/src/index.mjs";
+import { createWorkbuddyModule } from "../modules/provider-workbuddy/src/index.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -44,9 +45,10 @@ await runtime.register(createGrokModule());
 await runtime.register(createClaudeModule());
 await runtime.register(createCursorModule());
 await runtime.register(createOpencodeModule());
+await runtime.register(createWorkbuddyModule());
 
 const ids = runtime.list().map((module) => module.id);
-if (!ids.includes("openai-codex") || !ids.includes("antigravity") || !ids.includes("grok") || !ids.includes("claude") || !ids.includes("cursor") || !ids.includes("opencode")) {
+if (!ids.includes("openai-codex") || !ids.includes("antigravity") || !ids.includes("grok") || !ids.includes("claude") || !ids.includes("cursor") || !ids.includes("opencode") || !ids.includes("workbuddy")) {
   throw new Error("Initial provider modules are not registered");
 }
 

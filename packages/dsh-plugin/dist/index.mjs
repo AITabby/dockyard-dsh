@@ -167,8 +167,8 @@ var init_dockyard_remote_host = __esm({
 });
 
 // packages/dsh-plugin/src/index.mjs
-import { existsSync as existsSync3, readFileSync as readFileSync2 } from "node:fs";
-import { join as join13 } from "node:path";
+import { existsSync as existsSync5, readFileSync as readFileSync4 } from "node:fs";
+import { join as join15 } from "node:path";
 
 // packages/core/src/errors.mjs
 var DockyardError = class extends Error {
@@ -1284,7 +1284,7 @@ function manifestFor(runtime, providerId) {
   return runtime.listProviderManifests?.().find((manifest) => manifest.id === providerId) ?? null;
 }
 function providerHasConnectedAccount(runtime, providerId) {
-  if (providerId === "opencode") return true;
+  if (providerId === "opencode" || providerId === "workbuddy") return true;
   if (typeof runtime.snapshot !== "function") return true;
   const snapshot = runtime.snapshot();
   if (!Array.isArray(snapshot?.providers)) return true;
@@ -12778,6 +12778,683 @@ function createOpencodeModule({ driver = {} } = {}) {
   });
 }
 
+// modules/provider-workbuddy/src/driver.mjs
+import { existsSync as existsSync4, readdirSync as readdirSync2, readFileSync as readFileSync3 } from "node:fs";
+import { join as join12 } from "node:path";
+
+// modules/provider-workbuddy/src/native-transport.mjs
+import { execFileSync as execFileSync4 } from "node:child_process";
+import { randomBytes as randomBytes5, randomUUID as randomUUID10 } from "node:crypto";
+import { existsSync as existsSync3, readFileSync as readFileSync2 } from "node:fs";
+import { homedir as homedir11 } from "node:os";
+import { join as join11 } from "node:path";
+function firstString10(...values) {
+  for (const val of values) {
+    if (typeof val === "string" && val.length > 0) return val;
+  }
+  return null;
+}
+var PROVIDER_ID12 = "workbuddy";
+var DEFAULT_WORKBUDDY_ENDPOINT = "https://www.workbuddy.ai/v2/chat/completions";
+var cachedSession = null;
+var cachedSessionExpiry = 0;
+function findWorkbuddyElectronPath() {
+  if (process.env.WORKBUDDY_ELECTRON_PATH && existsSync3(process.env.WORKBUDDY_ELECTRON_PATH)) {
+    return process.env.WORKBUDDY_ELECTRON_PATH;
+  }
+  const candidates = [
+    "/Applications/WorkBuddy AI.app/Contents/MacOS/Electron",
+    "/Applications/WorkBuddy.app/Contents/MacOS/Electron",
+    join11(homedir11(), "Applications/WorkBuddy AI.app/Contents/MacOS/Electron"),
+    join11(homedir11(), "Applications/WorkBuddy.app/Contents/MacOS/Electron")
+  ];
+  for (const candidate2 of candidates) {
+    if (existsSync3(candidate2)) return candidate2;
+  }
+  return null;
+}
+function findWorkbuddyAuthFilePath() {
+  if (process.env.WORKBUDDY_AUTH_FILE_PATH && existsSync3(process.env.WORKBUDDY_AUTH_FILE_PATH)) {
+    return process.env.WORKBUDDY_AUTH_FILE_PATH;
+  }
+  const candidate2 = join11(
+    homedir11(),
+    "Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop-ai.info"
+  );
+  if (existsSync3(candidate2)) return candidate2;
+  return null;
+}
+function findWorkbuddyConfigDir() {
+  if (process.env.WORKBUDDY_CONFIG_DIR && existsSync3(process.env.WORKBUDDY_CONFIG_DIR)) {
+    return process.env.WORKBUDDY_CONFIG_DIR;
+  }
+  const candidates = [
+    join11(homedir11(), ".workbuddy-ai"),
+    join11(homedir11(), ".workbuddy")
+  ];
+  for (const candidate2 of candidates) {
+    if (existsSync3(candidate2)) return candidate2;
+  }
+  return null;
+}
+function extractWorkbuddySession({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && cachedSession && now < cachedSessionExpiry - 6e4) {
+    return cachedSession;
+  }
+  const electronPath = findWorkbuddyElectronPath();
+  const authPath = findWorkbuddyAuthFilePath();
+  const configDir = findWorkbuddyConfigDir();
+  if (!electronPath || !authPath || !configDir) {
+    if (process.env.WORKBUDDY_ACCESS_TOKEN) {
+      const fallback = {
+        accessToken: process.env.WORKBUDDY_ACCESS_TOKEN,
+        uid: process.env.WORKBUDDY_UID || "workbuddy-user",
+        email: process.env.WORKBUDDY_EMAIL || "workbuddy@desktop.ai",
+        nickname: "WorkBuddy User",
+        expiresAt: now + 36e5
+      };
+      cachedSession = fallback;
+      cachedSessionExpiry = fallback.expiresAt;
+      return fallback;
+    }
+    return null;
+  }
+  const script = `
+    const asarMain = "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar/main";
+    const dist = require(asarMain + "/dist.js");
+    const cp = require(asarMain + "/credential-protection.js");
+    dist.s();
+    cp.t();
+
+    const b = process._linkedBinding("electron_browser_workbuddy_storage");
+    const r = b.loggerGet();
+    const i = dist.T(r);
+    const configDir = ${JSON.stringify(configDir)};
+    const o = dist.u({ keyblobPath: dist.l(configDir), protectorKey: i.symmetric.value });
+
+    const bootstrap = {
+      policy: "fields",
+      symmetricKey: i.symmetric.value,
+      userKey: o.value,
+      developerPublicKey: i.developerPublicKey.value
+    };
+    cp._(bootstrap);
+
+    const fs = require("fs");
+    const authPath = ${JSON.stringify(authPath)};
+    const content = fs.readFileSync(authPath, "utf8");
+    const parsed = JSON.parse(content);
+    const codec = cp.v({ purpose: "workbuddy-auth-session", resourceId: "auth/workbuddy-desktop-ai.info" });
+    const fields = [
+      { path: ["auth", "accessToken"] },
+      { path: ["auth", "refreshToken"] },
+      { path: ["account", "phoneNumber"] },
+      { path: ["account", "departmentFullName"] },
+      { path: ["account", "nickname"] },
+      { path: ["account", "email"] }
+    ];
+    const decoded = codec.decode(parsed, fields);
+    const result = {
+      accessToken: decoded.value.auth?.accessToken || null,
+      refreshToken: decoded.value.auth?.refreshToken || null,
+      uid: parsed.account?.uid || null,
+      nickname: decoded.value.account?.nickname || null,
+      email: decoded.value.account?.email || parsed.account?.email || null,
+      expiresAt: decoded.value.auth?.expiresAt || null
+    };
+    process.stdout.write(JSON.stringify(result));
+  `;
+  try {
+    const stdout = execFileSync4(
+      electronPath,
+      ["-e", script],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: "1"
+        },
+        timeout: 1e4
+      }
+    );
+    const parsed = JSON.parse(stdout.trim());
+    if (parsed?.accessToken) {
+      cachedSession = parsed;
+      cachedSessionExpiry = parsed.expiresAt ? Number(parsed.expiresAt) : now + 36e5;
+      return parsed;
+    }
+  } catch (error) {
+    if (process.env.WORKBUDDY_ACCESS_TOKEN) {
+      const fallback = {
+        accessToken: process.env.WORKBUDDY_ACCESS_TOKEN,
+        uid: process.env.WORKBUDDY_UID || "workbuddy-user",
+        email: process.env.WORKBUDDY_EMAIL || "workbuddy@desktop.ai",
+        nickname: "WorkBuddy User",
+        expiresAt: now + 36e5
+      };
+      cachedSession = fallback;
+      cachedSessionExpiry = fallback.expiresAt;
+      return fallback;
+    }
+  }
+  return null;
+}
+async function buildWorkbuddyMessages(request, attachments = []) {
+  const messages = [];
+  const rawMessages = Array.isArray(request?.messages) ? request.messages : [];
+  const systemPrompt = request?.systemPrompt || request?.system;
+  let hasSystemMessage = false;
+  for (const message of rawMessages) {
+    const role = message?.role ?? "user";
+    if (role === "system") {
+      hasSystemMessage = true;
+      messages.push({
+        role: "system",
+        content: typeof message?.content === "string" ? message.content : textFromContent(message?.content)
+      });
+      continue;
+    }
+    if (role === "user" || role === "assistant") {
+      let content = "";
+      if (typeof message?.content === "string") {
+        content = message.content;
+      } else if (Array.isArray(message?.content)) {
+        const parts = [];
+        for (const part of message.content) {
+          if (part?.type === "text" && typeof part?.text === "string") {
+            parts.push(part.text);
+          } else if (part?.type === "image" && part?.image) {
+          } else if (typeof part === "string") {
+            parts.push(part);
+          }
+        }
+        content = parts.join("\n");
+      }
+      messages.push({ role, content });
+      continue;
+    }
+    if (role === "tool") {
+      const content = typeof message?.content === "string" ? message.content : JSON.stringify(message?.content ?? "");
+      messages.push({
+        role: "user",
+        content: `[Tool result for ${message.toolCallId ?? "tool"}]: ${content}`
+      });
+    }
+  }
+  if (!hasSystemMessage) {
+    messages.unshift({
+      role: "system",
+      content: systemPrompt || "You are a helpful AI assistant."
+    });
+  }
+  return messages;
+}
+function createWorkbuddyNativeExecutor({
+  endpoint: endpoint2 = DEFAULT_WORKBUDDY_ENDPOINT,
+  accessToken = null,
+  fetchImpl = fetch,
+  timeoutMs = 12e4
+} = {}) {
+  const validatedEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID12 });
+  return async function* workbuddyNativeExecutor(envelope2 = {}) {
+    const { request, attachments, credential, signal } = envelope2;
+    let token = accessToken ?? (credential?.accessToken && credential.accessToken !== "free-tier" ? credential.accessToken : null) ?? (credential?.access && credential.access !== "free-tier" ? credential.access : null) ?? credential?.apiKey ?? credential?.token ?? process.env.WORKBUDDY_ACCESS_TOKEN ?? null;
+    let uid = credential?.uid ?? null;
+    if (!token) {
+      const session = extractWorkbuddySession();
+      if (session?.accessToken) {
+        token = session.accessToken;
+        uid = session.uid;
+      }
+    }
+    if (!token) {
+      throw nativeProviderError(
+        PROVIDER_ID12,
+        "\u672A\u68C0\u6D4B\u5230\u672C\u5730 WorkBuddy \u767B\u5F55\u51ED\u636E\uFF0C\u8BF7\u5148\u5728 WorkBuddy \u684C\u9762\u7AEF\u767B\u5F55\u6216\u8BBE\u7F6E WORKBUDDY_ACCESS_TOKEN"
+      );
+    }
+    const messages = await buildWorkbuddyMessages(request, attachments);
+    const convId = randomUUID10();
+    const reqId = randomUUID10();
+    const msgId = randomUUID10();
+    const traceId = randomBytes5(16).toString("hex");
+    const spanId = randomBytes5(8).toString("hex");
+    const parentSpanId = randomBytes5(8).toString("hex");
+    const headers = {
+      Accept: "text/event-stream",
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+      "x-requested-with": "XMLHttpRequest",
+      "x-codebuddy-request": "1",
+      "X-Conversation-ID": convId,
+      "X-Conversation-Request-ID": reqId,
+      "X-Conversation-Message-ID": msgId,
+      "X-Request-ID": reqId,
+      "X-Agent-Intent": "craft",
+      "X-Agent-Purpose": "conversation",
+      "X-IDE-Type": "WorkBuddy",
+      "X-IDE-Name": "WorkBuddy",
+      "X-IDE-Version": "5.9.4",
+      "X-Private-Data": "true",
+      "X-Product": "SaaS",
+      "User-Agent": "WorkBuddy/5.9.4 WorkBuddy/5.9.4",
+      traceparent: `00-${traceId}-${spanId}-01`,
+      b3: `${traceId}-${spanId}-1-${parentSpanId}`,
+      "X-B3-TraceId": traceId,
+      "X-B3-SpanId": spanId,
+      "X-B3-Sampled": "1",
+      "X-Trace-ID": traceId,
+      ...uid ? { "X-User-Id": uid } : {}
+    };
+    const body = {
+      model: request.model ?? "deepseek-v4.1-flash",
+      messages,
+      stream: true,
+      ...typeof request.temperature === "number" ? { temperature: request.temperature } : {},
+      ...typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {}
+    };
+    const response = await fetchNativeResponse(
+      validatedEndpoint,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal
+      },
+      {
+        providerId: PROVIDER_ID12,
+        timeoutMs,
+        fetchImpl
+      }
+    );
+    let text3 = "";
+    let textIndex = 0;
+    let textOpen = false;
+    let nextIndex = 1;
+    let reasoning = null;
+    let rawUsage = null;
+    let stop = "stop";
+    for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID12 })) {
+      if (event?.done) continue;
+      const parsed = event?.data;
+      if (!parsed || typeof parsed !== "object") continue;
+      if (parsed.usage) rawUsage = parsed.usage;
+      const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : null;
+      if (!choice) continue;
+      const delta = choice.delta ?? {};
+      const reasoningDelta = firstString10(delta.reasoning_content, delta.reasoning, delta.thought);
+      if (reasoningDelta) {
+        if (textOpen) {
+          yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+          textOpen = false;
+        }
+        if (!reasoning) {
+          reasoning = { index: nextIndex++, text: "" };
+          yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+        }
+        reasoning.text += reasoningDelta;
+        yield { type: "reasoning-delta", index: reasoning.index, text: reasoningDelta };
+      }
+      const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
+      if (content) {
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        if (!textOpen) {
+          textIndex = nextIndex++;
+          text3 = "";
+          textOpen = true;
+          yield { type: "block-start", index: textIndex, blockType: "text" };
+        }
+        text3 += content;
+        yield { type: "text-delta", index: textIndex, text: content };
+      }
+      if (choice.finish_reason) {
+        stop = choice.finish_reason;
+      }
+    }
+    if (reasoning) {
+      yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+    }
+    if (textOpen) {
+      yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+    }
+    if (rawUsage) {
+      yield {
+        type: "usage",
+        usage: normalizeUsage(rawUsage)
+      };
+    }
+    yield {
+      type: "finish",
+      reason: finishReason(stop),
+      ...rawUsage ? { usage: normalizeUsage(rawUsage) } : {}
+    };
+  };
+}
+
+// modules/provider-workbuddy/src/driver.mjs
+var PROVIDER_ID13 = "workbuddy";
+var BUILTIN_WORKBUDDY_FREE_MODELS = Object.freeze([
+  {
+    id: "deepseek-v4.1-flash",
+    name: "DeepSeek v4.1 Flash (WorkBuddy Free)",
+    contextWindow: 1e6,
+    maxTokens: 128e3,
+    reasoning: {
+      efforts: [
+        { id: "minimal", name: "Minimal" },
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" }
+      ],
+      defaultEffort: "medium"
+    }
+  },
+  {
+    id: "hy3",
+    name: "Hunyuan 3 (WorkBuddy Free)",
+    contextWindow: 192e3,
+    maxTokens: 64e3,
+    reasoning: {
+      efforts: [
+        { id: "minimal", name: "Minimal" },
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" }
+      ],
+      defaultEffort: "medium"
+    }
+  }
+]);
+function summarizeWorkbuddyCandidate(candidate2) {
+  return candidate2?.displayName ?? candidate2?.email ?? candidate2?.accountId ?? "WorkBuddy Free";
+}
+function findLocalWorkbuddySnapshot() {
+  const configDir = findWorkbuddyConfigDir();
+  if (configDir) {
+    const storageDir = join12(configDir, "storage");
+    if (existsSync4(storageDir)) {
+      try {
+        const userDirs = readdirSync2(storageDir).filter((d) => d.startsWith("user-"));
+        for (const userDir of userDirs) {
+          const scopedDir = join12(storageDir, userDir, "scoped");
+          if (existsSync4(scopedDir)) {
+            const scopes = readdirSync2(scopedDir);
+            for (const scope of scopes) {
+              const configFile = join12(scopedDir, scope, "wb-product-config.json");
+              if (existsSync4(configFile)) {
+                return configFile;
+              }
+            }
+          }
+        }
+      } catch {
+      }
+    }
+  }
+  const appAsarProductJson = "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar/cli/product.json";
+  if (existsSync4(appAsarProductJson)) return appAsarProductJson;
+  const unpackedProductJson = "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/product.json";
+  if (existsSync4(unpackedProductJson)) return unpackedProductJson;
+  return null;
+}
+function parseWorkbuddyCatalog(data) {
+  let rawModels = [];
+  if (data?.["product-config-snapshot"]?.data?.models) {
+    rawModels = data["product-config-snapshot"].data.models;
+  } else if (Array.isArray(data?.models)) {
+    rawModels = data.models;
+  } else if (Array.isArray(data?.data)) {
+    rawModels = data.data;
+  }
+  if (!rawModels || rawModels.length === 0) {
+    return { models: [...BUILTIN_WORKBUDDY_FREE_MODELS] };
+  }
+  const freeModels = [];
+  const paidModels = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const item of rawModels) {
+    const id = stringValue(item?.id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const credits = stringValue(item?.credits) ?? "";
+    const isFree = credits === "x0.00" || credits === "x0.00 credits" || credits === "0" || item?.free === true || item?.isFree === true;
+    const baseName = stringValue(item?.name) || stringValue(item?.title) || id;
+    const name2 = isFree && !baseName.toLowerCase().includes("free") ? `${baseName} (WorkBuddy Free)` : baseName;
+    const contextWindow = Number.isInteger(item?.maxInputTokens) ? item.maxInputTokens : Number.isInteger(item?.contextWindow) ? item.contextWindow : 131072;
+    const maxTokens = Number.isInteger(item?.maxOutputTokens) ? item.maxOutputTokens : Number.isInteger(item?.maxTokens) ? item.maxTokens : 16384;
+    const modelRecord = {
+      id,
+      name: name2,
+      contextWindow,
+      maxTokens,
+      free: isFree,
+      credits,
+      reasoning: {
+        efforts: [
+          { id: "minimal", name: "Minimal" },
+          { id: "low", name: "Low" },
+          { id: "medium", name: "Medium" },
+          { id: "high", name: "High" }
+        ],
+        defaultEffort: "medium"
+      }
+    };
+    if (isFree) {
+      freeModels.push(modelRecord);
+    } else {
+      paidModels.push(modelRecord);
+    }
+  }
+  for (const builtin of BUILTIN_WORKBUDDY_FREE_MODELS) {
+    if (!seen.has(builtin.id)) {
+      freeModels.unshift(builtin);
+      seen.add(builtin.id);
+    }
+  }
+  return { models: [...freeModels, ...paidModels] };
+}
+function createWorkbuddyCatalogLoader({
+  cacheTtlMs = 6e4
+} = {}) {
+  let cached = null;
+  let cachedAt = 0;
+  return async function workbuddyCatalogLoader({ force = false } = {}) {
+    const now = Date.now();
+    if (!force && cached && now - cachedAt < cacheTtlMs) {
+      return cached;
+    }
+    const snapshotPath = findLocalWorkbuddySnapshot();
+    if (snapshotPath) {
+      try {
+        const raw = readFileSync3(snapshotPath, "utf8");
+        const json = JSON.parse(raw);
+        cached = parseWorkbuddyCatalog(json);
+        cachedAt = Date.now();
+        return cached;
+      } catch {
+      }
+    }
+    cached = { models: [...BUILTIN_WORKBUDDY_FREE_MODELS] };
+    cachedAt = Date.now();
+    return cached;
+  };
+}
+var WorkbuddyDriver = class {
+  constructor({
+    endpoint: endpoint2 = DEFAULT_WORKBUDDY_ENDPOINT,
+    catalogLoader = null,
+    requestExecutor = null,
+    fetchImpl = fetch,
+    timeoutMs = 12e4
+  } = {}) {
+    this.endpoint = endpoint2;
+    this.fetchImpl = fetchImpl;
+    this.timeoutMs = timeoutMs;
+    this.catalogLoader = catalogLoader ?? createWorkbuddyCatalogLoader({ cacheTtlMs: 6e4 });
+    this.requestExecutor = requestExecutor ?? createWorkbuddyNativeExecutor({
+      endpoint: endpoint2,
+      fetchImpl,
+      timeoutMs
+    });
+  }
+  async discover() {
+    const electronPath = findWorkbuddyElectronPath();
+    const authPath = findWorkbuddyAuthFilePath();
+    const hasEnvToken = Boolean(process.env.WORKBUDDY_ACCESS_TOKEN);
+    if (!electronPath && !authPath && !hasEnvToken) {
+      return {
+        candidates: [],
+        source: "workbuddy_free_tier",
+        diagnostics: ["No WorkBuddy installation or session found on macOS"]
+      };
+    }
+    let session = null;
+    try {
+      session = extractWorkbuddySession();
+    } catch {
+    }
+    const displayName = session?.nickname ? `WorkBuddy Free (${session.nickname})` : "WorkBuddy Free";
+    const email = session?.email || (session?.nickname?.includes("@") ? session.nickname : "workbuddy@desktop.ai");
+    return {
+      candidates: [
+        {
+          candidateId: "workbuddy-free",
+          accountId: "workbuddy-free",
+          displayName,
+          email,
+          subscription: {
+            plan: "WorkBuddy Free Rotation",
+            status: "active"
+          },
+          quota: {
+            remaining: 100,
+            limit: 100,
+            unit: "requests",
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+          },
+          source: "workbuddy_free_tier",
+          health: {
+            status: "healthy"
+          }
+        }
+      ],
+      source: "workbuddy_free_tier",
+      diagnostics: []
+    };
+  }
+  async importAccount(candidate2, context = {}) {
+    const accountId = candidate2?.accountId || "workbuddy-free";
+    const ref = createCredentialRef(PROVIDER_ID13, accountId);
+    if (context.secretStore) {
+      let session = null;
+      try {
+        session = extractWorkbuddySession();
+      } catch {
+      }
+      await context.secretStore.write(ref, {
+        type: "workbuddy_free",
+        access: session?.accessToken || "free-tier",
+        uid: session?.uid || null,
+        email: session?.email || null
+      }).catch(() => {
+      });
+    }
+    return createAccountRecord({
+      accountId,
+      providerId: PROVIDER_ID13,
+      displayName: candidate2?.displayName || "WorkBuddy Free",
+      email: candidate2?.email || "workbuddy@desktop.ai",
+      auth: {
+        kind: "workbuddy_free",
+        credentialRef: ref
+      },
+      subscription: {
+        plan: candidate2?.subscription?.plan || "WorkBuddy Free Rotation",
+        status: "active"
+      },
+      quota: createQuotaSnapshot(candidate2?.quota || {
+        remaining: 100,
+        limit: 100,
+        unit: "requests"
+      }),
+      health: {
+        status: "healthy"
+      }
+    });
+  }
+  async getActiveSession() {
+    return this.discover().then((res) => Array.isArray(res?.candidates) ? res.candidates[0] : null);
+  }
+  async refreshAccount(account) {
+    return {
+      quota: createQuotaSnapshot({
+        remaining: 100,
+        limit: 100,
+        unit: "requests",
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }),
+      health: {
+        status: "healthy",
+        lastCheckedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }
+    };
+  }
+  async getQuota() {
+    return createQuotaSnapshot({
+      remaining: 100,
+      limit: 100,
+      unit: "requests",
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  }
+  async getCatalog(context = {}) {
+    return this.catalogLoader({ force: Boolean(context.force) });
+  }
+  async invoke(request, invocation, context = {}) {
+    const executor = context.requestExecutor ?? this.requestExecutor;
+    let credential = null;
+    if (context.secretStore && invocation?.auth?.credentialRef) {
+      credential = await context.secretStore.read(invocation.auth.credentialRef).catch(() => null);
+    }
+    if (!credential) {
+      credential = invocation?.auth ?? { access: "free-tier" };
+    }
+    return executor({
+      request,
+      invocation,
+      context,
+      attachments: context.attachments ?? invocation?.attachments,
+      credential,
+      signal: context.signal ?? invocation?.signal
+    });
+  }
+  async stream(request, invocation, context = {}) {
+    return this.invoke(request, invocation, context);
+  }
+};
+function createWorkbuddyDriver(options = {}) {
+  return new WorkbuddyDriver(options);
+}
+
+// modules/provider-workbuddy/src/index.mjs
+function createWorkbuddyModule({ driver = {} } = {}) {
+  return defineProviderModule({
+    id: "workbuddy",
+    displayName: "WorkBuddy",
+    capabilities: [
+      "quota",
+      "catalog",
+      "invoke",
+      "stream"
+    ],
+    driver
+  });
+}
+
 // packages/runtime/src/dockyard-runtime.mjs
 var candidateSummarizers = /* @__PURE__ */ new Map([
   ["openai-codex", summarizeCodexCandidate],
@@ -12785,7 +13462,8 @@ var candidateSummarizers = /* @__PURE__ */ new Map([
   ["grok", summarizeGrokCandidate],
   ["claude", summarizeClaudeCandidate],
   ["cursor", summarizeCursorCandidate],
-  ["opencode", summarizeOpencodeCandidate]
+  ["opencode", summarizeOpencodeCandidate],
+  ["workbuddy", summarizeWorkbuddyCandidate]
 ]);
 var DEFAULT_REFRESH_TIMEOUT_MS = 3e4;
 function numericOption(value, fallback) {
@@ -12951,6 +13629,15 @@ function createDefaultProviderEntries(options = {}) {
         })
       }),
       driver: options.opencodeDriver
+    },
+    {
+      module: createWorkbuddyModule({
+        driver: options.workbuddyDriver ?? createWorkbuddyDriver({
+          ...withRequestExecutor("workbuddy", options.workbuddy, requestExecutors),
+          ...catalogLoaders.workbuddy ? { catalogLoader: catalogLoaders.workbuddy } : {}
+        })
+      }),
+      driver: options.workbuddyDriver
     }
   ];
 }
@@ -13057,7 +13744,7 @@ var DockyardRuntime = class {
         }
         const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
         const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
-        if (providerId === "opencode" && pool.list().length === 0 || hasExpiredOfficialSession && hasNoEligible) {
+        if ((providerId === "opencode" || providerId === "workbuddy") && pool.list().length === 0 || hasExpiredOfficialSession && hasNoEligible) {
           try {
             const discovery = await (entry.module?.discover?.(providerContext(this)) ?? entry.driver?.discover?.(providerContext(this)));
             const candidate2 = Array.isArray(discovery?.candidates) ? discovery.candidates[0] : Array.isArray(discovery) ? discovery[0] : null;
@@ -13080,6 +13767,9 @@ var DockyardRuntime = class {
       }
       if (this.#entries.get("opencode")?.pool?.list()?.length > 0) {
         autoImported.add("opencode");
+      }
+      if (this.#entries.get("workbuddy")?.pool?.list()?.length > 0) {
+        autoImported.add("workbuddy");
       }
       if (autoImported.size > 0) {
         await this.#saveState([...autoImported]).catch(() => {
@@ -13583,7 +14273,7 @@ var DockyardRuntime = class {
 // packages/dsh-plugin/src/codex-transport.mjs
 import { access, readFile as readFile7 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname as dirname5, join as join11, resolve } from "node:path";
+import { dirname as dirname5, join as join13, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 var activeCodexModels = /* @__PURE__ */ new Map();
 function recordCodexModels(models) {
@@ -13629,15 +14319,15 @@ async function findPackageRoot(startDirectory, packageName) {
   const packageParts = packageName.split("/");
   let current = resolve(startDirectory);
   while (true) {
-    const candidate2 = join11(current, "node_modules", ...packageParts);
-    if (await isFile(join11(candidate2, "package.json"))) return candidate2;
+    const candidate2 = join13(current, "node_modules", ...packageParts);
+    if (await isFile(join13(candidate2, "package.json"))) return candidate2;
     const parent = dirname5(current);
     if (parent === current) return null;
     current = parent;
   }
 }
 async function packageImportUrl(packageRoot, subpath = null) {
-  const packageJson = JSON.parse(await readFile7(join11(packageRoot, "package.json"), "utf8"));
+  const packageJson = JSON.parse(await readFile7(join13(packageRoot, "package.json"), "utf8"));
   const exports = packageJson.exports;
   let target = null;
   if (!subpath) {
@@ -13659,7 +14349,7 @@ async function packageImportUrl(packageRoot, subpath = null) {
   if (typeof target !== "string") {
     throw new Error(`Cannot resolve ${subpath ?? "."} from ${packageRoot}`);
   }
-  return pathToFileURL(join11(packageRoot, target)).href;
+  return pathToFileURL(join13(packageRoot, target)).href;
 }
 async function importFromDshInstall(moduleAnchor) {
   const anchor = moduleAnchor ?? process.env.DOCKYARD_DSH_CLI_PATH ?? process.argv[1] ?? import.meta.url;
@@ -14324,7 +15014,7 @@ function createDockyardCredentialStore(credentials, fallback = null) {
 // packages/dsh-plugin/src/native-key-pool-host.mjs
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAgentLoopRequest, markAgentLoopRequest } from "@deepseek-ai/dsh-llm";
-import { join as join12 } from "node:path";
+import { join as join14 } from "node:path";
 
 // packages/dsh-plugin/src/native-usage.mjs
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -14604,7 +15294,7 @@ var NativeKeyPoolHost = class {
     this.logger = logger ?? console;
     this.contextWindowOverrides = contextWindowOverrides;
     this.stateStore = stateStore ?? new JsonStateStore({
-      filePath: join12(defaultDockyardHome(), "native-key-pools.json")
+      filePath: join14(defaultDockyardHome(), "native-key-pools.json")
     });
     this.readyPromise = this.loadState();
   }
@@ -14999,7 +15689,8 @@ function apply(ctx, config = {}) {
       claude: runtimeOptions.requestExecutors?.claude ?? createClaudeNativeExecutor(runtimeOptions.claude ?? {}),
       cursor: runtimeOptions.requestExecutors?.cursor ?? createCursorNativeExecutor(runtimeOptions.cursor ?? {}),
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
-      opencode: runtimeOptions.requestExecutors?.opencode ?? createOpencodeNativeExecutor(runtimeOptions.opencode ?? {})
+      opencode: runtimeOptions.requestExecutors?.opencode ?? createOpencodeNativeExecutor(runtimeOptions.opencode ?? {}),
+      workbuddy: runtimeOptions.requestExecutors?.workbuddy ?? createWorkbuddyNativeExecutor(runtimeOptions.workbuddy ?? {})
     };
     runtimeOptions.catalogLoaders = {
       ...runtimeOptions.catalogLoaders ?? {},
@@ -15015,7 +15706,8 @@ function apply(ctx, config = {}) {
       opencode: runtimeOptions.catalogLoaders?.opencode ?? createOpencodeCatalogLoader({
         ...runtimeOptions.opencode ?? {},
         registryLoader: modelRegistryLoader
-      })
+      }),
+      workbuddy: runtimeOptions.catalogLoaders?.workbuddy ?? createWorkbuddyCatalogLoader(runtimeOptions.workbuddy ?? {})
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders).filter(([, loader]) => typeof loader === "function");
@@ -15029,7 +15721,7 @@ function apply(ctx, config = {}) {
         providers.filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length > 0).map((provider) => provider.providerId)
       );
       const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
-      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || providerId === "opencode" || connected.has(providerId)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
+      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || providerId === "opencode" || providerId === "workbuddy" || connected.has(providerId)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
     });
@@ -15125,8 +15817,8 @@ function apply(ctx, config = {}) {
                   res.end("Forbidden");
                   return;
                 }
-                const filePath = join13(process.cwd(), "artifacts", cleanPath);
-                if (!existsSync3(filePath)) {
+                const filePath = join15(process.cwd(), "artifacts", cleanPath);
+                if (!existsSync5(filePath)) {
                   res.writeHead(404);
                   res.end("Not Found");
                   return;
@@ -15141,7 +15833,7 @@ function apply(ctx, config = {}) {
                   svg: "image/svg+xml"
                 };
                 const contentType = mimeTypes[ext] ?? "application/octet-stream";
-                const content = readFileSync2(filePath);
+                const content = readFileSync4(filePath);
                 res.writeHead(200, {
                   "Content-Type": contentType,
                   "Content-Length": content.length,
