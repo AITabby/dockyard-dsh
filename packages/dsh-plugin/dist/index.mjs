@@ -1284,7 +1284,7 @@ function manifestFor(runtime, providerId) {
   return runtime.listProviderManifests?.().find((manifest) => manifest.id === providerId) ?? null;
 }
 function providerHasConnectedAccount(runtime, providerId) {
-  if (providerId === "opencode" || providerId === "workbuddy") return true;
+  if (providerId === "opencode" || providerId === "workbuddy" || providerId === "kilo") return true;
   if (typeof runtime.snapshot !== "function") return true;
   const snapshot = runtime.snapshot();
   if (!Array.isArray(snapshot?.providers)) return true;
@@ -12082,17 +12082,18 @@ function createOpencodeNativeExecutor({
   endpoint: endpoint2 = DEFAULT_ENDPOINT5,
   apiKey = null,
   fetchImpl = fetch,
-  timeoutMs = 6e4
+  timeoutMs = 6e4,
+  cliPath = void 0
 } = {}) {
   const validatedEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID10 });
   return async function* opencodeNativeExecutor(envelope2 = {}) {
     const { request, attachments, credential, signal } = envelope2;
     const token = apiKey ?? (credential?.access && credential.access !== "free-tier" ? credential.access : null) ?? credential?.apiKey ?? credential?.token ?? process.env.OPENCODE_API_KEY ?? null;
-    const cliPath = !token ? findOpencodeCliPath() : null;
-    if (cliPath) {
+    const resolvedCliPath = !token ? cliPath !== void 0 ? cliPath : findOpencodeCliPath() : null;
+    if (resolvedCliPath) {
       let server = null;
       try {
-        server = await ensureOpencodeServer(cliPath);
+        server = await ensureOpencodeServer(resolvedCliPath);
       } catch {
         server = null;
       }
@@ -12109,7 +12110,7 @@ function createOpencodeNativeExecutor({
         }
       }
     }
-    if (cliPath) {
+    if (resolvedCliPath) {
       const baseModel = request.model?.startsWith("opencode/") ? request.model : `opencode/${request.model}`;
       const isCompaction = request.purpose === "compaction";
       const thinkingDisabled = isCompaction || request.thinking === false;
@@ -12121,7 +12122,7 @@ function createOpencodeNativeExecutor({
         args.push("--thinking");
       }
       args.push("--format", "json", prompt);
-      const child = spawn6(cliPath, args, {
+      const child = spawn6(resolvedCliPath, args, {
         signal,
         stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env }
@@ -12236,8 +12237,67 @@ function createOpencodeNativeExecutor({
       };
       return;
     }
-    if (!token) {
-      throw nativeProviderError(PROVIDER_ID10, "\u672A\u68C0\u6D4B\u5230\u672C\u5730 OpenCode CLI \u5BA2\u6237\u7AEF\uFF0C\u4E14\u672A\u914D\u7F6E OPENCODE_API_KEY");
+    const isFreeTier = !token || token === "free-tier";
+    let activeEndpoint = validatedEndpoint;
+    let authHeader = token && token !== "free-tier" ? `Bearer ${token}` : "Bearer public";
+    let extraHeaders = {};
+    let tools = void 0;
+    if (isFreeTier) {
+      activeEndpoint = "https://opencode.ai/inference/v1/chat/completions";
+      const ts = Date.now();
+      const value = ~(BigInt(ts) * 0x1000n + 1n);
+      let hex = "";
+      for (let i = 0; i < 6; i++) hex += Number(value >> BigInt(40 - 8 * i) & 0xffn).toString(16).padStart(2, "0");
+      const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+      let rand = "";
+      for (const b of randomBytes4(14)) rand += BASE62[b % 62];
+      const session = `ses_${hex}${rand}`;
+      extraHeaders = {
+        "user-agent": "opencode/latest/2.0.26/cli",
+        "x-opencode-client": "cli",
+        "x-opencode-session": session,
+        "x-opencode-session-id": session,
+        "x-session-affinity": session,
+        "x-session-id": session,
+        "x-opencode-project": "global"
+      };
+      tools = [
+        {
+          type: "function",
+          function: {
+            name: "read",
+            description: "Read the contents of a file or directory. Supports text files, images, and PDFs. Images and PDFs are presented directly to the model. Each text line is prefixed by its 1-based line number as <line>: <content>. The prefix is for reference and is not part of the file content. Directory entries are returned one per line. Use offset and limit to read large files or directories in sections. Prefer one larger read over many small slices, and use grep to find specific content in large files.",
+            parameters: {
+              type: "object",
+              properties: {
+                path: { type: "string", description: "File or directory to read" },
+                offset: { type: "integer", minimum: 0, description: "The line or directory entry to start reading from (1-based)" },
+                limit: { type: "integer", minimum: 0, description: "The maximum number of lines or directory entries to read (defaults to and capped at 2000)" }
+              },
+              required: ["path"],
+              additionalProperties: false
+            }
+          }
+        },
+        {
+          type: "function",
+          function: {
+            name: "shell",
+            description: "Execute a shell command and return its output. Commands run on Linux using bash. Quote file paths containing spaces or special characters. Prefer dedicated tools over shell commands when possible. When output is large, the full result is saved to a file and a truncated preview is returned. Rely on automatic truncation unless filtering the output is more useful. Commands accept an optional timeout, background commands have no timeout by default. Background commands return immediately, and you will be notified when they complete.",
+            parameters: {
+              type: "object",
+              properties: {
+                command: { type: "string", description: "Shell command string to execute" },
+                workdir: { type: "string", description: "Working directory to execute the command in. Defaults to the current working directory. When possible, avoid changing directories in the command and set the working directory here instead." },
+                timeout: { type: "integer", minimum: 0, description: "Timeout in milliseconds. Set to 0 to disable the timeout. Defaults to 120000 for foreground commands. Background commands have no timeout by default." },
+                background: { type: "boolean", description: "Run the command in the background and return immediately (useful for dev servers and long-running builds). You do not need to use '&' at the end of the command when using this parameter. You will be notified when it completes. DO NOT poll for completion." }
+              },
+              required: ["command"],
+              additionalProperties: false
+            }
+          }
+        }
+      ];
     }
     const messages = await buildOpencodeMessages(request, attachments);
     const body = {
@@ -12246,15 +12306,17 @@ function createOpencodeNativeExecutor({
       stream: true,
       ...typeof request.temperature === "number" ? { temperature: request.temperature } : {},
       ...typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {},
-      ...request.reasoningEffort && request.purpose !== "compaction" && request.thinking !== false ? { reasoning_effort: request.reasoningEffort } : {}
+      ...request.reasoningEffort && request.purpose !== "compaction" && request.thinking !== false ? { reasoning_effort: request.reasoningEffort } : {},
+      ...tools ? { tools } : {}
     };
     const headers = {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
-      Authorization: `Bearer ${token}`
+      Authorization: authHeader,
+      ...extraHeaders
     };
     const response = await fetchNativeResponse(
-      validatedEndpoint,
+      activeEndpoint,
       {
         method: "POST",
         headers,
@@ -13445,6 +13507,434 @@ function createWorkbuddyModule({ driver = {} } = {}) {
   });
 }
 
+// modules/provider-kilo/src/native-transport.mjs
+function firstString11(...values) {
+  for (const val of values) {
+    if (typeof val === "string" && val.length > 0) return val;
+  }
+  return null;
+}
+var PROVIDER_ID14 = "kilo";
+var DEFAULT_KILO_ENDPOINT = "https://ai-gateway.kilo.ai/api/v1/chat/completions";
+function contentPartText2(part) {
+  if (typeof part === "string") return part;
+  if (!part || typeof part !== "object") return "";
+  if (typeof part.text === "string") return part.text;
+  if (typeof part.content === "string") return part.content;
+  return "";
+}
+async function openAiContent3(content, attachments = []) {
+  if (typeof content === "string") {
+    if (!attachments?.length) return content;
+    const parts = [{ type: "text", text: content }];
+    for (const attachment of attachments) {
+      const data = await resolveImageData(attachment);
+      if (data) parts.push(data);
+    }
+    return parts;
+  }
+  if (Array.isArray(content)) {
+    const parts = [];
+    for (const part of content) {
+      if (typeof part === "string") {
+        parts.push({ type: "text", text: part });
+      } else if (part && typeof part === "object") {
+        if (part.type === "text" && typeof part.text === "string") {
+          parts.push(part);
+        } else if (part.type === "image" || part.type === "image_url") {
+          parts.push(part);
+        } else {
+          const text3 = contentPartText2(part);
+          if (text3) parts.push({ type: "text", text: text3 });
+        }
+      }
+    }
+    for (const attachment of attachments) {
+      const data = await resolveImageData(attachment);
+      if (data) parts.push(data);
+    }
+    return parts;
+  }
+  return "";
+}
+async function buildKiloMessages(request = {}, attachments = []) {
+  const result = [];
+  const rawMessages = Array.isArray(request.messages) ? request.messages : [];
+  for (const message of rawMessages) {
+    const role = message?.role === "assistant" ? "assistant" : message?.role === "system" ? "system" : "user";
+    const content = await openAiContent3(message?.content ?? message?.text, attachments);
+    result.push({
+      role,
+      content: Array.isArray(content) && content.length === 1 && content[0]?.type === "text" ? content[0].text : content
+    });
+  }
+  if (result.length === 0 && typeof request.prompt === "string" && request.prompt.trim()) {
+    result.push({
+      role: "user",
+      content: request.prompt.trim()
+    });
+  }
+  return result;
+}
+function createKiloNativeExecutor({
+  endpoint: endpoint2 = DEFAULT_KILO_ENDPOINT,
+  apiKey = null,
+  fetchImpl = fetch,
+  timeoutMs = 12e4
+} = {}) {
+  const validatedEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID14 });
+  return async function* kiloNativeExecutor(envelope2 = {}) {
+    const { request, attachments, credential, signal } = envelope2;
+    const token = apiKey ?? (credential?.apiKey && credential.apiKey !== "free-tier" ? credential.apiKey : null) ?? (credential?.token && credential.token !== "free-tier" ? credential.token : null) ?? (credential?.accessToken && credential.accessToken !== "free-tier" ? credential.accessToken : null) ?? process.env.KILO_API_KEY ?? null;
+    const messages = await buildKiloMessages(request, attachments);
+    const headers = {
+      Accept: "text/event-stream",
+      "Content-Type": "application/json",
+      ...token ? { Authorization: `Bearer ${token}` } : {}
+    };
+    const body = {
+      model: request.model ?? "kilo-auto/free",
+      messages,
+      stream: true,
+      ...typeof request.temperature === "number" ? { temperature: request.temperature } : {},
+      ...typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {}
+    };
+    const response = await fetchNativeResponse(
+      validatedEndpoint,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal
+      },
+      {
+        providerId: PROVIDER_ID14,
+        timeoutMs,
+        fetchImpl
+      }
+    );
+    let text3 = "";
+    let textIndex = 0;
+    let textOpen = false;
+    let nextIndex = 1;
+    let reasoning = null;
+    let rawUsage = null;
+    let stop = "stop";
+    for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID14 })) {
+      if (event?.done) continue;
+      const parsed = event?.data;
+      if (!parsed || typeof parsed !== "object") continue;
+      if (parsed.usage) rawUsage = parsed.usage;
+      const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : null;
+      if (!choice) continue;
+      const delta = choice.delta ?? {};
+      const reasoningDelta = firstString11(delta.reasoning_content, delta.reasoning, delta.thought);
+      if (reasoningDelta) {
+        if (textOpen) {
+          yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+          textOpen = false;
+        }
+        if (!reasoning) {
+          reasoning = { index: nextIndex++, text: "" };
+          yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+        }
+        reasoning.text += reasoningDelta;
+        yield { type: "reasoning-delta", index: reasoning.index, text: reasoningDelta };
+      }
+      const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
+      if (content) {
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        if (!textOpen) {
+          textIndex = nextIndex++;
+          text3 = "";
+          textOpen = true;
+          yield { type: "block-start", index: textIndex, blockType: "text" };
+        }
+        text3 += content;
+        yield { type: "text-delta", index: textIndex, text: content };
+      }
+      if (choice.finish_reason) {
+        stop = choice.finish_reason;
+      }
+    }
+    if (reasoning) {
+      yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+    }
+    if (textOpen) {
+      yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+    }
+    if (rawUsage) {
+      yield {
+        type: "usage",
+        usage: normalizeUsage(rawUsage)
+      };
+    }
+    yield {
+      type: "finish",
+      reason: finishReason(stop),
+      ...rawUsage ? { usage: normalizeUsage(rawUsage) } : {}
+    };
+  };
+}
+
+// modules/provider-kilo/src/driver.mjs
+var PROVIDER_ID15 = "kilo";
+var DEFAULT_CATALOG_URL2 = "https://api.kilo.ai/api/gateway/models";
+var BUILTIN_KILO_FREE_MODELS = Object.freeze([
+  {
+    id: "kilo-auto/free",
+    name: "Auto Free (Kilo)",
+    contextWindow: 256e3,
+    maxTokens: 32768,
+    free: true
+  },
+  {
+    id: "nvidia/nemotron-3.5-super-vl:free",
+    name: "NVIDIA Nemotron 3.5 Super VL (Free)",
+    contextWindow: 1e6,
+    maxTokens: 131072,
+    inputModalities: ["text", "image", "video"],
+    free: true
+  },
+  {
+    id: "reflection/beam-free",
+    name: "Reflection Beam 1.0 (Free)",
+    contextWindow: 1048576,
+    maxTokens: 131072,
+    free: true
+  },
+  {
+    id: "inclusionai/ling-3.1-flash-1019-free",
+    name: "inclusionAI Ling 3.1 Flash (Free)",
+    contextWindow: 1e6,
+    maxTokens: 262144,
+    free: true
+  },
+  {
+    id: "nvidia/nemotron-3-ultra-550b-a55b:free",
+    name: "NVIDIA Nemotron 3 Ultra (Free)",
+    contextWindow: 1e6,
+    maxTokens: 131072,
+    free: true
+  },
+  {
+    id: "nvidia/nemotron-3.5-lightning:free",
+    name: "NVIDIA Nemotron 3.5 Lightning (Free)",
+    contextWindow: 1e6,
+    maxTokens: 131072,
+    free: true
+  },
+  {
+    id: "recursive/flint-v1.0:free",
+    name: "Recursive Flint (Free)",
+    contextWindow: 262144,
+    maxTokens: 65536,
+    free: true
+  },
+  {
+    id: "poolside/laguna-s-2.1:free",
+    name: "Poolside Laguna S 2.1 (Free)",
+    contextWindow: 262144,
+    maxTokens: 65536,
+    free: true
+  },
+  {
+    id: "openrouter/free",
+    name: "OpenRouter Free Models Router",
+    contextWindow: 2e5,
+    maxTokens: 32768,
+    free: true
+  },
+  {
+    id: "stealth/glyph-cluster",
+    name: "Stealth Glyph Cluster (Free)",
+    contextWindow: 256e3,
+    maxTokens: 32768,
+    free: true
+  }
+]);
+function parseKiloCatalog(data) {
+  const items = Array.isArray(data?.data) ? data.data : [];
+  if (!items.length) {
+    return { models: [...BUILTIN_KILO_FREE_MODELS] };
+  }
+  const result = [];
+  const seen = /* @__PURE__ */ new Set();
+  const builtinMap = new Map(BUILTIN_KILO_FREE_MODELS.map((m) => [m.id, m]));
+  for (const item of items) {
+    if (!item?.isFree) continue;
+    const id = stringValue(item?.id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const builtin = builtinMap.get(id);
+    const name2 = stringValue(item?.name) ?? builtin?.name ?? id;
+    const contextWindow = Number.isInteger(item?.context_length) ? item.context_length : builtin?.contextWindow ?? 256e3;
+    const maxTokens = Number.isInteger(item?.top_provider?.max_completion_tokens) ? item.top_provider.max_completion_tokens : builtin?.maxTokens ?? 32768;
+    result.push({
+      id,
+      name: name2,
+      contextWindow,
+      maxTokens,
+      free: true
+    });
+  }
+  if (result.length === 0) {
+    return { models: [...BUILTIN_KILO_FREE_MODELS] };
+  }
+  return { models: result };
+}
+function createKiloCatalogLoader({
+  url = DEFAULT_CATALOG_URL2,
+  fetchImpl = fetch,
+  cacheTtlMs = 3e5
+} = {}) {
+  let cached = null;
+  let cachedAt = 0;
+  return async function kiloCatalogLoader({ force = false } = {}) {
+    const now = Date.now();
+    if (!force && cached && now - cachedAt < cacheTtlMs) {
+      return cached;
+    }
+    try {
+      assertSecureEndpointUrl(url, { providerId: PROVIDER_ID15 });
+      const data = await fetchJson(url, {
+        headers: { Accept: "application/json" },
+        fetchImpl,
+        timeoutMs: 1e4
+      });
+      const parsed = parseKiloCatalog(data);
+      if (parsed.models.length > 0) {
+        cached = parsed;
+        cachedAt = now;
+        return cached;
+      }
+    } catch {
+    }
+    cached = { models: [...BUILTIN_KILO_FREE_MODELS] };
+    cachedAt = now;
+    return cached;
+  };
+}
+function summarizeKiloCandidate(candidate2) {
+  return candidate2?.displayName ?? candidate2?.email ?? candidate2?.accountId ?? "Kilo Free Tier";
+}
+var KiloDriver = class {
+  #catalogLoader;
+  #requestExecutor;
+  constructor(options = {}) {
+    this.#catalogLoader = options.catalogLoader ?? createKiloCatalogLoader(options);
+    this.#requestExecutor = options.requestExecutor ?? createKiloNativeExecutor(options);
+  }
+  async catalog(account, context = {}) {
+    return this.#catalogLoader({ force: Boolean(context.force) });
+  }
+  async getCatalog(context = {}) {
+    return this.#catalogLoader({ force: Boolean(context?.force) });
+  }
+  async discover() {
+    return {
+      candidates: [
+        {
+          candidateId: "kilo-free",
+          accountId: "kilo-free",
+          displayName: "Kilo Free Tier",
+          email: "free@kilo.ai",
+          subscription: {
+            plan: "Free Frontier Router",
+            status: "active"
+          },
+          quota: {
+            remaining: 100,
+            limit: 100,
+            unit: "requests",
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+          },
+          source: "kilo_free_tier",
+          health: {
+            status: "healthy"
+          }
+        }
+      ],
+      source: "kilo_free_tier",
+      diagnostics: []
+    };
+  }
+  async importAccount(candidate2, context = {}) {
+    const accountId = candidate2?.accountId || "kilo-free";
+    const ref = createCredentialRef(PROVIDER_ID15, accountId);
+    if (context.secretStore) {
+      await context.secretStore.write(ref, {
+        type: "kilo_free",
+        access: "free-tier"
+      }).catch(() => {
+      });
+    }
+    return createAccountRecord({
+      accountId,
+      providerId: PROVIDER_ID15,
+      displayName: candidate2?.displayName || "Kilo Free Tier",
+      email: candidate2?.email || "free@kilo.ai",
+      auth: {
+        kind: "kilo_free",
+        credentialRef: ref
+      },
+      subscription: {
+        plan: candidate2?.subscription?.plan || "Free Frontier Router",
+        status: "active"
+      },
+      quota: createQuotaSnapshot(candidate2?.quota || {
+        remaining: 100,
+        limit: 100,
+        unit: "requests"
+      }),
+      health: {
+        status: "healthy"
+      }
+    });
+  }
+  async getActiveSession() {
+    return this.discover().then((res) => Array.isArray(res?.candidates) ? res.candidates[0] : null);
+  }
+  async refreshAccount(account) {
+    return {
+      quota: createQuotaSnapshot({
+        remaining: 100,
+        limit: 100,
+        unit: "requests",
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }),
+      health: {
+        status: "healthy",
+        lastCheckedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }
+    };
+  }
+  async invoke(envelope2) {
+    return this.#requestExecutor(envelope2);
+  }
+};
+function createKiloDriver(options = {}) {
+  return new KiloDriver(options);
+}
+
+// modules/provider-kilo/src/index.mjs
+function createKiloModule({ driver = {} } = {}) {
+  return defineProviderModule({
+    id: "kilo",
+    displayName: "Kilo Free",
+    capabilities: [
+      "quota",
+      "catalog",
+      "invoke",
+      "stream"
+    ],
+    driver
+  });
+}
+
 // packages/runtime/src/dockyard-runtime.mjs
 var candidateSummarizers = /* @__PURE__ */ new Map([
   ["openai-codex", summarizeCodexCandidate],
@@ -13453,7 +13943,8 @@ var candidateSummarizers = /* @__PURE__ */ new Map([
   ["claude", summarizeClaudeCandidate],
   ["cursor", summarizeCursorCandidate],
   ["opencode", summarizeOpencodeCandidate],
-  ["workbuddy", summarizeWorkbuddyCandidate]
+  ["workbuddy", summarizeWorkbuddyCandidate],
+  ["kilo", summarizeKiloCandidate]
 ]);
 var DEFAULT_REFRESH_TIMEOUT_MS = 3e4;
 function numericOption(value, fallback) {
@@ -13628,6 +14119,15 @@ function createDefaultProviderEntries(options = {}) {
         })
       }),
       driver: options.workbuddyDriver
+    },
+    {
+      module: createKiloModule({
+        driver: options.kiloDriver ?? createKiloDriver({
+          ...withRequestExecutor("kilo", options.kilo, requestExecutors),
+          ...catalogLoaders.kilo ? { catalogLoader: catalogLoaders.kilo } : {}
+        })
+      }),
+      driver: options.kiloDriver
     }
   ];
 }
@@ -13734,7 +14234,7 @@ var DockyardRuntime = class {
         }
         const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
         const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
-        if ((providerId === "opencode" || providerId === "workbuddy") && pool.list().length === 0 || hasExpiredOfficialSession && hasNoEligible) {
+        if ((providerId === "opencode" || providerId === "workbuddy" || providerId === "kilo") && pool.list().length === 0 || hasExpiredOfficialSession && hasNoEligible) {
           try {
             const discovery = await (entry.module?.discover?.(providerContext(this)) ?? entry.driver?.discover?.(providerContext(this)));
             const candidate2 = Array.isArray(discovery?.candidates) ? discovery.candidates[0] : Array.isArray(discovery) ? discovery[0] : null;
@@ -13760,6 +14260,9 @@ var DockyardRuntime = class {
       }
       if (this.#entries.get("workbuddy")?.pool?.list()?.length > 0) {
         autoImported.add("workbuddy");
+      }
+      if (this.#entries.get("kilo")?.pool?.list()?.length > 0) {
+        autoImported.add("kilo");
       }
       if (autoImported.size > 0) {
         await this.#saveState([...autoImported]).catch(() => {
@@ -15680,7 +16183,8 @@ function apply(ctx, config = {}) {
       cursor: runtimeOptions.requestExecutors?.cursor ?? createCursorNativeExecutor(runtimeOptions.cursor ?? {}),
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
       opencode: runtimeOptions.requestExecutors?.opencode ?? createOpencodeNativeExecutor(runtimeOptions.opencode ?? {}),
-      workbuddy: runtimeOptions.requestExecutors?.workbuddy ?? createWorkbuddyNativeExecutor(runtimeOptions.workbuddy ?? {})
+      workbuddy: runtimeOptions.requestExecutors?.workbuddy ?? createWorkbuddyNativeExecutor(runtimeOptions.workbuddy ?? {}),
+      kilo: runtimeOptions.requestExecutors?.kilo ?? createKiloNativeExecutor(runtimeOptions.kilo ?? {})
     };
     runtimeOptions.catalogLoaders = {
       ...runtimeOptions.catalogLoaders ?? {},
@@ -15697,7 +16201,8 @@ function apply(ctx, config = {}) {
         ...runtimeOptions.opencode ?? {},
         registryLoader: modelRegistryLoader
       }),
-      workbuddy: runtimeOptions.catalogLoaders?.workbuddy ?? createWorkbuddyCatalogLoader(runtimeOptions.workbuddy ?? {})
+      workbuddy: runtimeOptions.catalogLoaders?.workbuddy ?? createWorkbuddyCatalogLoader(runtimeOptions.workbuddy ?? {}),
+      kilo: runtimeOptions.catalogLoaders?.kilo ?? createKiloCatalogLoader(runtimeOptions.kilo ?? {})
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders).filter(([, loader]) => typeof loader === "function");
@@ -15711,7 +16216,7 @@ function apply(ctx, config = {}) {
         providers.filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length > 0).map((provider) => provider.providerId)
       );
       const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
-      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || providerId === "opencode" || providerId === "workbuddy" || connected.has(providerId)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
+      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || providerId === "opencode" || providerId === "workbuddy" || providerId === "kilo" || connected.has(providerId)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
     });

@@ -19,8 +19,9 @@ Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harnes
 - **Grok** — xAI 官方浏览器 OAuth、CLI fallback、实时模型目录、官方 Build credits 周期和 provider-native streaming 请求。额度读取使用官方 `/billing?format=credits`（转发 `GetGrokCreditsConfig`）；若上游只返回周期，剩余值保持未知。
 - **Claude** — Claude 官方浏览器 OAuth（支持带 state 的手动回调地址/授权码）、CLI fallback 与原生请求适配。
 - **Cursor** — Cursor 官方浏览器登录轮询、CLI fallback 与原生请求适配。
-- **OpenCode** — OpenCode Zen / 本地 CLI 免费模型轮转与原生流式请求适配。
+- **OpenCode** — OpenCode Zen 免安装纯网络直连（免 CLI serve 依赖）与本地 CLI 双轨免费模型轮转适配。
 - **WorkBuddy** — WorkBuddy 国际版桌面端会话自动检测、零成本免费模型发现（`deepseek-v4.1-flash`、`hy3`）、实时模型按需选择与官方端点原生流式请求。
+- **Kilo** — Kilo AI 纯公网开放免密网关接入，零本地软件依赖，开箱即用 10+ 款前沿免费大模型（`nvidia/nemotron-3.5-super-vl:free`、`reflection/beam-free`、`kilo-auto/free` 等）。
 
 如果对应的官方客户端、CLI 或 OAuth 源没有安装、没有登录，Dockyard 会返回明确的 unavailable/degraded 状态；不会用硬编码的账号、模型、版本、套餐或额度伪造可用结果。
 

@@ -364,3 +364,87 @@ test("runViaOpencodeServer suppresses reasoning, denies permissions, and complet
   assert.equal(sessionRequestBody.model.variant, undefined);
 });
 
+test("createOpencodeNativeExecutor falls back to pure network web wire when CLI is not installed", async () => {
+  const { createOpencodeNativeExecutor } = await import("../modules/provider-opencode/src/native-transport.mjs");
+
+  const sseChunks = [
+    `data: ${JSON.stringify({
+      id: "test-stream-1",
+      choices: [{ delta: { reasoning_content: "Thinking without CLI..." } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      id: "test-stream-2",
+      choices: [{ delta: { content: "Zero CLI " } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      id: "test-stream-3",
+      choices: [{ delta: { content: "Web Wire Works!" } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      id: "test-stream-4",
+      choices: [{ delta: {}, finish_reason: "stop" }],
+      usage: { prompt_tokens: 15, completion_tokens: 25, total_tokens: 40 },
+    })}\n\n`,
+    `data: [DONE]\n\n`,
+  ];
+
+  let interceptedUrl = null;
+  let interceptedHeaders = null;
+  let interceptedBody = null;
+
+  const mockFetch = async (url, options) => {
+    interceptedUrl = url;
+    interceptedHeaders = options.headers;
+    interceptedBody = JSON.parse(options.body);
+
+    const stream = new ReadableStream({
+      start(controller) {
+        for (const chunk of sseChunks) {
+          controller.enqueue(new TextEncoder().encode(chunk));
+        }
+        controller.close();
+      },
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  };
+
+  const executor = createOpencodeNativeExecutor({
+    fetchImpl: mockFetch,
+    cliPath: null,
+  });
+
+  const events = [];
+  for await (const event of executor({
+    request: { model: "big-pickle", messages: [{ role: "user", content: "Hi" }] },
+    credential: { access: "free-tier" },
+  })) {
+    events.push(event);
+  }
+
+  // Verify pure web endpoint and fingerprint headers were dispatched
+  assert.ok(interceptedUrl.includes("/inference/v1/chat/completions"));
+  assert.equal(interceptedHeaders["Authorization"], "Bearer public");
+  assert.equal(interceptedHeaders["user-agent"], "opencode/latest/2.0.26/cli");
+  assert.ok(interceptedHeaders["x-opencode-session"].startsWith("ses_"));
+  assert.ok(Array.isArray(interceptedBody.tools));
+  assert.equal(interceptedBody.tools.length, 2);
+  assert.equal(interceptedBody.tools[0].function.name, "read");
+  assert.equal(interceptedBody.tools[1].function.name, "shell");
+
+  // Verify streaming deltas
+  const reasoning = events.filter((e) => e.type === "reasoning-delta").map((e) => e.text).join("");
+  assert.equal(reasoning, "Thinking without CLI...");
+
+  const text = events.filter((e) => e.type === "text-delta").map((e) => e.text).join("");
+  assert.equal(text, "Zero CLI Web Wire Works!");
+
+  const finish = events.find((e) => e.type === "finish");
+  assert.ok(finish);
+  assert.equal(finish.reason.kind, "stop");
+  assert.equal(finish.usage.totalTokens, 40);
+});
+

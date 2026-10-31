@@ -695,6 +695,7 @@ export function createOpencodeNativeExecutor({
   apiKey = null,
   fetchImpl = fetch,
   timeoutMs = 60_000,
+  cliPath = undefined,
 } = {}) {
   const validatedEndpoint = validateNativeEndpoint(endpoint, { providerId: PROVIDER_ID });
 
@@ -707,11 +708,11 @@ export function createOpencodeNativeExecutor({
       ?? process.env.OPENCODE_API_KEY
       ?? null;
 
-    const cliPath = !token ? findOpencodeCliPath() : null;
-    if (cliPath) {
+    const resolvedCliPath = !token ? (cliPath !== undefined ? cliPath : findOpencodeCliPath()) : null;
+    if (resolvedCliPath) {
       let server = null;
       try {
-        server = await ensureOpencodeServer(cliPath);
+        server = await ensureOpencodeServer(resolvedCliPath);
       } catch {
         server = null;
       }
@@ -730,7 +731,7 @@ export function createOpencodeNativeExecutor({
         }
       }
     }
-    if (cliPath) {
+    if (resolvedCliPath) {
       const baseModel = request.model?.startsWith("opencode/")
         ? request.model
         : `opencode/${request.model}`;
@@ -747,7 +748,7 @@ export function createOpencodeNativeExecutor({
       }
       args.push("--format", "json", prompt);
 
-      const child = spawn(cliPath, args, {
+      const child = spawn(resolvedCliPath, args, {
         signal,
         stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env },
@@ -867,8 +868,70 @@ export function createOpencodeNativeExecutor({
       return;
     }
 
-    if (!token) {
-      throw nativeProviderError(PROVIDER_ID, "未检测到本地 OpenCode CLI 客户端，且未配置 OPENCODE_API_KEY");
+    const isFreeTier = !token || token === "free-tier";
+    let activeEndpoint = validatedEndpoint;
+    let authHeader = token && token !== "free-tier" ? `Bearer ${token}` : "Bearer public";
+    let extraHeaders = {};
+    let tools = undefined;
+
+    if (isFreeTier) {
+      activeEndpoint = "https://opencode.ai/inference/v1/chat/completions";
+      const ts = Date.now();
+      const value = ~(BigInt(ts) * 0x1000n + 1n);
+      let hex = "";
+      for (let i = 0; i < 6; i++) hex += Number((value >> BigInt(40 - 8 * i)) & 0xffn).toString(16).padStart(2, "0");
+      const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+      let rand = "";
+      for (const b of randomBytes(14)) rand += BASE62[b % 62];
+      const session = `ses_${hex}${rand}`;
+
+      extraHeaders = {
+        "user-agent": "opencode/latest/2.0.26/cli",
+        "x-opencode-client": "cli",
+        "x-opencode-session": session,
+        "x-opencode-session-id": session,
+        "x-session-affinity": session,
+        "x-session-id": session,
+        "x-opencode-project": "global",
+      };
+
+      tools = [
+        {
+          type: "function",
+          function: {
+            name: "read",
+            description: "Read the contents of a file or directory. Supports text files, images, and PDFs. Images and PDFs are presented directly to the model. Each text line is prefixed by its 1-based line number as <line>: <content>. The prefix is for reference and is not part of the file content. Directory entries are returned one per line. Use offset and limit to read large files or directories in sections. Prefer one larger read over many small slices, and use grep to find specific content in large files.",
+            parameters: {
+              type: "object",
+              properties: {
+                path: { type: "string", description: "File or directory to read" },
+                offset: { type: "integer", minimum: 0, description: "The line or directory entry to start reading from (1-based)" },
+                limit: { type: "integer", minimum: 0, description: "The maximum number of lines or directory entries to read (defaults to and capped at 2000)" },
+              },
+              required: ["path"],
+              additionalProperties: false,
+            },
+          },
+        },
+        {
+          type: "function",
+          function: {
+            name: "shell",
+            description: "Execute a shell command and return its output. Commands run on Linux using bash. Quote file paths containing spaces or special characters. Prefer dedicated tools over shell commands when possible. When output is large, the full result is saved to a file and a truncated preview is returned. Rely on automatic truncation unless filtering the output is more useful. Commands accept an optional timeout, background commands have no timeout by default. Background commands return immediately, and you will be notified when they complete.",
+            parameters: {
+              type: "object",
+              properties: {
+                command: { type: "string", description: "Shell command string to execute" },
+                workdir: { type: "string", description: "Working directory to execute the command in. Defaults to the current working directory. When possible, avoid changing directories in the command and set the working directory here instead." },
+                timeout: { type: "integer", minimum: 0, description: "Timeout in milliseconds. Set to 0 to disable the timeout. Defaults to 120000 for foreground commands. Background commands have no timeout by default." },
+                background: { type: "boolean", description: "Run the command in the background and return immediately (useful for dev servers and long-running builds). You do not need to use '&' at the end of the command when using this parameter. You will be notified when it completes. DO NOT poll for completion." },
+              },
+              required: ["command"],
+              additionalProperties: false,
+            },
+          },
+        },
+      ];
     }
 
     const messages = await buildOpencodeMessages(request, attachments);
@@ -879,16 +942,18 @@ export function createOpencodeNativeExecutor({
       ...(typeof request.temperature === "number" ? { temperature: request.temperature } : {}),
       ...(typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {}),
       ...(request.reasoningEffort && request.purpose !== "compaction" && request.thinking !== false ? { reasoning_effort: request.reasoningEffort } : {}),
+      ...(tools ? { tools } : {}),
     };
 
     const headers = {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
-      Authorization: `Bearer ${token}`,
+      Authorization: authHeader,
+      ...extraHeaders,
     };
 
     const response = await fetchNativeResponse(
-      validatedEndpoint,
+      activeEndpoint,
       {
         method: "POST",
         headers,

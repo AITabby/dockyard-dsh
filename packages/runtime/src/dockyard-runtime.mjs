@@ -16,6 +16,7 @@ import { createClaudeDriver, createClaudeModule, summarizeClaudeCandidate } from
 import { createCursorDriver, createCursorModule, summarizeCursorCandidate } from "../../../modules/provider-cursor/src/index.mjs";
 import { createOpencodeDriver, createOpencodeModule, summarizeOpencodeCandidate } from "../../../modules/provider-opencode/src/index.mjs";
 import { createWorkbuddyDriver, createWorkbuddyModule, summarizeWorkbuddyCandidate } from "../../../modules/provider-workbuddy/src/index.mjs";
+import { createKiloDriver, createKiloModule, summarizeKiloCandidate } from "../../../modules/provider-kilo/src/index.mjs";
 import { redactError } from "../../providers/src/provider-utils.mjs";
 
 const candidateSummarizers = new Map([
@@ -26,6 +27,7 @@ const candidateSummarizers = new Map([
   ["cursor", summarizeCursorCandidate],
   ["opencode", summarizeOpencodeCandidate],
   ["workbuddy", summarizeWorkbuddyCandidate],
+  ["kilo", summarizeKiloCandidate],
 ]);
 
 // Official provider CLIs may need a network round-trip to rotate OAuth
@@ -244,6 +246,15 @@ export function createDefaultProviderEntries(options = {}) {
       }),
       driver: options.workbuddyDriver,
     },
+    {
+      module: createKiloModule({
+        driver: options.kiloDriver ?? createKiloDriver({
+          ...withRequestExecutor("kilo", options.kilo, requestExecutors),
+          ...(catalogLoaders.kilo ? { catalogLoader: catalogLoaders.kilo } : {}),
+        }),
+      }),
+      driver: options.kiloDriver,
+    },
   ];
 }
 
@@ -355,7 +366,7 @@ export class DockyardRuntime {
         }
         const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
         const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
-        if (((providerId === "opencode" || providerId === "workbuddy") && pool.list().length === 0) || (hasExpiredOfficialSession && hasNoEligible)) {
+        if (((providerId === "opencode" || providerId === "workbuddy" || providerId === "kilo") && pool.list().length === 0) || (hasExpiredOfficialSession && hasNoEligible)) {
           try {
             const discovery = await (entry.module?.discover?.(providerContext(this)) ?? entry.driver?.discover?.(providerContext(this)));
             const candidate = Array.isArray(discovery?.candidates)
@@ -391,6 +402,9 @@ export class DockyardRuntime {
       }
       if (this.#entries.get("workbuddy")?.pool?.list()?.length > 0) {
         autoImported.add("workbuddy");
+      }
+      if (this.#entries.get("kilo")?.pool?.list()?.length > 0) {
+        autoImported.add("kilo");
       }
       if (autoImported.size > 0) {
         await this.#saveState([...autoImported]).catch(() => {});

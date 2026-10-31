@@ -143,8 +143,8 @@ const indexDocument = {
         zh: "Dockyard 账号池与原生 Provider",
       },
       description: {
-        en: "Native account-pool and provider plugin for DeepSeek Harness (Codex, Antigravity, Grok, Claude, Cursor, OpenCode, WorkBuddy).",
-        zh: "DeepSeek Harness 原生账号池与官方 Provider 插件（支持 Codex、Antigravity、Grok、Claude、Cursor、OpenCode、WorkBuddy）。",
+        en: "Native account-pool and provider plugin for DeepSeek Harness (Codex, Antigravity, Grok, Claude, Cursor, OpenCode, WorkBuddy, Kilo Free).",
+        zh: "DeepSeek Harness 原生账号池与官方 Provider 插件（支持 Codex、Antigravity、Grok、Claude、Cursor、OpenCode、WorkBuddy、Kilo 零配置免费大模型）。",
       },
       icon: iconDataUrl,
       author: "AITabby",
@@ -168,12 +168,14 @@ const indexDocument = {
           "cursor",
           "opencode",
           "workbuddy",
+          "kilo",
+          "free-tier",
         ],
         sortKeys: {},
       },
       versions: [
         {
-          version: "0.1.3",
+          version: "0.1.4",
           publishTimestamp: Math.floor(Date.now() / 1000),
           source: {
             type: "git",

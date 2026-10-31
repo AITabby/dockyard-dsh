@@ -105,7 +105,7 @@ function manifestFor(runtime, providerId) {
  * Test doubles that do not expose a snapshot retain the old catalog behavior.
  */
 function providerHasConnectedAccount(runtime, providerId) {
-  if (providerId === "opencode" || providerId === "workbuddy") return true;
+  if (providerId === "opencode" || providerId === "workbuddy" || providerId === "kilo") return true;
   if (typeof runtime.snapshot !== "function") return true;
   const snapshot = runtime.snapshot();
   if (!Array.isArray(snapshot?.providers)) return true;

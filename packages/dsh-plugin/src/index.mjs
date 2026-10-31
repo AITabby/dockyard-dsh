@@ -13,6 +13,7 @@ import { createClaudeCatalogLoader, createClaudeNativeExecutor } from "../../../
 import { createCursorCatalogLoader, createCursorNativeExecutor } from "../../../modules/provider-cursor/src/index.mjs";
 import { createOpencodeCatalogLoader, createOpencodeNativeExecutor } from "../../../modules/provider-opencode/src/index.mjs";
 import { createWorkbuddyCatalogLoader, createWorkbuddyNativeExecutor } from "../../../modules/provider-workbuddy/src/index.mjs";
+import { createKiloCatalogLoader, createKiloNativeExecutor } from "../../../modules/provider-kilo/src/index.mjs";
 import { runCliCommand } from "../../providers/src/cli-agent-transport.mjs";
 import {
   createCodexDshCatalogLoader,
@@ -74,6 +75,7 @@ export function apply(ctx, config = {}) {
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
       opencode: runtimeOptions.requestExecutors?.opencode ?? createOpencodeNativeExecutor(runtimeOptions.opencode ?? {}),
       workbuddy: runtimeOptions.requestExecutors?.workbuddy ?? createWorkbuddyNativeExecutor(runtimeOptions.workbuddy ?? {}),
+      kilo: runtimeOptions.requestExecutors?.kilo ?? createKiloNativeExecutor(runtimeOptions.kilo ?? {}),
     };
     runtimeOptions.catalogLoaders = {
       ...(runtimeOptions.catalogLoaders ?? {}),
@@ -91,6 +93,7 @@ export function apply(ctx, config = {}) {
         registryLoader: modelRegistryLoader,
       }),
       workbuddy: runtimeOptions.catalogLoaders?.workbuddy ?? createWorkbuddyCatalogLoader(runtimeOptions.workbuddy ?? {}),
+      kilo: runtimeOptions.catalogLoaders?.kilo ?? createKiloCatalogLoader(runtimeOptions.kilo ?? {}),
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders)
@@ -112,7 +115,7 @@ export function apply(ctx, config = {}) {
       );
       const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
       await Promise.all(catalogWarmers
-        .filter(([providerId]) => providerId === "openai-codex" || providerId === "opencode" || providerId === "workbuddy" || connected.has(providerId))
+        .filter(([providerId]) => providerId === "openai-codex" || providerId === "opencode" || providerId === "workbuddy" || providerId === "kilo" || connected.has(providerId))
         .map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
