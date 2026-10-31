@@ -13,12 +13,26 @@ import { createKiloNativeExecutor } from "./native-transport.mjs";
 const PROVIDER_ID = "kilo";
 const DEFAULT_CATALOG_URL = "https://api.kilo.ai/api/gateway/models";
 
+export const DEFAULT_KILO_REASONING_EFFORTS = Object.freeze([
+  { id: "none", name: "None", description: "关闭深度思考 (Fastest)" },
+  { id: "low", name: "Low", description: "快速思考，保留基础推理" },
+  { id: "medium", name: "Medium", description: "标准思考，平衡推理深度与响应速度" },
+  { id: "high", name: "High", description: "深度思考，适合复杂逻辑与多步骤分析" },
+  { id: "max", name: "Max", description: "极致思考，最高逻辑推导深度" },
+]);
+
+export const DEFAULT_KILO_REASONING = Object.freeze({
+  efforts: [...DEFAULT_KILO_REASONING_EFFORTS],
+  defaultEffort: "medium",
+});
+
 export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
   {
     id: "kilo-auto/free",
     name: "Auto Free (Kilo)",
     contextWindow: 256000,
     maxTokens: 32768,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true,
   },
   {
@@ -27,6 +41,7 @@ export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
     contextWindow: 1000000,
     maxTokens: 131072,
     inputModalities: ["text", "image", "video"],
+    reasoning: DEFAULT_KILO_REASONING,
     free: true,
   },
   {
@@ -34,6 +49,7 @@ export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "Reflection Beam 1.0 (Free)",
     contextWindow: 1048576,
     maxTokens: 131072,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true,
   },
   {
@@ -41,6 +57,7 @@ export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "inclusionAI Ling 3.1 Flash (Free)",
     contextWindow: 1000000,
     maxTokens: 262144,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true,
   },
   {
@@ -48,6 +65,7 @@ export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "NVIDIA Nemotron 3 Ultra (Free)",
     contextWindow: 1000000,
     maxTokens: 131072,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true,
   },
   {
@@ -55,6 +73,7 @@ export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "NVIDIA Nemotron 3.5 Lightning (Free)",
     contextWindow: 1000000,
     maxTokens: 131072,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true,
   },
   {
@@ -62,6 +81,7 @@ export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "Recursive Flint (Free)",
     contextWindow: 262144,
     maxTokens: 65536,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true,
   },
   {
@@ -69,6 +89,7 @@ export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "Poolside Laguna S 2.1 (Free)",
     contextWindow: 262144,
     maxTokens: 65536,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true,
   },
   {
@@ -76,6 +97,7 @@ export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "OpenRouter Free Models Router",
     contextWindow: 200000,
     maxTokens: 32768,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true,
   },
   {
@@ -83,6 +105,7 @@ export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "Stealth Glyph Cluster (Free)",
     contextWindow: 256000,
     maxTokens: 32768,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true,
   },
 ]);
@@ -117,6 +140,7 @@ export function parseKiloCatalog(data) {
       name,
       contextWindow,
       maxTokens,
+      reasoning: item.reasoning ?? builtin?.reasoning ?? DEFAULT_KILO_REASONING,
       free: true,
     });
   }
@@ -177,6 +201,8 @@ export class KiloDriver {
   constructor(options = {}) {
     this.#catalogLoader = options.catalogLoader ?? createKiloCatalogLoader(options);
     this.#requestExecutor = options.requestExecutor ?? createKiloNativeExecutor(options);
+    this.catalogLoader = this.#catalogLoader;
+    this.requestExecutor = this.#requestExecutor;
   }
 
   async catalog(account, context = {}) {
@@ -185,6 +211,15 @@ export class KiloDriver {
 
   async getCatalog(context = {}) {
     return this.#catalogLoader({ force: Boolean(context?.force) });
+  }
+
+  async getQuota() {
+    return createQuotaSnapshot({
+      remaining: 100,
+      limit: 100,
+      unit: "requests",
+      updatedAt: new Date().toISOString(),
+    });
   }
 
   async discover() {
@@ -269,8 +304,33 @@ export class KiloDriver {
     };
   }
 
-  async invoke(envelope) {
-    return this.#requestExecutor(envelope);
+  async invoke(requestOrEnvelope, invocation, context = {}) {
+    const isEnvelope = requestOrEnvelope && typeof requestOrEnvelope === "object" && "request" in requestOrEnvelope;
+    const request = isEnvelope ? requestOrEnvelope.request : requestOrEnvelope;
+    const inv = isEnvelope ? requestOrEnvelope.invocation : invocation;
+    const ctx = isEnvelope ? (requestOrEnvelope.context ?? {}) : context;
+    const executor = ctx?.requestExecutor ?? this.#requestExecutor;
+    let credential = null;
+    if (ctx?.secretStore && inv?.auth?.credentialRef) {
+      credential = await ctx.secretStore.read(inv.auth.credentialRef).catch(() => null);
+    }
+    if (!credential) {
+      credential = isEnvelope
+        ? (requestOrEnvelope.credential ?? inv?.auth ?? { access: "free-tier" })
+        : (inv?.auth ?? { access: "free-tier" });
+    }
+    return executor({
+      request,
+      invocation: inv,
+      context: ctx,
+      attachments: ctx?.attachments ?? inv?.attachments ?? (isEnvelope ? requestOrEnvelope.attachments : undefined),
+      credential,
+      signal: ctx?.signal ?? inv?.signal ?? (isEnvelope ? requestOrEnvelope.signal : undefined),
+    });
+  }
+
+  async stream(request, invocation, context = {}) {
+    return this.invoke(request, invocation, context);
   }
 }
 

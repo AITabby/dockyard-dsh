@@ -38,14 +38,18 @@ test("Kilo provider module manifest and builtin models", async () => {
   assert.ok(autoFree);
   assert.equal(autoFree.name, "Auto Free (Kilo)");
   assert.equal(autoFree.contextWindow, 256000);
+  assert.ok(Array.isArray(autoFree.reasoning?.efforts));
+  assert.equal(autoFree.reasoning.defaultEffort, "medium");
 
   const nemotron = BUILTIN_KILO_FREE_MODELS.find((m) => m.id === "nvidia/nemotron-3.5-super-vl:free");
   assert.ok(nemotron);
   assert.equal(nemotron.contextWindow, 1000000);
+  assert.ok(Array.isArray(nemotron.reasoning?.efforts));
 
   const beam = BUILTIN_KILO_FREE_MODELS.find((m) => m.id === "reflection/beam-free");
   assert.ok(beam);
   assert.equal(beam.contextWindow, 1048576);
+  assert.ok(Array.isArray(beam.reasoning?.efforts));
 });
 
 test("parseKiloCatalog handles live Kilo API payload and filters isFree models", async () => {
@@ -78,8 +82,11 @@ test("parseKiloCatalog handles live Kilo API payload and filters isFree models",
   assert.equal(parsed.models.length, 2);
   assert.equal(parsed.models[0].id, "kilo-auto/free");
   assert.equal(parsed.models[0].free, true);
+  assert.ok(Array.isArray(parsed.models[0].reasoning?.efforts));
+  assert.equal(parsed.models[0].reasoning.defaultEffort, "medium");
   assert.equal(parsed.models[1].id, "nvidia/nemotron-3.5-super-vl:free");
   assert.equal(parsed.models[1].free, true);
+  assert.ok(Array.isArray(parsed.models[1].reasoning?.efforts));
 });
 
 test("buildKiloMessages formats user and assistant messages", async () => {
@@ -219,4 +226,112 @@ test("DockyardRuntime auto-provisions Kilo free account without requiring any lo
   const filtered = await adapter.listModels("kilo");
   assert.equal(filtered.length, 1);
   assert.equal(filtered[0].id, "nvidia/nemotron-3.5-super-vl:free");
+});
+
+test("KiloDriver supports 3-argument invoke and stream protocols from DSH route", async () => {
+  let receivedEnvelope = null;
+  const mockExecutor = async function* (envelope) {
+    receivedEnvelope = envelope;
+    yield { type: "text-delta", index: 0, text: "pong" };
+    yield { type: "finish", reason: { kind: "stop" } };
+  };
+
+  const driver = createKiloDriver({
+    requestExecutor: mockExecutor,
+  });
+
+  const request = {
+    model: "recursive/flint-v1.0:free",
+    messages: [{ role: "user", content: "你好" }],
+    reasoningEffort: "high",
+  };
+  const invocation = {
+    account: { accountId: "kilo-free" },
+    auth: { access: "free-tier" },
+  };
+  const context = {
+    signal: new AbortController().signal,
+  };
+
+  // Test invoke with (request, invocation, context)
+  const streamFromInvoke = await driver.invoke(request, invocation, context);
+  const invokeEvents = [];
+  for await (const chunk of streamFromInvoke) {
+    invokeEvents.push(chunk);
+  }
+  assert.ok(receivedEnvelope);
+  assert.equal(receivedEnvelope.request.model, "recursive/flint-v1.0:free");
+  assert.equal(receivedEnvelope.request.reasoningEffort, "high");
+  assert.equal(invokeEvents.length, 2);
+
+  // Test stream with (request, invocation, context)
+  receivedEnvelope = null;
+  const streamFromStream = await driver.stream(request, invocation, context);
+  const streamEvents = [];
+  for await (const chunk of streamFromStream) {
+    streamEvents.push(chunk);
+  }
+  assert.ok(receivedEnvelope);
+  assert.equal(receivedEnvelope.request.model, "recursive/flint-v1.0:free");
+  assert.equal(streamEvents.length, 2);
+});
+
+test("createKiloNativeExecutor includes reasoning_effort and fails over offline 503 models", async () => {
+  const requestsMade = [];
+  const sseChunk = `data: ${JSON.stringify({
+    id: "gen_failover",
+    choices: [{ delta: { content: "Fallback success!" } }],
+  })}\n\n`;
+
+  const mockFetch = async (url, options) => {
+    const body = JSON.parse(options.body);
+    requestsMade.push(body);
+
+    if (body.model === "recursive/flint-v1.0:free") {
+      // Simulate upstream 503 "no upstreams available"
+      return new Response(JSON.stringify({ error: { message: "no upstreams available", code: 503 } }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(sseChunk));
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  };
+
+  const executor = createKiloNativeExecutor({
+    fetchImpl: mockFetch,
+  });
+
+  const events = [];
+  for await (const event of executor({
+    request: {
+      model: "recursive/flint-v1.0:free",
+      messages: [{ role: "user", content: "你好" }],
+      reasoningEffort: "high",
+    },
+    credential: { access: "free-tier" },
+  })) {
+    events.push(event);
+  }
+
+  // First request was for recursive/flint-v1.0:free with reasoning_effort
+  assert.equal(requestsMade.length, 2);
+  assert.equal(requestsMade[0].model, "recursive/flint-v1.0:free");
+  assert.equal(requestsMade[0].reasoning_effort, "high");
+
+  // Second request fell back to kilo-auto/free and succeeded!
+  assert.equal(requestsMade[1].model, "kilo-auto/free");
+  assert.equal(requestsMade[1].reasoning_effort, "high");
+
+  const text = events.filter((e) => e.type === "text-delta").map((e) => e.text).join("");
+  assert.equal(text, "Fallback success!");
 });

@@ -87,6 +87,21 @@ export async function buildKiloMessages(request = {}, attachments = []) {
   return result;
 }
 
+function extractReasoningDelta(delta) {
+  if (!delta || typeof delta !== "object") return null;
+  const direct = firstString(delta.reasoning_content, delta.reasoning, delta.thought);
+  if (direct) return direct;
+  if (Array.isArray(delta.reasoning_details)) {
+    for (const item of delta.reasoning_details) {
+      if (item && item.type !== "reasoning.encrypted") {
+        const text = firstString(item.text, item.content, item.summary);
+        if (text) return text;
+      }
+    }
+  }
+  return null;
+}
+
 export function createKiloNativeExecutor({
   endpoint = DEFAULT_KILO_ENDPOINT,
   apiKey = null,
@@ -96,7 +111,12 @@ export function createKiloNativeExecutor({
   const validatedEndpoint = validateNativeEndpoint(endpoint, { providerId: PROVIDER_ID });
 
   return async function* kiloNativeExecutor(envelope = {}) {
-    const { request, attachments, credential, signal } = envelope;
+    const req = (envelope && typeof envelope === "object" && "request" in envelope)
+      ? (envelope.request ?? {})
+      : (envelope ?? {});
+    const attachments = envelope?.attachments ?? req?.attachments;
+    const credential = envelope?.credential ?? req?.credential;
+    const signal = envelope?.signal ?? req?.signal;
 
     const token = apiKey
       ?? (credential?.apiKey && credential.apiKey !== "free-tier" ? credential.apiKey : null)
@@ -105,7 +125,7 @@ export function createKiloNativeExecutor({
       ?? process.env.KILO_API_KEY
       ?? null;
 
-    const messages = await buildKiloMessages(request, attachments);
+    const messages = await buildKiloMessages(req, attachments);
 
     const headers = {
       Accept: "text/event-stream",
@@ -113,28 +133,69 @@ export function createKiloNativeExecutor({
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     };
 
+    const rawEffort = req.reasoningEffort ?? req.reasoning_effort;
+    let reasoningEffort = null;
+    if (typeof rawEffort === "string" && rawEffort.length > 0) {
+      const lower = rawEffort.toLowerCase();
+      if (lower === "none" || lower === "off") {
+        reasoningEffort = "none";
+      } else if (lower === "minimal") {
+        reasoningEffort = "low";
+      } else {
+        reasoningEffort = lower;
+      }
+    }
+
     const body = {
-      model: request.model ?? "kilo-auto/free",
+      model: req.model ?? "kilo-auto/free",
       messages,
       stream: true,
-      ...(typeof request.temperature === "number" ? { temperature: request.temperature } : {}),
-      ...(typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {}),
+      ...(typeof req.temperature === "number" ? { temperature: req.temperature } : {}),
+      ...(typeof req.maxTokens === "number" ? { max_tokens: req.maxTokens } : {}),
+      ...(reasoningEffort && reasoningEffort !== "none"
+        ? { reasoning_effort: reasoningEffort, reasoning: { effort: reasoningEffort } }
+        : {}),
     };
 
-    const response = await fetchNativeResponse(
-      validatedEndpoint,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal,
-      },
-      {
-        providerId: PROVIDER_ID,
-        timeoutMs,
-        fetchImpl,
-      },
-    );
+    let response;
+    try {
+      response = await fetchNativeResponse(
+        validatedEndpoint,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal,
+        },
+        {
+          providerId: PROVIDER_ID,
+          timeoutMs,
+          fetchImpl,
+        },
+      );
+    } catch (err) {
+      // If a specific third-party model (e.g. recursive/flint-v1.0:free) fails with 503/502/504/404,
+      // failover to kilo-auto/free so the user's conversation succeeds instead of crashing
+      if (body.model !== "kilo-auto/free" && (err?.status === 503 || err?.status === 502 || err?.status === 504 || err?.status === 404)) {
+        const fallbackBody = { ...body, model: "kilo-auto/free" };
+        response = await fetchNativeResponse(
+          validatedEndpoint,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify(fallbackBody),
+            signal,
+          },
+          {
+            providerId: PROVIDER_ID,
+            timeoutMs,
+            fetchImpl,
+          },
+        );
+      } else {
+        throw err;
+      }
+    }
 
     let text = "";
     let textIndex = 0;
@@ -154,7 +215,7 @@ export function createKiloNativeExecutor({
       if (!choice) continue;
 
       const delta = choice.delta ?? {};
-      const reasoningDelta = firstString(delta.reasoning_content, delta.reasoning, delta.thought);
+      const reasoningDelta = extractReasoningDelta(delta);
       if (reasoningDelta) {
         if (textOpen) {
           yield { type: "block-end", index: textIndex, block: { type: "text", text } };

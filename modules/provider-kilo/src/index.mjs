@@ -21,6 +21,8 @@ export {
   parseKiloCatalog,
   summarizeKiloCandidate,
   BUILTIN_KILO_FREE_MODELS,
+  DEFAULT_KILO_REASONING,
+  DEFAULT_KILO_REASONING_EFFORTS,
 } from "./driver.mjs";
 
 export {

@@ -13576,6 +13576,20 @@ async function buildKiloMessages(request = {}, attachments = []) {
   }
   return result;
 }
+function extractReasoningDelta(delta) {
+  if (!delta || typeof delta !== "object") return null;
+  const direct = firstString11(delta.reasoning_content, delta.reasoning, delta.thought);
+  if (direct) return direct;
+  if (Array.isArray(delta.reasoning_details)) {
+    for (const item of delta.reasoning_details) {
+      if (item && item.type !== "reasoning.encrypted") {
+        const text3 = firstString11(item.text, item.content, item.summary);
+        if (text3) return text3;
+      }
+    }
+  }
+  return null;
+}
 function createKiloNativeExecutor({
   endpoint: endpoint2 = DEFAULT_KILO_ENDPOINT,
   apiKey = null,
@@ -13584,35 +13598,74 @@ function createKiloNativeExecutor({
 } = {}) {
   const validatedEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID14 });
   return async function* kiloNativeExecutor(envelope2 = {}) {
-    const { request, attachments, credential, signal } = envelope2;
+    const req = envelope2 && typeof envelope2 === "object" && "request" in envelope2 ? envelope2.request ?? {} : envelope2 ?? {};
+    const attachments = envelope2?.attachments ?? req?.attachments;
+    const credential = envelope2?.credential ?? req?.credential;
+    const signal = envelope2?.signal ?? req?.signal;
     const token = apiKey ?? (credential?.apiKey && credential.apiKey !== "free-tier" ? credential.apiKey : null) ?? (credential?.token && credential.token !== "free-tier" ? credential.token : null) ?? (credential?.accessToken && credential.accessToken !== "free-tier" ? credential.accessToken : null) ?? process.env.KILO_API_KEY ?? null;
-    const messages = await buildKiloMessages(request, attachments);
+    const messages = await buildKiloMessages(req, attachments);
     const headers = {
       Accept: "text/event-stream",
       "Content-Type": "application/json",
       ...token ? { Authorization: `Bearer ${token}` } : {}
     };
+    const rawEffort = req.reasoningEffort ?? req.reasoning_effort;
+    let reasoningEffort = null;
+    if (typeof rawEffort === "string" && rawEffort.length > 0) {
+      const lower = rawEffort.toLowerCase();
+      if (lower === "none" || lower === "off") {
+        reasoningEffort = "none";
+      } else if (lower === "minimal") {
+        reasoningEffort = "low";
+      } else {
+        reasoningEffort = lower;
+      }
+    }
     const body = {
-      model: request.model ?? "kilo-auto/free",
+      model: req.model ?? "kilo-auto/free",
       messages,
       stream: true,
-      ...typeof request.temperature === "number" ? { temperature: request.temperature } : {},
-      ...typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {}
+      ...typeof req.temperature === "number" ? { temperature: req.temperature } : {},
+      ...typeof req.maxTokens === "number" ? { max_tokens: req.maxTokens } : {},
+      ...reasoningEffort && reasoningEffort !== "none" ? { reasoning_effort: reasoningEffort, reasoning: { effort: reasoningEffort } } : {}
     };
-    const response = await fetchNativeResponse(
-      validatedEndpoint,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal
-      },
-      {
-        providerId: PROVIDER_ID14,
-        timeoutMs,
-        fetchImpl
+    let response;
+    try {
+      response = await fetchNativeResponse(
+        validatedEndpoint,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal
+        },
+        {
+          providerId: PROVIDER_ID14,
+          timeoutMs,
+          fetchImpl
+        }
+      );
+    } catch (err) {
+      if (body.model !== "kilo-auto/free" && (err?.status === 503 || err?.status === 502 || err?.status === 504 || err?.status === 404)) {
+        const fallbackBody = { ...body, model: "kilo-auto/free" };
+        response = await fetchNativeResponse(
+          validatedEndpoint,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify(fallbackBody),
+            signal
+          },
+          {
+            providerId: PROVIDER_ID14,
+            timeoutMs,
+            fetchImpl
+          }
+        );
+      } else {
+        throw err;
       }
-    );
+    }
     let text3 = "";
     let textIndex = 0;
     let textOpen = false;
@@ -13628,7 +13681,7 @@ function createKiloNativeExecutor({
       const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : null;
       if (!choice) continue;
       const delta = choice.delta ?? {};
-      const reasoningDelta = firstString11(delta.reasoning_content, delta.reasoning, delta.thought);
+      const reasoningDelta = extractReasoningDelta(delta);
       if (reasoningDelta) {
         if (textOpen) {
           yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
@@ -13683,12 +13736,24 @@ function createKiloNativeExecutor({
 // modules/provider-kilo/src/driver.mjs
 var PROVIDER_ID15 = "kilo";
 var DEFAULT_CATALOG_URL2 = "https://api.kilo.ai/api/gateway/models";
+var DEFAULT_KILO_REASONING_EFFORTS = Object.freeze([
+  { id: "none", name: "None", description: "\u5173\u95ED\u6DF1\u5EA6\u601D\u8003 (Fastest)" },
+  { id: "low", name: "Low", description: "\u5FEB\u901F\u601D\u8003\uFF0C\u4FDD\u7559\u57FA\u7840\u63A8\u7406" },
+  { id: "medium", name: "Medium", description: "\u6807\u51C6\u601D\u8003\uFF0C\u5E73\u8861\u63A8\u7406\u6DF1\u5EA6\u4E0E\u54CD\u5E94\u901F\u5EA6" },
+  { id: "high", name: "High", description: "\u6DF1\u5EA6\u601D\u8003\uFF0C\u9002\u5408\u590D\u6742\u903B\u8F91\u4E0E\u591A\u6B65\u9AA4\u5206\u6790" },
+  { id: "max", name: "Max", description: "\u6781\u81F4\u601D\u8003\uFF0C\u6700\u9AD8\u903B\u8F91\u63A8\u5BFC\u6DF1\u5EA6" }
+]);
+var DEFAULT_KILO_REASONING = Object.freeze({
+  efforts: [...DEFAULT_KILO_REASONING_EFFORTS],
+  defaultEffort: "medium"
+});
 var BUILTIN_KILO_FREE_MODELS = Object.freeze([
   {
     id: "kilo-auto/free",
     name: "Auto Free (Kilo)",
     contextWindow: 256e3,
     maxTokens: 32768,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true
   },
   {
@@ -13697,6 +13762,7 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     contextWindow: 1e6,
     maxTokens: 131072,
     inputModalities: ["text", "image", "video"],
+    reasoning: DEFAULT_KILO_REASONING,
     free: true
   },
   {
@@ -13704,6 +13770,7 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "Reflection Beam 1.0 (Free)",
     contextWindow: 1048576,
     maxTokens: 131072,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true
   },
   {
@@ -13711,6 +13778,7 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "inclusionAI Ling 3.1 Flash (Free)",
     contextWindow: 1e6,
     maxTokens: 262144,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true
   },
   {
@@ -13718,6 +13786,7 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "NVIDIA Nemotron 3 Ultra (Free)",
     contextWindow: 1e6,
     maxTokens: 131072,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true
   },
   {
@@ -13725,6 +13794,7 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "NVIDIA Nemotron 3.5 Lightning (Free)",
     contextWindow: 1e6,
     maxTokens: 131072,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true
   },
   {
@@ -13732,6 +13802,7 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "Recursive Flint (Free)",
     contextWindow: 262144,
     maxTokens: 65536,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true
   },
   {
@@ -13739,6 +13810,7 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "Poolside Laguna S 2.1 (Free)",
     contextWindow: 262144,
     maxTokens: 65536,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true
   },
   {
@@ -13746,6 +13818,7 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "OpenRouter Free Models Router",
     contextWindow: 2e5,
     maxTokens: 32768,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true
   },
   {
@@ -13753,6 +13826,7 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "Stealth Glyph Cluster (Free)",
     contextWindow: 256e3,
     maxTokens: 32768,
+    reasoning: DEFAULT_KILO_REASONING,
     free: true
   }
 ]);
@@ -13778,6 +13852,7 @@ function parseKiloCatalog(data) {
       name: name2,
       contextWindow,
       maxTokens,
+      reasoning: item.reasoning ?? builtin?.reasoning ?? DEFAULT_KILO_REASONING,
       free: true
     });
   }
@@ -13827,12 +13902,22 @@ var KiloDriver = class {
   constructor(options = {}) {
     this.#catalogLoader = options.catalogLoader ?? createKiloCatalogLoader(options);
     this.#requestExecutor = options.requestExecutor ?? createKiloNativeExecutor(options);
+    this.catalogLoader = this.#catalogLoader;
+    this.requestExecutor = this.#requestExecutor;
   }
   async catalog(account, context = {}) {
     return this.#catalogLoader({ force: Boolean(context.force) });
   }
   async getCatalog(context = {}) {
     return this.#catalogLoader({ force: Boolean(context?.force) });
+  }
+  async getQuota() {
+    return createQuotaSnapshot({
+      remaining: 100,
+      limit: 100,
+      unit: "requests",
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
   }
   async discover() {
     return {
@@ -13912,8 +13997,30 @@ var KiloDriver = class {
       }
     };
   }
-  async invoke(envelope2) {
-    return this.#requestExecutor(envelope2);
+  async invoke(requestOrEnvelope, invocation, context = {}) {
+    const isEnvelope = requestOrEnvelope && typeof requestOrEnvelope === "object" && "request" in requestOrEnvelope;
+    const request = isEnvelope ? requestOrEnvelope.request : requestOrEnvelope;
+    const inv = isEnvelope ? requestOrEnvelope.invocation : invocation;
+    const ctx = isEnvelope ? requestOrEnvelope.context ?? {} : context;
+    const executor = ctx?.requestExecutor ?? this.#requestExecutor;
+    let credential = null;
+    if (ctx?.secretStore && inv?.auth?.credentialRef) {
+      credential = await ctx.secretStore.read(inv.auth.credentialRef).catch(() => null);
+    }
+    if (!credential) {
+      credential = isEnvelope ? requestOrEnvelope.credential ?? inv?.auth ?? { access: "free-tier" } : inv?.auth ?? { access: "free-tier" };
+    }
+    return executor({
+      request,
+      invocation: inv,
+      context: ctx,
+      attachments: ctx?.attachments ?? inv?.attachments ?? (isEnvelope ? requestOrEnvelope.attachments : void 0),
+      credential,
+      signal: ctx?.signal ?? inv?.signal ?? (isEnvelope ? requestOrEnvelope.signal : void 0)
+    });
+  }
+  async stream(request, invocation, context = {}) {
+    return this.invoke(request, invocation, context);
   }
 };
 function createKiloDriver(options = {}) {
