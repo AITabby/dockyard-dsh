@@ -90,6 +90,12 @@ const modelSelectionSetRequest = z.object({
   enabledModelIds: z.array(z.string()).nullable(),
 });
 
+const testModelConnectionRequest = z.object({
+  providerId: z.string().min(1),
+  modelId: z.string().min(1),
+  timeoutMs: z.number().int().positive().optional(),
+});
+
 function requestParameter(schema, name) {
   return {
     name: "request",
@@ -132,6 +138,7 @@ export const TYPERT_DESCRIPTORS = Object.freeze([
   descriptor("setContextWindowOverride", requestParameter(contextWindowSetRequest, "DockyardContextWindowSetRequest"), "DockyardContextWindowOverride"),
   descriptor("getModelSelection", requestParameter(modelSelectionRequest, "DockyardModelSelectionRequest"), "DockyardModelSelectionResult"),
   descriptor("setModelSelection", requestParameter(modelSelectionSetRequest, "DockyardModelSelectionSetRequest"), "DockyardModelSelectionResult"),
+  descriptor("testModelConnection", requestParameter(testModelConnectionRequest, "DockyardTestModelConnectionRequest"), "DockyardTestModelConnectionResult"),
 ]);
 
 export const TYPERT_MODEL = Object.freeze({

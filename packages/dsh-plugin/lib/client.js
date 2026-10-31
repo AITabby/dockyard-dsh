@@ -15492,6 +15492,11 @@ var modelSelectionSetRequest = external_exports.object({
   providerId: external_exports.string().min(1),
   enabledModelIds: external_exports.array(external_exports.string()).nullable()
 });
+var testModelConnectionRequest = external_exports.object({
+  providerId: external_exports.string().min(1),
+  modelId: external_exports.string().min(1),
+  timeoutMs: external_exports.number().int().positive().optional()
+});
 function requestParameter(schema, name) {
   return {
     name: "request",
@@ -15531,7 +15536,8 @@ var TYPERT_DESCRIPTORS = Object.freeze([
   descriptor("getContextWindowOverride", requestParameter(contextWindowRequest, "DockyardContextWindowRequest"), "DockyardContextWindowOverride"),
   descriptor("setContextWindowOverride", requestParameter(contextWindowSetRequest, "DockyardContextWindowSetRequest"), "DockyardContextWindowOverride"),
   descriptor("getModelSelection", requestParameter(modelSelectionRequest, "DockyardModelSelectionRequest"), "DockyardModelSelectionResult"),
-  descriptor("setModelSelection", requestParameter(modelSelectionSetRequest, "DockyardModelSelectionSetRequest"), "DockyardModelSelectionResult")
+  descriptor("setModelSelection", requestParameter(modelSelectionSetRequest, "DockyardModelSelectionSetRequest"), "DockyardModelSelectionResult"),
+  descriptor("testModelConnection", requestParameter(testModelConnectionRequest, "DockyardTestModelConnectionRequest"), "DockyardTestModelConnectionResult")
 ]);
 var TYPERT_MODEL = Object.freeze({
   services: [
@@ -15705,6 +15711,12 @@ var DOCKYARD_LOCALES = Object.freeze({
     "modelSelection.saving": "\u4FDD\u5B58\u4E2D\u2026",
     "modelSelection.saved": "\u6A21\u578B\u8BBE\u7F6E\u5DF2\u4FDD\u5B58\u5E76\u7ACB\u5373\u751F\u6548",
     "modelSelection.saveFailed": "\u4FDD\u5B58\u5931\u8D25\uFF1A{error}",
+    "modelSelection.testConnection": "\u6D4B\u8BD5\u8FDE\u63A5",
+    "modelSelection.testing": "\u6D4B\u8BD5\u4E2D\u2026",
+    "modelSelection.testSuccess": "{latency}ms",
+    "modelSelection.testFailed": "\u5931\u8D25",
+    "modelSelection.testSuccessTooltip": "\u8FDE\u63A5\u6B63\u5E38 (\u5EF6\u8FDF {latency}ms) \xB7 \u70B9\u51FB\u91CD\u65B0\u6D4B\u8BD5",
+    "modelSelection.testFailedTooltip": "\u8FDE\u63A5\u5931\u8D25\uFF1A{error} \xB7 \u70B9\u51FB\u91CD\u65B0\u6D4B\u8BD5",
     "subscription.antigravityNote": "\u6DFB\u52A0\u8D26\u53F7\u65F6\uFF0CDSH \u4F1A\u63A5\u5165 Google \u5B98\u65B9\u4F1A\u8BDD\u5E76\u8BFB\u53D6\u5B9E\u65F6\u989D\u5EA6\uFF1B\u8BF7\u6309\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u6388\u6743\u9875\u63D0\u793A\u5B8C\u6210\u767B\u5F55\u3002",
     "subscription.antigravityLogin": "Antigravity",
     "subscription.addTitle": "\u6DFB\u52A0\u8BA2\u9605",
@@ -15913,6 +15925,12 @@ var DOCKYARD_LOCALES = Object.freeze({
     "modelSelection.saving": "Saving\u2026",
     "modelSelection.saved": "Saved and updated immediately",
     "modelSelection.saveFailed": "Failed to save: {error}",
+    "modelSelection.testConnection": "Test",
+    "modelSelection.testing": "Testing\u2026",
+    "modelSelection.testSuccess": "{latency}ms",
+    "modelSelection.testFailed": "Failed",
+    "modelSelection.testSuccessTooltip": "Connected (latency {latency}ms) \xB7 Click to re-test",
+    "modelSelection.testFailedTooltip": "Failed: {error} \xB7 Click to re-test",
     "subscription.antigravityNote": "When adding an account, DSH connects to the official Google session and reads live quota. Follow the official client or authorization page prompts to sign in.",
     "subscription.antigravityLogin": "Antigravity",
     "subscription.addTitle": "Add subscription",
@@ -16604,12 +16622,22 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-model-search:focus{border-color:rgba(121,214,200,.7);outline:0;box-shadow:0 0 0 2px rgba(121,214,200,.12)}
 .dockyard-dsh-model-search::placeholder{color:var(--dsw-alias-label-caption,#8b93a1)}
 .dockyard-dsh-model-list-box{display:flex;flex-direction:column;gap:3px;max-height:220px;overflow-y:auto;padding:6px;border-radius:var(--dsw-radius-md,12px);border:.5px solid var(--dsw-alias-border-l4,rgba(255,255,255,.08));background:rgba(0,0,0,.15);box-sizing:border-box}
-.dockyard-dsh-model-item{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:var(--dsw-radius-sm,8px);cursor:pointer;user-select:none;transition:background 120ms ease}
+.dockyard-dsh-model-item{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 10px;border-radius:var(--dsw-radius-sm,8px);transition:background 120ms ease}
 .dockyard-dsh-model-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.06))}
-.dockyard-dsh-model-checkbox{width:16px;height:16px;margin:0;cursor:pointer;accent-color:#79d6c8}
+.dockyard-dsh-model-item-main{display:flex;align-items:center;gap:10px;min-width:0;flex:1;cursor:pointer;user-select:none}
+.dockyard-dsh-model-checkbox{width:16px;height:16px;margin:0;cursor:pointer;accent-color:#79d6c8;flex-shrink:0}
 .dockyard-dsh-model-item-info{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
 .dockyard-dsh-model-item-title{color:var(--dsw-alias-label-primary,#f5f7fb);font-size:13px;font-weight:500;line-height:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dockyard-dsh-model-item-id{color:var(--dsw-alias-label-caption,#8b93a1);font:400 11px/15px ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dockyard-dsh-model-item-extra{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.dockyard-dsh-model-test-btn{appearance:none;box-sizing:border-box;height:24px;padding:0 8px;border:.5px solid var(--dsw-alias-border-l3,rgba(255,255,255,.14));border-radius:var(--dsw-radius-xs,6px);background:rgba(255,255,255,.05);color:var(--dsw-alias-label-secondary,#a0a6b5);cursor:pointer;font:500 11px/22px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap;transition:all 120ms ease}
+.dockyard-dsh-model-test-btn:hover:not(:disabled){background:rgba(255,255,255,.1);border-color:rgba(121,214,200,.4);color:#a5e6dd}
+.dockyard-dsh-model-test-btn:disabled{cursor:default;opacity:.5}
+.dockyard-dsh-model-test-badge{appearance:none;box-sizing:border-box;height:24px;padding:0 8px;display:inline-flex;align-items:center;justify-content:center;gap:4px;border-radius:var(--dsw-radius-xs,6px);cursor:pointer;font:500 11px/22px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;max-width:96px;overflow:hidden;text-overflow:ellipsis;flex-shrink:0;transition:all 120ms ease}
+.dockyard-dsh-model-test-badge[data-status=ok]{background:rgba(34,197,94,.12);color:#4ade80;border:.5px solid rgba(34,197,94,.32)}
+.dockyard-dsh-model-test-badge[data-status=ok]:hover{background:rgba(34,197,94,.2)}
+.dockyard-dsh-model-test-badge[data-status=error]{background:rgba(239,68,68,.12);color:#f87171;border:.5px solid rgba(239,68,68,.32)}
+.dockyard-dsh-model-test-badge[data-status=error]:hover{background:rgba(239,68,68,.2)}
 .dockyard-dsh-model-actions{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:4px}
 .dockyard-dsh-model-actions-left{display:flex;align-items:center;gap:6px}
 .dockyard-dsh-account{display:flex;flex-direction:column;gap:10px;padding:14px 16px;border:.5px solid var(--dsw-alias-settings-card-stroke,rgba(255,255,255,.08));border-radius:var(--dsw-radius-xl,20px);background:var(--dsw-alias-settings-card-fill,rgba(255,255,255,.035))}
@@ -17391,12 +17419,14 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
     enabledModelIds: null
   });
   const [selectedIds, setSelectedIds] = useState(() => /* @__PURE__ */ new Set());
+  const [testStates, setTestStates] = useState(() => ({}));
   const [search, setSearch] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
   useEffect(() => {
     let cancelled = false;
     setState({ status: "loading", models: [], enabledModelIds: null });
+    setTestStates({});
     setMessage(null);
     if (!providerId || typeof remote?.getModelSelection !== "function") {
       setState({ status: "ready", models: [], enabledModelIds: null });
@@ -17522,6 +17552,92 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
       setSaving(false);
     }
   };
+  const testConnection = async (modelId, e) => {
+    e?.stopPropagation?.();
+    e?.preventDefault?.();
+    if (testStates[modelId]?.status === "testing") return;
+    if (typeof remote?.testModelConnection !== "function") {
+      setTestStates((prev) => ({
+        ...prev,
+        [modelId]: {
+          status: "error",
+          error: text(t, "modelSelection.testFailed"),
+          fullError: "remote.testModelConnection not available"
+        }
+      }));
+      return;
+    }
+    setTestStates((prev) => ({
+      ...prev,
+      [modelId]: { status: "testing" }
+    }));
+    try {
+      const res = await remote.testModelConnection({ providerId, modelId });
+      const unwrapped = unwrapRemote(res, t);
+      if (unwrapped?.ok) {
+        setTestStates((prev) => ({
+          ...prev,
+          [modelId]: {
+            status: "ok",
+            latencyMs: unwrapped.latencyMs ?? 0
+          }
+        }));
+      } else {
+        const errorMsg = unwrapped?.status ? `${unwrapped.status} \u9519\u8BEF` : unwrapped?.error || text(t, "modelSelection.testFailed");
+        setTestStates((prev) => ({
+          ...prev,
+          [modelId]: {
+            status: "error",
+            error: errorMsg,
+            fullError: unwrapped?.error || errorMsg
+          }
+        }));
+      }
+    } catch (err) {
+      setTestStates((prev) => ({
+        ...prev,
+        [modelId]: {
+          status: "error",
+          error: errorText(err, t),
+          fullError: err?.message || errorText(err, t)
+        }
+      }));
+    }
+  };
+  const renderTestBadge = (modelId) => {
+    const testState = testStates[modelId];
+    if (!testState || testState.status === "idle") {
+      return h("button", {
+        type: "button",
+        className: "dockyard-dsh-model-test-btn",
+        onClick: (e) => testConnection(modelId, e)
+      }, text(t, "modelSelection.testConnection"));
+    }
+    if (testState.status === "testing") {
+      return h("button", {
+        type: "button",
+        className: "dockyard-dsh-model-test-btn",
+        disabled: true
+      }, text(t, "modelSelection.testing"));
+    }
+    if (testState.status === "ok") {
+      return h("button", {
+        type: "button",
+        className: "dockyard-dsh-model-test-badge",
+        "data-status": "ok",
+        title: text(t, "modelSelection.testSuccessTooltip", { latency: testState.latencyMs }),
+        onClick: (e) => testConnection(modelId, e)
+      }, `\u2713 ${text(t, "modelSelection.testSuccess", { latency: testState.latencyMs })}`);
+    }
+    const errorLabel = testState.status ? `${testState.status}` : text(t, "modelSelection.testFailed");
+    return h("button", {
+      type: "button",
+      className: "dockyard-dsh-model-test-badge",
+      "data-status": "error",
+      title: text(t, "modelSelection.testFailedTooltip", { error: testState.fullError || testState.error || errorLabel }),
+      onClick: (e) => testConnection(modelId, e)
+    }, `\u2715 ${errorLabel}`);
+  };
   return h(
     "div",
     { className: "dockyard-dsh-section dockyard-dsh-model-selection" },
@@ -17553,22 +17669,33 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
         const checked = selectedIds.has(item.id);
         const meta3 = item.contextWindow ? ` \xB7 ${Math.round(item.contextWindow / 1024)}k context` : "";
         return h(
-          "label",
+          "div",
           {
             key: item.id,
             className: "dockyard-dsh-model-item"
           },
-          h("input", {
-            type: "checkbox",
-            className: "dockyard-dsh-model-checkbox",
-            checked,
-            onChange: () => toggleModel(item.id)
-          }),
+          h(
+            "label",
+            {
+              className: "dockyard-dsh-model-item-main"
+            },
+            h("input", {
+              type: "checkbox",
+              className: "dockyard-dsh-model-checkbox",
+              checked,
+              onChange: () => toggleModel(item.id)
+            }),
+            h(
+              "div",
+              { className: "dockyard-dsh-model-item-info" },
+              h("div", { className: "dockyard-dsh-model-item-title" }, item.name || item.id),
+              h("div", { className: "dockyard-dsh-model-item-id" }, `${item.id}${meta3}`)
+            )
+          ),
           h(
             "div",
-            { className: "dockyard-dsh-model-item-info" },
-            h("div", { className: "dockyard-dsh-model-item-title" }, item.name || item.id),
-            h("div", { className: "dockyard-dsh-model-item-id" }, `${item.id}${meta3}`)
+            { className: "dockyard-dsh-model-item-extra" },
+            renderTestBadge(item.id)
           )
         );
       })
@@ -18140,7 +18267,7 @@ function SubscriptionSettingsSection({ close, controller, remote, modelDirectori
       controller,
       remote,
       onOpenOverview: () => setSelectedProviderId(null),
-      onClose: close,
+      onClose: () => setSelectedProviderId(null),
       t
     }) : h(SubscriptionOverviewPopup, {
       providers,

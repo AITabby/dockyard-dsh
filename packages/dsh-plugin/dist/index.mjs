@@ -55,7 +55,8 @@ function markRemoteMethods() {
     "getContextWindowOverride",
     "setContextWindowOverride",
     "getModelSelection",
-    "setModelSelection"
+    "setModelSelection",
+    "testModelConnection"
   ]) {
     let initializer;
     Remote(name2)(void 0, {
@@ -160,6 +161,11 @@ var init_dockyard_remote_host = __esm({
       }
       async setModelSelection(request = {}) {
         return this.dockyard.setModelSelection(request.providerId, request.enabledModelIds);
+      }
+      async testModelConnection(request = {}) {
+        return this.dockyard.testModelConnection(request.providerId, request.modelId, {
+          timeoutMs: request.timeoutMs ?? 15e3
+        });
       }
     };
     markRemoteMethods();
@@ -606,11 +612,91 @@ function stringValue(value) {
   return value === void 0 || value === null || value === "" ? null : String(value);
 }
 var EXTENDED_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
+function resolveContextWindowFromModel(model, fallback = 131072) {
+  if (!model) return fallback;
+  const values = [
+    model.context_length,
+    model.contextWindow,
+    model.context_window,
+    model.maxInputTokens,
+    model.max_input_tokens,
+    model.context?.contextWindow,
+    model.metadata?.contextWindow
+  ];
+  for (const v of values) {
+    if (Number.isInteger(v) && v > 0) return v;
+    const num = Number(v);
+    if (Number.isInteger(num) && num > 0) return num;
+  }
+  return fallback;
+}
+function resolveMaxTokensFromModel(model, fallback = 16384) {
+  if (!model) return fallback;
+  const values = [
+    model.top_provider?.max_completion_tokens,
+    model.per_request_limits?.max_completion_tokens,
+    model.max_completion_tokens,
+    model.maxOutputTokens,
+    model.max_output_tokens,
+    model.maxTokens,
+    model.max_tokens
+  ];
+  for (const v of values) {
+    if (Number.isInteger(v) && v > 0) return v;
+    const num = Number(v);
+    if (Number.isInteger(num) && num > 0) return num;
+  }
+  return fallback;
+}
 function resolveReasoningFromModel(model) {
   if (!model) return void 0;
   if (model.reasoning === false) return void 0;
   if (Array.isArray(model.reasoning?.efforts) && model.reasoning.efforts.length > 0) {
     return model.reasoning;
+  }
+  if (Array.isArray(model.supported_reasoning_levels) && model.supported_reasoning_levels.length > 0) {
+    const efforts = model.supported_reasoning_levels.map((lvl) => {
+      const id = typeof lvl === "string" ? lvl : lvl?.id;
+      if (!id) return null;
+      const name2 = typeof lvl === "object" && lvl.name ? lvl.name : id.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+      return {
+        id,
+        name: name2,
+        ...lvl?.description ? { description: lvl.description } : {}
+      };
+    }).filter(Boolean);
+    if (efforts.length > 0) {
+      const defaultEffort = model.default_reasoning_level ?? (efforts.some((e) => e.id === "medium") ? "medium" : efforts[0]?.id);
+      return { efforts, defaultEffort };
+    }
+  }
+  if (Array.isArray(model.reasoning_efforts) && model.reasoning_efforts.length > 0) {
+    const efforts = model.reasoning_efforts.map((lvl) => {
+      const id = typeof lvl === "string" ? lvl : lvl?.id ?? lvl?.value;
+      if (!id) return null;
+      const name2 = typeof lvl === "object" && (lvl.label ?? lvl.name) ? lvl.label ?? lvl.name : id.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+      return {
+        id,
+        name: name2,
+        ...lvl?.description ? { description: lvl.description } : {}
+      };
+    }).filter(Boolean);
+    if (efforts.length > 0) {
+      const defaultEffort = model.default_parameters?.reasoning_effort ?? (efforts.some((e) => e.id === "medium") ? "medium" : efforts[0]?.id);
+      return { efforts, defaultEffort };
+    }
+  }
+  if (Array.isArray(model.supported_parameters) && model.supported_parameters.includes("reasoning_effort")) {
+    const id = String(model.id ?? "").toLowerCase();
+    const supportsMax = id.includes("ultra") || id.includes("o1") || id.includes("o3") || id.includes("deepseek-r1");
+    const efforts = [
+      { id: "low", name: "Low", description: "\u5FEB\u901F\u601D\u8003\uFF0C\u4FDD\u7559\u57FA\u7840\u63A8\u7406" },
+      { id: "medium", name: "Medium", description: "\u6807\u51C6\u601D\u8003\uFF0C\u5E73\u8861\u63A8\u7406\u6DF1\u5EA6\u4E0E\u54CD\u5E94\u901F\u5EA6" },
+      { id: "high", name: "High", description: "\u6DF1\u5EA6\u601D\u8003\uFF0C\u9002\u5408\u590D\u6742\u903B\u8F91\u4E0E\u591A\u6B65\u9AA4\u5206\u6790" },
+      ...supportsMax ? [{ id: "max", name: "Max", description: "\u6781\u81F4\u601D\u8003\uFF0C\u6700\u9AD8\u63A8\u6F14\u6DF1\u5EA6" }] : []
+    ];
+    const defaultEffort = typeof model.default_parameters?.reasoning_effort === "string" ? model.default_parameters.reasoning_effort : "medium";
+    return { efforts, defaultEffort };
   }
   if (model.thinkingLevelMap && typeof model.thinkingLevelMap === "object") {
     const supported = EXTENDED_THINKING_LEVELS.filter((level) => {
@@ -13286,8 +13372,10 @@ function parseWorkbuddyCatalog(data) {
     const isFree = credits === "x0.00" || credits === "x0.00 credits" || credits === "0" || item?.free === true || item?.isFree === true;
     const baseName = stringValue(item?.name) || stringValue(item?.title) || id;
     const name2 = isFree && !baseName.toLowerCase().includes("free") ? `${baseName} (WorkBuddy Free)` : baseName;
-    const contextWindow = Number.isInteger(item?.maxInputTokens) ? item.maxInputTokens : Number.isInteger(item?.contextWindow) ? item.contextWindow : 131072;
-    const maxTokens = Number.isInteger(item?.maxOutputTokens) ? item.maxOutputTokens : Number.isInteger(item?.maxTokens) ? item.maxTokens : 16384;
+    const builtin = BUILTIN_WORKBUDDY_FREE_MODELS.find((m) => m.id === id);
+    const contextWindow = resolveContextWindowFromModel(item, builtin?.contextWindow ?? 131072);
+    const maxTokens = resolveMaxTokensFromModel(item, builtin?.maxTokens ?? 16384);
+    const reasoning = resolveReasoningFromModel(item) ?? builtin?.reasoning;
     const modelRecord = {
       id,
       name: name2,
@@ -13295,15 +13383,7 @@ function parseWorkbuddyCatalog(data) {
       maxTokens,
       free: isFree,
       credits,
-      reasoning: {
-        efforts: [
-          { id: "minimal", name: "Minimal" },
-          { id: "low", name: "Low" },
-          { id: "medium", name: "Medium" },
-          { id: "high", name: "High" }
-        ],
-        defaultEffort: "medium"
-      }
+      ...reasoning ? { reasoning } : {}
     };
     if (isFree) {
       freeModels.push(modelRecord);
@@ -13523,13 +13603,20 @@ function contentPartText2(part) {
   if (typeof part.content === "string") return part.content;
   return "";
 }
-async function openAiContent3(content, attachments = []) {
+async function openAiContent3(content, attachments = null) {
   if (typeof content === "string") {
-    if (!attachments?.length) return content;
+    if (!Array.isArray(attachments) || attachments.length === 0) {
+      return content;
+    }
     const parts = [{ type: "text", text: content }];
     for (const attachment of attachments) {
-      const data = await resolveImageData(attachment);
-      if (data) parts.push(data);
+      const data = await resolveImageData(attachment, attachments);
+      if (data) {
+        parts.push({
+          type: "image_url",
+          image_url: { url: `data:${data.mediaType};base64,${data.data}` }
+        });
+      }
     }
     return parts;
   }
@@ -13541,7 +13628,15 @@ async function openAiContent3(content, attachments = []) {
       } else if (part && typeof part === "object") {
         if (part.type === "text" && typeof part.text === "string") {
           parts.push(part);
-        } else if (part.type === "image" || part.type === "image_url") {
+        } else if (part.type === "image") {
+          const image = await resolveImageData(part, attachments);
+          if (image) {
+            parts.push({
+              type: "image_url",
+              image_url: { url: `data:${image.mediaType};base64,${image.data}` }
+            });
+          }
+        } else if (part.type === "image_url") {
           parts.push(part);
         } else {
           const text3 = contentPartText2(part);
@@ -13549,15 +13644,22 @@ async function openAiContent3(content, attachments = []) {
         }
       }
     }
-    for (const attachment of attachments) {
-      const data = await resolveImageData(attachment);
-      if (data) parts.push(data);
+    if (Array.isArray(attachments)) {
+      for (const attachment of attachments) {
+        const data = await resolveImageData(attachment, attachments);
+        if (data) {
+          parts.push({
+            type: "image_url",
+            image_url: { url: `data:${data.mediaType};base64,${data.data}` }
+          });
+        }
+      }
     }
     return parts;
   }
   return "";
 }
-async function buildKiloMessages(request = {}, attachments = []) {
+async function buildKiloMessages(request = {}, attachments = null) {
   const result = [];
   const rawMessages = Array.isArray(request.messages) ? request.messages : [];
   for (const message of rawMessages) {
@@ -13646,7 +13748,7 @@ function createKiloNativeExecutor({
         }
       );
     } catch (err) {
-      if (body.model !== "kilo-auto/free" && (err?.status === 503 || err?.status === 502 || err?.status === 504 || err?.status === 404)) {
+      if (!req.probe && !req.noFallback && body.model !== "kilo-auto/free" && (err?.status === 503 || err?.status === 502 || err?.status === 504 || err?.status === 404)) {
         const fallbackBody = { ...body, model: "kilo-auto/free" };
         response = await fetchNativeResponse(
           validatedEndpoint,
@@ -13673,6 +13775,7 @@ function createKiloNativeExecutor({
     let reasoning = null;
     let rawUsage = null;
     let stop = "stop";
+    let probeYielded = false;
     for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID14 })) {
       if (event?.done) continue;
       const parsed = event?.data;
@@ -13680,6 +13783,10 @@ function createKiloNativeExecutor({
       if (parsed.usage) rawUsage = parsed.usage;
       const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : null;
       if (!choice) continue;
+      if (req.probe && !probeYielded) {
+        probeYielded = true;
+        yield { type: "text-delta", index: 0, text: " " };
+      }
       const delta = choice.delta ?? {};
       const reasoningDelta = extractReasoningDelta(delta);
       if (reasoningDelta) {
@@ -13736,15 +13843,23 @@ function createKiloNativeExecutor({
 // modules/provider-kilo/src/driver.mjs
 var PROVIDER_ID15 = "kilo";
 var DEFAULT_CATALOG_URL2 = "https://api.kilo.ai/api/gateway/models";
-var DEFAULT_KILO_REASONING_EFFORTS = Object.freeze([
-  { id: "none", name: "None", description: "\u5173\u95ED\u6DF1\u5EA6\u601D\u8003 (Fastest)" },
+var STANDARD_KILO_REASONING_EFFORTS = Object.freeze([
+  { id: "low", name: "Low", description: "\u5FEB\u901F\u601D\u8003\uFF0C\u4FDD\u7559\u57FA\u7840\u63A8\u7406" },
+  { id: "medium", name: "Medium", description: "\u6807\u51C6\u601D\u8003\uFF0C\u5E73\u8861\u63A8\u7406\u6DF1\u5EA6\u4E0E\u54CD\u5E94\u901F\u5EA6" },
+  { id: "high", name: "High", description: "\u6DF1\u5EA6\u601D\u8003\uFF0C\u9002\u5408\u590D\u6742\u903B\u8F91\u4E0E\u591A\u6B65\u9AA4\u5206\u6790" }
+]);
+var EXTENDED_KILO_REASONING_EFFORTS = Object.freeze([
   { id: "low", name: "Low", description: "\u5FEB\u901F\u601D\u8003\uFF0C\u4FDD\u7559\u57FA\u7840\u63A8\u7406" },
   { id: "medium", name: "Medium", description: "\u6807\u51C6\u601D\u8003\uFF0C\u5E73\u8861\u63A8\u7406\u6DF1\u5EA6\u4E0E\u54CD\u5E94\u901F\u5EA6" },
   { id: "high", name: "High", description: "\u6DF1\u5EA6\u601D\u8003\uFF0C\u9002\u5408\u590D\u6742\u903B\u8F91\u4E0E\u591A\u6B65\u9AA4\u5206\u6790" },
   { id: "max", name: "Max", description: "\u6781\u81F4\u601D\u8003\uFF0C\u6700\u9AD8\u903B\u8F91\u63A8\u5BFC\u6DF1\u5EA6" }
 ]);
 var DEFAULT_KILO_REASONING = Object.freeze({
-  efforts: [...DEFAULT_KILO_REASONING_EFFORTS],
+  efforts: [...STANDARD_KILO_REASONING_EFFORTS],
+  defaultEffort: "medium"
+});
+var EXTENDED_KILO_REASONING = Object.freeze({
+  efforts: [...EXTENDED_KILO_REASONING_EFFORTS],
   defaultEffort: "medium"
 });
 var BUILTIN_KILO_FREE_MODELS = Object.freeze([
@@ -13753,6 +13868,7 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "Auto Free (Kilo)",
     contextWindow: 256e3,
     maxTokens: 32768,
+    inputModalities: ["text"],
     reasoning: DEFAULT_KILO_REASONING,
     free: true
   },
@@ -13762,7 +13878,6 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     contextWindow: 1e6,
     maxTokens: 131072,
     inputModalities: ["text", "image", "video"],
-    reasoning: DEFAULT_KILO_REASONING,
     free: true
   },
   {
@@ -13770,7 +13885,7 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "Reflection Beam 1.0 (Free)",
     contextWindow: 1048576,
     maxTokens: 131072,
-    reasoning: DEFAULT_KILO_REASONING,
+    inputModalities: ["text"],
     free: true
   },
   {
@@ -13778,39 +13893,40 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "inclusionAI Ling 3.1 Flash (Free)",
     contextWindow: 1e6,
     maxTokens: 262144,
-    reasoning: DEFAULT_KILO_REASONING,
+    inputModalities: ["text"],
     free: true
   },
   {
     id: "nvidia/nemotron-3-ultra-550b-a55b:free",
     name: "NVIDIA Nemotron 3 Ultra (Free)",
     contextWindow: 1e6,
-    maxTokens: 131072,
-    reasoning: DEFAULT_KILO_REASONING,
+    maxTokens: 65536,
+    inputModalities: ["text"],
+    reasoning: EXTENDED_KILO_REASONING,
     free: true
   },
   {
     id: "nvidia/nemotron-3.5-lightning:free",
     name: "NVIDIA Nemotron 3.5 Lightning (Free)",
     contextWindow: 1e6,
-    maxTokens: 131072,
-    reasoning: DEFAULT_KILO_REASONING,
+    maxTokens: 65536,
+    inputModalities: ["text"],
     free: true
   },
   {
     id: "recursive/flint-v1.0:free",
     name: "Recursive Flint (Free)",
     contextWindow: 262144,
-    maxTokens: 65536,
-    reasoning: DEFAULT_KILO_REASONING,
+    maxTokens: 235929,
+    inputModalities: ["text"],
     free: true
   },
   {
     id: "poolside/laguna-s-2.1:free",
     name: "Poolside Laguna S 2.1 (Free)",
     contextWindow: 262144,
-    maxTokens: 65536,
-    reasoning: DEFAULT_KILO_REASONING,
+    maxTokens: 32768,
+    inputModalities: ["text"],
     free: true
   },
   {
@@ -13818,6 +13934,7 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "OpenRouter Free Models Router",
     contextWindow: 2e5,
     maxTokens: 32768,
+    inputModalities: ["text", "image"],
     reasoning: DEFAULT_KILO_REASONING,
     free: true
   },
@@ -13825,8 +13942,8 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     id: "stealth/glyph-cluster",
     name: "Stealth Glyph Cluster (Free)",
     contextWindow: 256e3,
-    maxTokens: 32768,
-    reasoning: DEFAULT_KILO_REASONING,
+    maxTokens: 256e3,
+    inputModalities: ["text"],
     free: true
   }
 ]);
@@ -13845,14 +13962,17 @@ function parseKiloCatalog(data) {
     seen.add(id);
     const builtin = builtinMap.get(id);
     const name2 = stringValue(item?.name) ?? builtin?.name ?? id;
-    const contextWindow = Number.isInteger(item?.context_length) ? item.context_length : builtin?.contextWindow ?? 256e3;
-    const maxTokens = Number.isInteger(item?.top_provider?.max_completion_tokens) ? item.top_provider.max_completion_tokens : builtin?.maxTokens ?? 32768;
+    const contextWindow = resolveContextWindowFromModel(item, builtin?.contextWindow ?? 256e3);
+    const maxTokens = resolveMaxTokensFromModel(item, builtin?.maxTokens ?? 32768);
+    const inputModalities = Array.isArray(item?.architecture?.input_modalities) ? [...item.architecture.input_modalities] : builtin?.inputModalities ? [...builtin.inputModalities] : ["text"];
+    const reasoning = resolveReasoningFromModel(item) ?? builtin?.reasoning;
     result.push({
       id,
       name: name2,
       contextWindow,
       maxTokens,
-      reasoning: item.reasoning ?? builtin?.reasoning ?? DEFAULT_KILO_REASONING,
+      inputModalities,
+      ...reasoning ? { reasoning } : {},
       free: true
     });
   }
@@ -15284,6 +15404,59 @@ var DockyardDshService = class {
       enabledModelIds: saved,
       saved: true
     };
+  }
+  async testModelConnection(providerInput, modelId, { timeoutMs = 15e3 } = {}) {
+    await this.ready;
+    const providerId = providerIdFor(this.runtime, providerInput);
+    if (!providerId) throw new Error(`\u672A\u77E5 provider\uFF1A${providerInput}`);
+    if (!modelId || typeof modelId !== "string") throw new Error("\u7F3A\u5C11\u6709\u6548\u7684 modelId");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error("\u8FDE\u63A5\u6D4B\u8BD5\u8D85\u65F6 (15s)")), timeoutMs);
+    const startTime = Date.now();
+    let receivedChunk = false;
+    let latencyMs = 0;
+    try {
+      const stream = await this.runtime.stream(
+        providerId,
+        {
+          model: modelId,
+          messages: [{ role: "user", content: "hi" }],
+          maxTokens: 16,
+          probe: true,
+          noFallback: true
+        },
+        { signal: controller.signal }
+      );
+      for await (const chunk of stream) {
+        receivedChunk = true;
+        latencyMs = Date.now() - startTime;
+        break;
+      }
+      if (!receivedChunk) {
+        latencyMs = Date.now() - startTime;
+      }
+      return {
+        ok: true,
+        providerId,
+        modelId,
+        latencyMs
+      };
+    } catch (error) {
+      latencyMs = Date.now() - startTime;
+      const message = redactError(error);
+      const status = error?.status ?? error?.statusCode ?? null;
+      return {
+        ok: false,
+        providerId,
+        modelId,
+        latencyMs,
+        status,
+        error: message || "\u8FDE\u63A5\u5931\u8D25"
+      };
+    } finally {
+      clearTimeout(timeout);
+      controller.abort();
+    }
   }
   async startAuthorization(providerInput, { openBrowser = true } = {}) {
     await this.ready;

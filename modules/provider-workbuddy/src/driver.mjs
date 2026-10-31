@@ -6,7 +6,12 @@ import {
   createAccountRecord,
   createQuotaSnapshot,
 } from "../../../packages/core/src/contracts.mjs";
-import { stringValue } from "../../../packages/providers/src/provider-utils.mjs";
+import {
+  resolveContextWindowFromModel,
+  resolveMaxTokensFromModel,
+  resolveReasoningFromModel,
+  stringValue,
+} from "../../../packages/providers/src/provider-utils.mjs";
 import {
   DEFAULT_WORKBUDDY_ENDPOINT,
   createWorkbuddyNativeExecutor,
@@ -115,18 +120,11 @@ export function parseWorkbuddyCatalog(data) {
 
     const baseName = stringValue(item?.name) || stringValue(item?.title) || id;
     const name = isFree && !baseName.toLowerCase().includes("free") ? `${baseName} (WorkBuddy Free)` : baseName;
+    const builtin = BUILTIN_WORKBUDDY_FREE_MODELS.find((m) => m.id === id);
 
-    const contextWindow = Number.isInteger(item?.maxInputTokens)
-      ? item.maxInputTokens
-      : Number.isInteger(item?.contextWindow)
-        ? item.contextWindow
-        : 131072;
-
-    const maxTokens = Number.isInteger(item?.maxOutputTokens)
-      ? item.maxOutputTokens
-      : Number.isInteger(item?.maxTokens)
-        ? item.maxTokens
-        : 16384;
+    const contextWindow = resolveContextWindowFromModel(item, builtin?.contextWindow ?? 131072);
+    const maxTokens = resolveMaxTokensFromModel(item, builtin?.maxTokens ?? 16384);
+    const reasoning = resolveReasoningFromModel(item) ?? builtin?.reasoning;
 
     const modelRecord = {
       id,
@@ -135,15 +133,7 @@ export function parseWorkbuddyCatalog(data) {
       maxTokens,
       free: isFree,
       credits,
-      reasoning: {
-        efforts: [
-          { id: "minimal", name: "Minimal" },
-          { id: "low", name: "Low" },
-          { id: "medium", name: "Medium" },
-          { id: "high", name: "High" },
-        ],
-        defaultEffort: "medium",
-      },
+      ...(reasoning ? { reasoning } : {}),
     };
 
     if (isFree) {

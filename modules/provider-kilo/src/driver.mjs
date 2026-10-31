@@ -6,6 +6,9 @@ import {
 import {
   assertSecureEndpointUrl,
   fetchJson,
+  resolveContextWindowFromModel,
+  resolveMaxTokensFromModel,
+  resolveReasoningFromModel,
   stringValue,
 } from "../../../packages/providers/src/provider-utils.mjs";
 import { createKiloNativeExecutor } from "./native-transport.mjs";
@@ -13,8 +16,13 @@ import { createKiloNativeExecutor } from "./native-transport.mjs";
 const PROVIDER_ID = "kilo";
 const DEFAULT_CATALOG_URL = "https://api.kilo.ai/api/gateway/models";
 
-export const DEFAULT_KILO_REASONING_EFFORTS = Object.freeze([
-  { id: "none", name: "None", description: "关闭深度思考 (Fastest)" },
+export const STANDARD_KILO_REASONING_EFFORTS = Object.freeze([
+  { id: "low", name: "Low", description: "快速思考，保留基础推理" },
+  { id: "medium", name: "Medium", description: "标准思考，平衡推理深度与响应速度" },
+  { id: "high", name: "High", description: "深度思考，适合复杂逻辑与多步骤分析" },
+]);
+
+export const EXTENDED_KILO_REASONING_EFFORTS = Object.freeze([
   { id: "low", name: "Low", description: "快速思考，保留基础推理" },
   { id: "medium", name: "Medium", description: "标准思考，平衡推理深度与响应速度" },
   { id: "high", name: "High", description: "深度思考，适合复杂逻辑与多步骤分析" },
@@ -22,9 +30,16 @@ export const DEFAULT_KILO_REASONING_EFFORTS = Object.freeze([
 ]);
 
 export const DEFAULT_KILO_REASONING = Object.freeze({
-  efforts: [...DEFAULT_KILO_REASONING_EFFORTS],
+  efforts: [...STANDARD_KILO_REASONING_EFFORTS],
   defaultEffort: "medium",
 });
+
+export const EXTENDED_KILO_REASONING = Object.freeze({
+  efforts: [...EXTENDED_KILO_REASONING_EFFORTS],
+  defaultEffort: "medium",
+});
+
+export const DEFAULT_KILO_REASONING_EFFORTS = STANDARD_KILO_REASONING_EFFORTS;
 
 export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
   {
@@ -32,6 +47,7 @@ export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "Auto Free (Kilo)",
     contextWindow: 256000,
     maxTokens: 32768,
+    inputModalities: ["text"],
     reasoning: DEFAULT_KILO_REASONING,
     free: true,
   },
@@ -41,7 +57,6 @@ export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
     contextWindow: 1000000,
     maxTokens: 131072,
     inputModalities: ["text", "image", "video"],
-    reasoning: DEFAULT_KILO_REASONING,
     free: true,
   },
   {
@@ -49,7 +64,7 @@ export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "Reflection Beam 1.0 (Free)",
     contextWindow: 1048576,
     maxTokens: 131072,
-    reasoning: DEFAULT_KILO_REASONING,
+    inputModalities: ["text"],
     free: true,
   },
   {
@@ -57,39 +72,40 @@ export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "inclusionAI Ling 3.1 Flash (Free)",
     contextWindow: 1000000,
     maxTokens: 262144,
-    reasoning: DEFAULT_KILO_REASONING,
+    inputModalities: ["text"],
     free: true,
   },
   {
     id: "nvidia/nemotron-3-ultra-550b-a55b:free",
     name: "NVIDIA Nemotron 3 Ultra (Free)",
     contextWindow: 1000000,
-    maxTokens: 131072,
-    reasoning: DEFAULT_KILO_REASONING,
+    maxTokens: 65536,
+    inputModalities: ["text"],
+    reasoning: EXTENDED_KILO_REASONING,
     free: true,
   },
   {
     id: "nvidia/nemotron-3.5-lightning:free",
     name: "NVIDIA Nemotron 3.5 Lightning (Free)",
     contextWindow: 1000000,
-    maxTokens: 131072,
-    reasoning: DEFAULT_KILO_REASONING,
+    maxTokens: 65536,
+    inputModalities: ["text"],
     free: true,
   },
   {
     id: "recursive/flint-v1.0:free",
     name: "Recursive Flint (Free)",
     contextWindow: 262144,
-    maxTokens: 65536,
-    reasoning: DEFAULT_KILO_REASONING,
+    maxTokens: 235929,
+    inputModalities: ["text"],
     free: true,
   },
   {
     id: "poolside/laguna-s-2.1:free",
     name: "Poolside Laguna S 2.1 (Free)",
     contextWindow: 262144,
-    maxTokens: 65536,
-    reasoning: DEFAULT_KILO_REASONING,
+    maxTokens: 32768,
+    inputModalities: ["text"],
     free: true,
   },
   {
@@ -97,6 +113,7 @@ export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
     name: "OpenRouter Free Models Router",
     contextWindow: 200000,
     maxTokens: 32768,
+    inputModalities: ["text", "image"],
     reasoning: DEFAULT_KILO_REASONING,
     free: true,
   },
@@ -104,8 +121,8 @@ export const BUILTIN_KILO_FREE_MODELS = Object.freeze([
     id: "stealth/glyph-cluster",
     name: "Stealth Glyph Cluster (Free)",
     contextWindow: 256000,
-    maxTokens: 32768,
-    reasoning: DEFAULT_KILO_REASONING,
+    maxTokens: 256000,
+    inputModalities: ["text"],
     free: true,
   },
 ]);
@@ -128,19 +145,26 @@ export function parseKiloCatalog(data) {
 
     const builtin = builtinMap.get(id);
     const name = stringValue(item?.name) ?? builtin?.name ?? id;
-    const contextWindow = Number.isInteger(item?.context_length)
-      ? item.context_length
-      : builtin?.contextWindow ?? 256000;
-    const maxTokens = Number.isInteger(item?.top_provider?.max_completion_tokens)
-      ? item.top_provider.max_completion_tokens
-      : builtin?.maxTokens ?? 32768;
+
+    // Real context window and max tokens directly from the model data:
+    const contextWindow = resolveContextWindowFromModel(item, builtin?.contextWindow ?? 256000);
+    const maxTokens = resolveMaxTokensFromModel(item, builtin?.maxTokens ?? 32768);
+
+    // Real input modalities:
+    const inputModalities = Array.isArray(item?.architecture?.input_modalities)
+      ? [...item.architecture.input_modalities]
+      : (builtin?.inputModalities ? [...builtin.inputModalities] : ["text"]);
+
+    // Dynamic reasoning tiers derived strictly from model's actual supported parameters:
+    const reasoning = resolveReasoningFromModel(item) ?? builtin?.reasoning;
 
     result.push({
       id,
       name,
       contextWindow,
       maxTokens,
-      reasoning: item.reasoning ?? builtin?.reasoning ?? DEFAULT_KILO_REASONING,
+      inputModalities,
+      ...(reasoning ? { reasoning } : {}),
       free: true,
     });
   }

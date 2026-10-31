@@ -47,12 +47,105 @@ export function stringValue(value) {
 
 const EXTENDED_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
+export function resolveContextWindowFromModel(model, fallback = 131072) {
+  if (!model) return fallback;
+  const values = [
+    model.context_length,
+    model.contextWindow,
+    model.context_window,
+    model.maxInputTokens,
+    model.max_input_tokens,
+    model.context?.contextWindow,
+    model.metadata?.contextWindow,
+  ];
+  for (const v of values) {
+    if (Number.isInteger(v) && v > 0) return v;
+    const num = Number(v);
+    if (Number.isInteger(num) && num > 0) return num;
+  }
+  return fallback;
+}
+
+export function resolveMaxTokensFromModel(model, fallback = 16384) {
+  if (!model) return fallback;
+  const values = [
+    model.top_provider?.max_completion_tokens,
+    model.per_request_limits?.max_completion_tokens,
+    model.max_completion_tokens,
+    model.maxOutputTokens,
+    model.max_output_tokens,
+    model.maxTokens,
+    model.max_tokens,
+  ];
+  for (const v of values) {
+    if (Number.isInteger(v) && v > 0) return v;
+    const num = Number(v);
+    if (Number.isInteger(num) && num > 0) return num;
+  }
+  return fallback;
+}
+
 export function resolveReasoningFromModel(model) {
   if (!model) return undefined;
   if (model.reasoning === false) return undefined;
 
   if (Array.isArray(model.reasoning?.efforts) && model.reasoning.efforts.length > 0) {
     return model.reasoning;
+  }
+
+  if (Array.isArray(model.supported_reasoning_levels) && model.supported_reasoning_levels.length > 0) {
+    const efforts = model.supported_reasoning_levels.map((lvl) => {
+      const id = typeof lvl === "string" ? lvl : lvl?.id;
+      if (!id) return null;
+      const name = (typeof lvl === "object" && lvl.name)
+        ? lvl.name
+        : id.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+      return {
+        id,
+        name,
+        ...(lvl?.description ? { description: lvl.description } : {}),
+      };
+    }).filter(Boolean);
+    if (efforts.length > 0) {
+      const defaultEffort = model.default_reasoning_level
+        ?? (efforts.some((e) => e.id === "medium") ? "medium" : efforts[0]?.id);
+      return { efforts, defaultEffort };
+    }
+  }
+
+  if (Array.isArray(model.reasoning_efforts) && model.reasoning_efforts.length > 0) {
+    const efforts = model.reasoning_efforts.map((lvl) => {
+      const id = typeof lvl === "string" ? lvl : lvl?.id ?? lvl?.value;
+      if (!id) return null;
+      const name = (typeof lvl === "object" && (lvl.label ?? lvl.name))
+        ? (lvl.label ?? lvl.name)
+        : id.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+      return {
+        id,
+        name,
+        ...(lvl?.description ? { description: lvl.description } : {}),
+      };
+    }).filter(Boolean);
+    if (efforts.length > 0) {
+      const defaultEffort = model.default_parameters?.reasoning_effort
+        ?? (efforts.some((e) => e.id === "medium") ? "medium" : efforts[0]?.id);
+      return { efforts, defaultEffort };
+    }
+  }
+
+  if (Array.isArray(model.supported_parameters) && model.supported_parameters.includes("reasoning_effort")) {
+    const id = String(model.id ?? "").toLowerCase();
+    const supportsMax = id.includes("ultra") || id.includes("o1") || id.includes("o3") || id.includes("deepseek-r1");
+    const efforts = [
+      { id: "low", name: "Low", description: "快速思考，保留基础推理" },
+      { id: "medium", name: "Medium", description: "标准思考，平衡推理深度与响应速度" },
+      { id: "high", name: "High", description: "深度思考，适合复杂逻辑与多步骤分析" },
+      ...(supportsMax ? [{ id: "max", name: "Max", description: "极致思考，最高推演深度" }] : []),
+    ];
+    const defaultEffort = typeof model.default_parameters?.reasoning_effort === "string"
+      ? model.default_parameters.reasoning_effort
+      : "medium";
+    return { efforts, defaultEffort };
   }
 
   if (model.thinkingLevelMap && typeof model.thinkingLevelMap === "object") {

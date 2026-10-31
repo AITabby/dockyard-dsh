@@ -174,12 +174,22 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-model-search:focus{border-color:rgba(121,214,200,.7);outline:0;box-shadow:0 0 0 2px rgba(121,214,200,.12)}
 .dockyard-dsh-model-search::placeholder{color:var(--dsw-alias-label-caption,#8b93a1)}
 .dockyard-dsh-model-list-box{display:flex;flex-direction:column;gap:3px;max-height:220px;overflow-y:auto;padding:6px;border-radius:var(--dsw-radius-md,12px);border:.5px solid var(--dsw-alias-border-l4,rgba(255,255,255,.08));background:rgba(0,0,0,.15);box-sizing:border-box}
-.dockyard-dsh-model-item{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:var(--dsw-radius-sm,8px);cursor:pointer;user-select:none;transition:background 120ms ease}
+.dockyard-dsh-model-item{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 10px;border-radius:var(--dsw-radius-sm,8px);transition:background 120ms ease}
 .dockyard-dsh-model-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.06))}
-.dockyard-dsh-model-checkbox{width:16px;height:16px;margin:0;cursor:pointer;accent-color:#79d6c8}
+.dockyard-dsh-model-item-main{display:flex;align-items:center;gap:10px;min-width:0;flex:1;cursor:pointer;user-select:none}
+.dockyard-dsh-model-checkbox{width:16px;height:16px;margin:0;cursor:pointer;accent-color:#79d6c8;flex-shrink:0}
 .dockyard-dsh-model-item-info{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
 .dockyard-dsh-model-item-title{color:var(--dsw-alias-label-primary,#f5f7fb);font-size:13px;font-weight:500;line-height:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dockyard-dsh-model-item-id{color:var(--dsw-alias-label-caption,#8b93a1);font:400 11px/15px ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dockyard-dsh-model-item-extra{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.dockyard-dsh-model-test-btn{appearance:none;box-sizing:border-box;height:24px;padding:0 8px;border:.5px solid var(--dsw-alias-border-l3,rgba(255,255,255,.14));border-radius:var(--dsw-radius-xs,6px);background:rgba(255,255,255,.05);color:var(--dsw-alias-label-secondary,#a0a6b5);cursor:pointer;font:500 11px/22px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap;transition:all 120ms ease}
+.dockyard-dsh-model-test-btn:hover:not(:disabled){background:rgba(255,255,255,.1);border-color:rgba(121,214,200,.4);color:#a5e6dd}
+.dockyard-dsh-model-test-btn:disabled{cursor:default;opacity:.5}
+.dockyard-dsh-model-test-badge{appearance:none;box-sizing:border-box;height:24px;padding:0 8px;display:inline-flex;align-items:center;justify-content:center;gap:4px;border-radius:var(--dsw-radius-xs,6px);cursor:pointer;font:500 11px/22px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;max-width:96px;overflow:hidden;text-overflow:ellipsis;flex-shrink:0;transition:all 120ms ease}
+.dockyard-dsh-model-test-badge[data-status=ok]{background:rgba(34,197,94,.12);color:#4ade80;border:.5px solid rgba(34,197,94,.32)}
+.dockyard-dsh-model-test-badge[data-status=ok]:hover{background:rgba(34,197,94,.2)}
+.dockyard-dsh-model-test-badge[data-status=error]{background:rgba(239,68,68,.12);color:#f87171;border:.5px solid rgba(239,68,68,.32)}
+.dockyard-dsh-model-test-badge[data-status=error]:hover{background:rgba(239,68,68,.2)}
 .dockyard-dsh-model-actions{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:4px}
 .dockyard-dsh-model-actions-left{display:flex;align-items:center;gap:6px}
 .dockyard-dsh-account{display:flex;flex-direction:column;gap:10px;padding:14px 16px;border:.5px solid var(--dsw-alias-settings-card-stroke,rgba(255,255,255,.08));border-radius:var(--dsw-radius-xl,20px);background:var(--dsw-alias-settings-card-fill,rgba(255,255,255,.035))}
@@ -1053,6 +1063,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
     enabledModelIds: null,
   });
   const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [testStates, setTestStates] = useState(() => ({}));
   const [search, setSearch] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
@@ -1060,6 +1071,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
   useEffect(() => {
     let cancelled = false;
     setState({ status: "loading", models: [], enabledModelIds: null });
+    setTestStates({});
     setMessage(null);
 
     if (!providerId || typeof remote?.getModelSelection !== "function") {
@@ -1186,6 +1198,96 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
     }
   };
 
+  const testConnection = async (modelId, e) => {
+    e?.stopPropagation?.();
+    e?.preventDefault?.();
+    if (testStates[modelId]?.status === "testing") return;
+    if (typeof remote?.testModelConnection !== "function") {
+      setTestStates((prev) => ({
+        ...prev,
+        [modelId]: {
+          status: "error",
+          error: text(t, "modelSelection.testFailed"),
+          fullError: "remote.testModelConnection not available",
+        },
+      }));
+      return;
+    }
+
+    setTestStates((prev) => ({
+      ...prev,
+      [modelId]: { status: "testing" },
+    }));
+
+    try {
+      const res = await remote.testModelConnection({ providerId, modelId });
+      const unwrapped = unwrapRemote(res, t);
+      if (unwrapped?.ok) {
+        setTestStates((prev) => ({
+          ...prev,
+          [modelId]: {
+            status: "ok",
+            latencyMs: unwrapped.latencyMs ?? 0,
+          },
+        }));
+      } else {
+        const errorMsg = unwrapped?.status ? `${unwrapped.status} 错误` : (unwrapped?.error || text(t, "modelSelection.testFailed"));
+        setTestStates((prev) => ({
+          ...prev,
+          [modelId]: {
+            status: "error",
+            error: errorMsg,
+            fullError: unwrapped?.error || errorMsg,
+          },
+        }));
+      }
+    } catch (err) {
+      setTestStates((prev) => ({
+        ...prev,
+        [modelId]: {
+          status: "error",
+          error: errorText(err, t),
+          fullError: err?.message || errorText(err, t),
+        },
+      }));
+    }
+  };
+
+  const renderTestBadge = (modelId) => {
+    const testState = testStates[modelId];
+    if (!testState || testState.status === "idle") {
+      return h("button", {
+        type: "button",
+        className: "dockyard-dsh-model-test-btn",
+        onClick: (e) => testConnection(modelId, e),
+      }, text(t, "modelSelection.testConnection"));
+    }
+    if (testState.status === "testing") {
+      return h("button", {
+        type: "button",
+        className: "dockyard-dsh-model-test-btn",
+        disabled: true,
+      }, text(t, "modelSelection.testing"));
+    }
+    if (testState.status === "ok") {
+      return h("button", {
+        type: "button",
+        className: "dockyard-dsh-model-test-badge",
+        "data-status": "ok",
+        title: text(t, "modelSelection.testSuccessTooltip", { latency: testState.latencyMs }),
+        onClick: (e) => testConnection(modelId, e),
+      }, `✓ ${text(t, "modelSelection.testSuccess", { latency: testState.latencyMs })}`);
+    }
+    const errorLabel = testState.status ? `${testState.status}` : text(t, "modelSelection.testFailed");
+    return h("button", {
+      type: "button",
+      className: "dockyard-dsh-model-test-badge",
+      "data-status": "error",
+      title: text(t, "modelSelection.testFailedTooltip", { error: testState.fullError || testState.error || errorLabel }),
+      onClick: (e) => testConnection(modelId, e),
+    }, `✕ ${errorLabel}`);
+  };
+
   return h("div", { className: "dockyard-dsh-section dockyard-dsh-model-selection" },
     h("div", { className: "dockyard-dsh-section-title" },
       h("span", null, text(t, "modelSelection.title")),
@@ -1203,19 +1305,24 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
       filtered.map((item) => {
         const checked = selectedIds.has(item.id);
         const meta = item.contextWindow ? ` · ${Math.round(item.contextWindow / 1024)}k context` : "";
-        return h("label", {
+        return h("div", {
           key: item.id,
           className: "dockyard-dsh-model-item",
         },
-          h("input", {
-            type: "checkbox",
-            className: "dockyard-dsh-model-checkbox",
-            checked,
-            onChange: () => toggleModel(item.id),
-          }),
-          h("div", { className: "dockyard-dsh-model-item-info" },
-            h("div", { className: "dockyard-dsh-model-item-title" }, item.name || item.id),
-            h("div", { className: "dockyard-dsh-model-item-id" }, `${item.id}${meta}`)));
+          h("label", {
+            className: "dockyard-dsh-model-item-main",
+          },
+            h("input", {
+              type: "checkbox",
+              className: "dockyard-dsh-model-checkbox",
+              checked,
+              onChange: () => toggleModel(item.id),
+            }),
+            h("div", { className: "dockyard-dsh-model-item-info" },
+              h("div", { className: "dockyard-dsh-model-item-title" }, item.name || item.id),
+              h("div", { className: "dockyard-dsh-model-item-id" }, `${item.id}${meta}`))),
+          h("div", { className: "dockyard-dsh-model-item-extra" },
+            renderTestBadge(item.id)));
       })),
     h("div", { className: "dockyard-dsh-model-actions" },
       h("div", { className: "dockyard-dsh-model-actions-left" },
@@ -1706,7 +1813,7 @@ function SubscriptionSettingsSection({ close, controller, remote, modelDirectori
         controller,
         remote,
         onOpenOverview: () => setSelectedProviderId(null),
-        onClose: close,
+        onClose: () => setSelectedProviderId(null),
         t,
       })
       : h(SubscriptionOverviewPopup, {

@@ -44,12 +44,22 @@ test("Kilo provider module manifest and builtin models", async () => {
   const nemotron = BUILTIN_KILO_FREE_MODELS.find((m) => m.id === "nvidia/nemotron-3.5-super-vl:free");
   assert.ok(nemotron);
   assert.equal(nemotron.contextWindow, 1000000);
-  assert.ok(Array.isArray(nemotron.reasoning?.efforts));
+  assert.equal(nemotron.reasoning, undefined, "Super VL is vision-language model, should not have reasoning effort tiers");
+
+  const ultra = BUILTIN_KILO_FREE_MODELS.find((m) => m.id === "nvidia/nemotron-3-ultra-550b-a55b:free");
+  assert.ok(ultra);
+  assert.ok(Array.isArray(ultra.reasoning?.efforts));
+  assert.equal(ultra.reasoning.efforts.length, 4, "Ultra supports max reasoning effort");
+
+  const openrouter = BUILTIN_KILO_FREE_MODELS.find((m) => m.id === "openrouter/free");
+  assert.ok(openrouter);
+  assert.equal(openrouter.contextWindow, 200000);
+  assert.ok(Array.isArray(openrouter.reasoning?.efforts));
 
   const beam = BUILTIN_KILO_FREE_MODELS.find((m) => m.id === "reflection/beam-free");
   assert.ok(beam);
   assert.equal(beam.contextWindow, 1048576);
-  assert.ok(Array.isArray(beam.reasoning?.efforts));
+  assert.equal(beam.maxTokens, 131072);
 });
 
 test("parseKiloCatalog handles live Kilo API payload and filters isFree models", async () => {
@@ -86,20 +96,24 @@ test("parseKiloCatalog handles live Kilo API payload and filters isFree models",
   assert.equal(parsed.models[0].reasoning.defaultEffort, "medium");
   assert.equal(parsed.models[1].id, "nvidia/nemotron-3.5-super-vl:free");
   assert.equal(parsed.models[1].free, true);
-  assert.ok(Array.isArray(parsed.models[1].reasoning?.efforts));
+  assert.equal(parsed.models[1].reasoning, undefined, "Super VL should have no reasoning tiers in catalog");
 });
 
-test("buildKiloMessages formats user and assistant messages", async () => {
+test("buildKiloMessages formats user and assistant messages and supports DSH attachments service", async () => {
+  const dshAttachmentsService = {
+    async readImage(ref) { return { mediaType: "image/png", data: "base64" }; },
+  };
+
   const request = {
     messages: [
       { role: "system", content: "You are a helpful assistant" },
-      { role: "user", content: "Hello Kilo" },
+      { role: "user", content: [{ type: "text", text: "Hello Kilo" }] },
       { role: "assistant", content: "Hello!" },
       { role: "user", content: "Write a poem" },
     ],
   };
 
-  const messages = await buildKiloMessages(request);
+  const messages = await buildKiloMessages(request, dshAttachmentsService);
   assert.equal(messages.length, 4);
   assert.equal(messages[0].role, "system");
   assert.equal(messages[0].content, "You are a helpful assistant");

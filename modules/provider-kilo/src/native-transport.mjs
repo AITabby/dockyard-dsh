@@ -27,13 +27,20 @@ function contentPartText(part) {
   return "";
 }
 
-async function openAiContent(content, attachments = []) {
+async function openAiContent(content, attachments = null) {
   if (typeof content === "string") {
-    if (!attachments?.length) return content;
+    if (!Array.isArray(attachments) || attachments.length === 0) {
+      return content;
+    }
     const parts = [{ type: "text", text: content }];
     for (const attachment of attachments) {
-      const data = await resolveImageData(attachment);
-      if (data) parts.push(data);
+      const data = await resolveImageData(attachment, attachments);
+      if (data) {
+        parts.push({
+          type: "image_url",
+          image_url: { url: `data:${data.mediaType};base64,${data.data}` },
+        });
+      }
     }
     return parts;
   }
@@ -46,7 +53,15 @@ async function openAiContent(content, attachments = []) {
       } else if (part && typeof part === "object") {
         if (part.type === "text" && typeof part.text === "string") {
           parts.push(part);
-        } else if (part.type === "image" || part.type === "image_url") {
+        } else if (part.type === "image") {
+          const image = await resolveImageData(part, attachments);
+          if (image) {
+            parts.push({
+              type: "image_url",
+              image_url: { url: `data:${image.mediaType};base64,${image.data}` },
+            });
+          }
+        } else if (part.type === "image_url") {
           parts.push(part);
         } else {
           const text = contentPartText(part);
@@ -54,9 +69,16 @@ async function openAiContent(content, attachments = []) {
         }
       }
     }
-    for (const attachment of attachments) {
-      const data = await resolveImageData(attachment);
-      if (data) parts.push(data);
+    if (Array.isArray(attachments)) {
+      for (const attachment of attachments) {
+        const data = await resolveImageData(attachment, attachments);
+        if (data) {
+          parts.push({
+            type: "image_url",
+            image_url: { url: `data:${data.mediaType};base64,${data.data}` },
+          });
+        }
+      }
     }
     return parts;
   }
@@ -64,7 +86,7 @@ async function openAiContent(content, attachments = []) {
   return "";
 }
 
-export async function buildKiloMessages(request = {}, attachments = []) {
+export async function buildKiloMessages(request = {}, attachments = null) {
   const result = [];
   const rawMessages = Array.isArray(request.messages) ? request.messages : [];
 
@@ -175,8 +197,8 @@ export function createKiloNativeExecutor({
       );
     } catch (err) {
       // If a specific third-party model (e.g. recursive/flint-v1.0:free) fails with 503/502/504/404,
-      // failover to kilo-auto/free so the user's conversation succeeds instead of crashing
-      if (body.model !== "kilo-auto/free" && (err?.status === 503 || err?.status === 502 || err?.status === 504 || err?.status === 404)) {
+      // failover to kilo-auto/free so the user's conversation succeeds instead of crashing (except during probe/test)
+      if (!req.probe && !req.noFallback && body.model !== "kilo-auto/free" && (err?.status === 503 || err?.status === 502 || err?.status === 504 || err?.status === 404)) {
         const fallbackBody = { ...body, model: "kilo-auto/free" };
         response = await fetchNativeResponse(
           validatedEndpoint,
@@ -204,6 +226,7 @@ export function createKiloNativeExecutor({
     let reasoning = null;
     let rawUsage = null;
     let stop = "stop";
+    let probeYielded = false;
 
     for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID })) {
       if (event?.done) continue;
@@ -213,6 +236,11 @@ export function createKiloNativeExecutor({
       if (parsed.usage) rawUsage = parsed.usage;
       const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : null;
       if (!choice) continue;
+
+      if (req.probe && !probeYielded) {
+        probeYielded = true;
+        yield { type: "text-delta", index: 0, text: " " };
+      }
 
       const delta = choice.delta ?? {};
       const reasoningDelta = extractReasoningDelta(delta);

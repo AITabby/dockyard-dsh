@@ -302,6 +302,65 @@ export class DockyardDshService {
     };
   }
 
+  async testModelConnection(providerInput, modelId, { timeoutMs = 15_000 } = {}) {
+    await this.ready;
+    const providerId = providerIdFor(this.runtime, providerInput);
+    if (!providerId) throw new Error(`未知 provider：${providerInput}`);
+    if (!modelId || typeof modelId !== "string") throw new Error("缺少有效的 modelId");
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error("连接测试超时 (15s)")), timeoutMs);
+    const startTime = Date.now();
+    let receivedChunk = false;
+    let latencyMs = 0;
+
+    try {
+      const stream = await this.runtime.stream(
+        providerId,
+        {
+          model: modelId,
+          messages: [{ role: "user", content: "hi" }],
+          maxTokens: 16,
+          probe: true,
+          noFallback: true,
+        },
+        { signal: controller.signal },
+      );
+
+      for await (const chunk of stream) {
+        receivedChunk = true;
+        latencyMs = Date.now() - startTime;
+        break;
+      }
+
+      if (!receivedChunk) {
+        latencyMs = Date.now() - startTime;
+      }
+
+      return {
+        ok: true,
+        providerId,
+        modelId,
+        latencyMs,
+      };
+    } catch (error) {
+      latencyMs = Date.now() - startTime;
+      const message = redactError(error);
+      const status = error?.status ?? error?.statusCode ?? null;
+      return {
+        ok: false,
+        providerId,
+        modelId,
+        latencyMs,
+        status,
+        error: message || "连接失败",
+      };
+    } finally {
+      clearTimeout(timeout);
+      controller.abort();
+    }
+  }
+
   async startAuthorization(providerInput, { openBrowser = true } = {}) {
     await this.ready;
     const manifest = manifestFor(this.runtime, providerInput);
