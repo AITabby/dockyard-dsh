@@ -316,21 +316,27 @@ export class WorkbuddyDriver {
   }
 
   async invoke(request, invocation, context = {}) {
-    const executor = context.requestExecutor ?? this.requestExecutor;
-    let credential = null;
-    if (context.secretStore && invocation?.auth?.credentialRef) {
-      credential = await context.secretStore.read(invocation.auth.credentialRef).catch(() => null);
+    const envelope = (request && typeof request === "object" && ("request" in request || "credential" in request))
+      ? request
+      : null;
+    const req = envelope?.request ?? request ?? {};
+    const inv = envelope?.invocation ?? invocation ?? {};
+    const ctx = envelope?.context ?? context ?? {};
+    const executor = ctx.requestExecutor ?? this.requestExecutor;
+    let credential = envelope?.credential ?? null;
+    if (!credential && ctx.secretStore && inv?.auth?.credentialRef) {
+      credential = await ctx.secretStore.read(inv.auth.credentialRef).catch(() => null);
     }
     if (!credential) {
-      credential = invocation?.auth ?? { access: "free-tier" };
+      credential = inv?.auth ?? { access: "free-tier" };
     }
     return executor({
-      request,
-      invocation,
-      context,
-      attachments: context.attachments ?? invocation?.attachments,
+      request: req,
+      invocation: inv,
+      context: ctx,
+      attachments: ctx.attachments ?? inv?.attachments,
       credential,
-      signal: context.signal ?? invocation?.signal,
+      signal: ctx.signal ?? inv?.signal,
     });
   }
 

@@ -4442,6 +4442,138 @@ function finishReason(value, fallback = "stop") {
   if (reason.includes("error") || reason.includes("cancel")) return { kind: "error" };
   return { kind: "stop" };
 }
+function buildOpenAiTools(tools) {
+  if (!Array.isArray(tools)) return void 0;
+  const result = tools.map((tool) => ({
+    type: "function",
+    function: {
+      name: tool?.name ?? tool?.function?.name ?? "tool",
+      ...tool?.description ? { description: String(tool.description) } : {},
+      parameters: tool?.parameters ?? tool?.input_schema ?? tool?.function?.parameters ?? { type: "object" }
+    }
+  }));
+  return result.length > 0 ? result : void 0;
+}
+function parseDsmlCalls(text3) {
+  if (typeof text3 !== "string" || !text3.includes("DSML")) return null;
+  const callsRe = /[<＜][ |｜]*DSML[ |｜]*calls[>＞]([\s\S]*?)(?:[<＜][\/／][ |｜]*DSML[ |｜]*calls[>＞]|$)/i;
+  const match = text3.match(callsRe);
+  if (!match) return null;
+  const inner = match[1];
+  const invokeRe = /[<＜][ |｜]*DSML[ |｜]*invoke\s+name=["']?([^"'>＞\s]+)["']?[>＞]([\s\S]*?)(?:[<＜][\/／][ |｜]*DSML[ |｜]*invoke[>＞]|$)/gi;
+  const paramRe = /[<＜][ |｜]*DSML[ |｜]*parameter\s+name=["']?([^"'>＞\s]+)["']?[^>＞]*[>＞]([\s\S]*?)(?:[<＜][\/／][ |｜]*DSML[ |｜]*parameter[>＞]|$)/gi;
+  const toolCalls = [];
+  let invokeMatch;
+  while ((invokeMatch = invokeRe.exec(inner)) !== null) {
+    const name2 = invokeMatch[1];
+    const paramsBody = invokeMatch[2];
+    const args = {};
+    let paramMatch;
+    while ((paramMatch = paramRe.exec(paramsBody)) !== null) {
+      const paramName = paramMatch[1];
+      const paramVal = paramMatch[2].trim();
+      let parsedVal = paramVal;
+      if (paramVal === "true") parsedVal = true;
+      else if (paramVal === "false") parsedVal = false;
+      else if (!isNaN(Number(paramVal)) && paramVal !== "") parsedVal = Number(paramVal);
+      else {
+        try {
+          parsedVal = JSON.parse(paramVal);
+        } catch {
+        }
+      }
+      args[paramName] = parsedVal;
+    }
+    toolCalls.push({
+      name: name2,
+      arguments: JSON.stringify(args)
+    });
+  }
+  return toolCalls.length > 0 ? toolCalls : null;
+}
+var DsmlStreamFilter = class {
+  constructor({ onTextDelta, onTextBlockStart, onTextBlockEnd } = {}) {
+    this.onTextDelta = onTextDelta;
+    this.onTextBlockStart = onTextBlockStart;
+    this.onTextBlockEnd = onTextBlockEnd;
+    this.textIndex = 0;
+    this.textOpen = false;
+    this.cleanText = "";
+    this.pending = "";
+    this.inDsml = false;
+    this.dsmlBuffer = "";
+  }
+  push(content, getNextIndex) {
+    if (!content) return;
+    if (this.inDsml) {
+      this.dsmlBuffer += content;
+      return;
+    }
+    const combined = this.pending + content;
+    this.pending = "";
+    const dsmlMatch = combined.match(/[<＜][ |｜]*DSML/i);
+    if (dsmlMatch) {
+      const matchIndex = dsmlMatch.index;
+      const textPart = combined.slice(0, matchIndex);
+      if (textPart) {
+        this.#emitText(textPart, getNextIndex);
+      }
+      if (this.textOpen) {
+        this.onTextBlockEnd?.(this.textIndex, this.cleanText);
+        this.textOpen = false;
+      }
+      this.inDsml = true;
+      this.dsmlBuffer = combined.slice(matchIndex);
+      return;
+    }
+    const prefixMatch = combined.match(/[<＜][ |｜]*(?:D(?:S(?:M(?:L)?)?)?)?$/i);
+    if (prefixMatch) {
+      const safeText = combined.slice(0, prefixMatch.index);
+      if (safeText) {
+        this.#emitText(safeText, getNextIndex);
+      }
+      this.pending = prefixMatch[0];
+    } else {
+      this.#emitText(combined, getNextIndex);
+    }
+  }
+  #emitText(text3, getNextIndex) {
+    if (!text3) return;
+    if (!this.textOpen) {
+      this.textIndex = getNextIndex();
+      this.textOpen = true;
+      this.onTextBlockStart?.(this.textIndex);
+    }
+    this.cleanText += text3;
+    this.onTextDelta?.(this.textIndex, text3);
+  }
+  closeText() {
+    if (this.pending) {
+      if (!this.inDsml) {
+        this.#emitText(this.pending, () => this.textIndex || 1);
+      }
+      this.pending = "";
+    }
+    if (this.textOpen) {
+      this.onTextBlockEnd?.(this.textIndex, this.cleanText);
+      this.textOpen = false;
+    }
+  }
+  flush(getNextIndex) {
+    this.closeText();
+    if (this.inDsml && this.dsmlBuffer) {
+      const calls = parseDsmlCalls(this.dsmlBuffer);
+      if (calls && calls.length > 0) {
+        return { toolCalls: calls };
+      }
+      const fallbackIndex = getNextIndex();
+      this.onTextBlockStart?.(fallbackIndex);
+      this.onTextDelta?.(fallbackIndex, this.dsmlBuffer);
+      this.onTextBlockEnd?.(fallbackIndex, this.dsmlBuffer);
+    }
+    return null;
+  }
+};
 
 // modules/provider-antigravity/src/native-transport.mjs
 var PROVIDER_ID2 = "antigravity";
@@ -13103,8 +13235,18 @@ async function buildWorkbuddyMessages(request, attachments = []) {
       });
       continue;
     }
+    if (role === "tool") {
+      const content = typeof message?.content === "string" ? message.content : textFromContent(message?.content ?? message?.text ?? message?.output ?? message?.result);
+      messages.push({
+        role: "tool",
+        tool_call_id: firstString10(message.toolCallId, message.tool_call_id, message.id, "tool-result"),
+        content: content || ""
+      });
+      continue;
+    }
     if (role === "user" || role === "assistant") {
       let content = "";
+      const calls = [];
       if (typeof message?.content === "string") {
         content = message.content;
       } else if (Array.isArray(message?.content)) {
@@ -13112,22 +13254,39 @@ async function buildWorkbuddyMessages(request, attachments = []) {
         for (const part of message.content) {
           if (part?.type === "text" && typeof part?.text === "string") {
             parts.push(part.text);
-          } else if (part?.type === "image" && part?.image) {
+          } else if (part?.type === "tool-call" || part?.type === "tool_call") {
+            calls.push({
+              id: firstString10(part.id, part.toolCallId, `call_${calls.length}`),
+              type: "function",
+              function: {
+                name: firstString10(part.name, part.function?.name, "tool"),
+                arguments: typeof (part.arguments ?? part.function?.arguments) === "string" ? part.arguments ?? part.function?.arguments : JSON.stringify(part.arguments ?? part.input ?? {})
+              }
+            });
           } else if (typeof part === "string") {
             parts.push(part);
           }
         }
         content = parts.join("\n");
       }
-      messages.push({ role, content });
+      if (Array.isArray(message?.tool_calls)) {
+        for (const tc of message.tool_calls) {
+          calls.push({
+            id: firstString10(tc.id, tc.toolCallId, `call_${calls.length}`),
+            type: "function",
+            function: {
+              name: firstString10(tc.name, tc.function?.name, "tool"),
+              arguments: typeof (tc.arguments ?? tc.function?.arguments) === "string" ? tc.arguments ?? tc.function?.arguments : JSON.stringify(tc.arguments ?? tc.input ?? {})
+            }
+          });
+        }
+      }
+      const msgObj = { role, content };
+      if (role === "assistant" && calls.length > 0) {
+        msgObj.tool_calls = calls;
+      }
+      messages.push(msgObj);
       continue;
-    }
-    if (role === "tool") {
-      const content = typeof message?.content === "string" ? message.content : JSON.stringify(message?.content ?? "");
-      messages.push({
-        role: "user",
-        content: `[Tool result for ${message.toolCallId ?? "tool"}]: ${content}`
-      });
     }
   }
   if (!hasSystemMessage) {
@@ -13146,7 +13305,8 @@ function createWorkbuddyNativeExecutor({
 } = {}) {
   const validatedEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID12 });
   return async function* workbuddyNativeExecutor(envelope2 = {}) {
-    const { request, attachments, credential, signal } = envelope2;
+    const req = envelope2?.request ?? envelope2 ?? {};
+    const { attachments, credential, signal } = envelope2;
     let token = accessToken ?? (credential?.accessToken && credential.accessToken !== "free-tier" ? credential.accessToken : null) ?? (credential?.access && credential.access !== "free-tier" ? credential.access : null) ?? credential?.apiKey ?? credential?.token ?? process.env.WORKBUDDY_ACCESS_TOKEN ?? null;
     let uid = credential?.uid ?? null;
     if (!token) {
@@ -13162,7 +13322,8 @@ function createWorkbuddyNativeExecutor({
         "\u672A\u68C0\u6D4B\u5230\u672C\u5730 WorkBuddy \u767B\u5F55\u51ED\u636E\uFF0C\u8BF7\u5148\u5728 WorkBuddy \u684C\u9762\u7AEF\u767B\u5F55\u6216\u8BBE\u7F6E WORKBUDDY_ACCESS_TOKEN"
       );
     }
-    const messages = await buildWorkbuddyMessages(request, attachments);
+    const messages = await buildWorkbuddyMessages(req, attachments);
+    const tools = buildOpenAiTools(req.tools);
     const convId = randomUUID10();
     const reqId = randomUUID10();
     const msgId = randomUUID10();
@@ -13196,11 +13357,12 @@ function createWorkbuddyNativeExecutor({
       ...uid ? { "X-User-Id": uid } : {}
     };
     const body = {
-      model: request.model ?? "deepseek-v4.1-flash",
+      model: req.model ?? "deepseek-v4.1-flash",
       messages,
       stream: true,
-      ...typeof request.temperature === "number" ? { temperature: request.temperature } : {},
-      ...typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {}
+      ...typeof req.temperature === "number" ? { temperature: req.temperature } : {},
+      ...typeof req.maxTokens === "number" ? { max_tokens: req.maxTokens } : {},
+      ...tools ? { tools } : {}
     };
     const response = await fetchNativeResponse(
       validatedEndpoint,
@@ -13216,13 +13378,17 @@ function createWorkbuddyNativeExecutor({
         fetchImpl
       }
     );
-    let text3 = "";
-    let textIndex = 0;
-    let textOpen = false;
+    const streamEvents = [];
     let nextIndex = 1;
     let reasoning = null;
     let rawUsage = null;
     let stop = "stop";
+    const activeTools = /* @__PURE__ */ new Map();
+    const textFilter = new DsmlStreamFilter({
+      onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "text" }),
+      onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
+      onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "text", text: text3 } })
+    });
     for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID12 })) {
       if (event?.done) continue;
       const parsed = event?.data;
@@ -13233,10 +13399,8 @@ function createWorkbuddyNativeExecutor({
       const delta = choice.delta ?? {};
       const reasoningDelta = firstString10(delta.reasoning_content, delta.reasoning, delta.thought);
       if (reasoningDelta) {
-        if (textOpen) {
-          yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
-          textOpen = false;
-        }
+        textFilter.closeText();
+        while (streamEvents.length > 0) yield streamEvents.shift();
         if (!reasoning) {
           reasoning = { index: nextIndex++, text: "" };
           yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
@@ -13244,20 +13408,41 @@ function createWorkbuddyNativeExecutor({
         reasoning.text += reasoningDelta;
         yield { type: "reasoning-delta", index: reasoning.index, text: reasoningDelta };
       }
+      for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
+        const key = Number(call.index ?? activeTools.size);
+        if (!activeTools.has(key)) {
+          if (reasoning) {
+            yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+            reasoning = null;
+          }
+          textFilter.closeText();
+          while (streamEvents.length > 0) yield streamEvents.shift();
+          const state2 = {
+            index: nextIndex++,
+            id: firstString10(call.id, `call_${key}_${randomUUID10().slice(0, 8)}`),
+            name: firstString10(call.function?.name, call.name, "tool"),
+            arguments: ""
+          };
+          activeTools.set(key, state2);
+          yield { type: "block-start", index: state2.index, blockType: "tool-call" };
+        }
+        const state = activeTools.get(key);
+        const argumentDelta = call.function?.arguments ?? call.arguments ?? "";
+        if (call.id) state.id = call.id;
+        if (call.function?.name) state.name = call.function.name;
+        state.arguments += argumentDelta;
+        if (argumentDelta) {
+          yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: argumentDelta };
+        }
+      }
       const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
       if (content) {
         if (reasoning) {
           yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
           reasoning = null;
         }
-        if (!textOpen) {
-          textIndex = nextIndex++;
-          text3 = "";
-          textOpen = true;
-          yield { type: "block-start", index: textIndex, blockType: "text" };
-        }
-        text3 += content;
-        yield { type: "text-delta", index: textIndex, text: content };
+        textFilter.push(content, () => nextIndex++);
+        while (streamEvents.length > 0) yield streamEvents.shift();
       }
       if (choice.finish_reason) {
         stop = choice.finish_reason;
@@ -13265,9 +13450,32 @@ function createWorkbuddyNativeExecutor({
     }
     if (reasoning) {
       yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+      reasoning = null;
     }
-    if (textOpen) {
-      yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+    const dsmlResult = textFilter.flush(() => nextIndex++);
+    while (streamEvents.length > 0) yield streamEvents.shift();
+    if (activeTools.size > 0) {
+      for (const state of activeTools.values()) {
+        yield {
+          type: "block-end",
+          index: state.index,
+          block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments || "{}" }
+        };
+      }
+      stop = "tool_calls";
+    } else if (dsmlResult?.toolCalls?.length > 0) {
+      for (const dsml of dsmlResult.toolCalls) {
+        const toolIndex = nextIndex++;
+        const toolId = `call_${randomUUID10().slice(0, 8)}`;
+        yield { type: "block-start", index: toolIndex, blockType: "tool-call" };
+        yield { type: "tool-call-delta", index: toolIndex, id: toolId, name: dsml.name, argumentsDelta: dsml.arguments };
+        yield {
+          type: "block-end",
+          index: toolIndex,
+          block: { type: "tool-call", id: toolId, name: dsml.name, arguments: dsml.arguments }
+        };
+      }
+      stop = "tool_calls";
     }
     if (rawUsage) {
       yield {
@@ -13547,21 +13755,25 @@ var WorkbuddyDriver = class {
     return this.catalogLoader({ force: Boolean(context.force) });
   }
   async invoke(request, invocation, context = {}) {
-    const executor = context.requestExecutor ?? this.requestExecutor;
-    let credential = null;
-    if (context.secretStore && invocation?.auth?.credentialRef) {
-      credential = await context.secretStore.read(invocation.auth.credentialRef).catch(() => null);
+    const envelope2 = request && typeof request === "object" && ("request" in request || "credential" in request) ? request : null;
+    const req = envelope2?.request ?? request ?? {};
+    const inv = envelope2?.invocation ?? invocation ?? {};
+    const ctx = envelope2?.context ?? context ?? {};
+    const executor = ctx.requestExecutor ?? this.requestExecutor;
+    let credential = envelope2?.credential ?? null;
+    if (!credential && ctx.secretStore && inv?.auth?.credentialRef) {
+      credential = await ctx.secretStore.read(inv.auth.credentialRef).catch(() => null);
     }
     if (!credential) {
-      credential = invocation?.auth ?? { access: "free-tier" };
+      credential = inv?.auth ?? { access: "free-tier" };
     }
     return executor({
-      request,
-      invocation,
-      context,
-      attachments: context.attachments ?? invocation?.attachments,
+      request: req,
+      invocation: inv,
+      context: ctx,
+      attachments: ctx.attachments ?? inv?.attachments,
       credential,
-      signal: context.signal ?? invocation?.signal
+      signal: ctx.signal ?? inv?.signal
     });
   }
   async stream(request, invocation, context = {}) {
@@ -13588,6 +13800,7 @@ function createWorkbuddyModule({ driver = {} } = {}) {
 }
 
 // modules/provider-kilo/src/native-transport.mjs
+import { randomUUID as randomUUID11 } from "node:crypto";
 function firstString11(...values) {
   for (const val of values) {
     if (typeof val === "string" && val.length > 0) return val;
@@ -13663,12 +13876,51 @@ async function buildKiloMessages(request = {}, attachments = null) {
   const result = [];
   const rawMessages = Array.isArray(request.messages) ? request.messages : [];
   for (const message of rawMessages) {
+    if (message?.role === "tool") {
+      result.push({
+        role: "tool",
+        tool_call_id: firstString11(message.toolCallId, message.tool_call_id, message.id, "tool-result"),
+        content: typeof message.content === "string" ? message.content : textFromContent(message.content ?? message.text ?? message.output ?? message.result)
+      });
+      continue;
+    }
     const role = message?.role === "assistant" ? "assistant" : message?.role === "system" ? "system" : "user";
     const content = await openAiContent3(message?.content ?? message?.text, attachments);
-    result.push({
+    const calls = [];
+    if (Array.isArray(message?.content)) {
+      for (const part of message.content) {
+        if (part?.type === "tool-call" || part?.type === "tool_call") {
+          calls.push({
+            id: firstString11(part.id, part.toolCallId, `call_${calls.length}`),
+            type: "function",
+            function: {
+              name: firstString11(part.name, part.function?.name, "tool"),
+              arguments: typeof (part.arguments ?? part.function?.arguments) === "string" ? part.arguments ?? part.function?.arguments : JSON.stringify(part.arguments ?? part.input ?? {})
+            }
+          });
+        }
+      }
+    }
+    if (Array.isArray(message?.tool_calls)) {
+      for (const tc of message.tool_calls) {
+        calls.push({
+          id: firstString11(tc.id, tc.toolCallId, `call_${calls.length}`),
+          type: "function",
+          function: {
+            name: firstString11(tc.name, tc.function?.name, "tool"),
+            arguments: typeof (tc.arguments ?? tc.function?.arguments) === "string" ? tc.arguments ?? tc.function?.arguments : JSON.stringify(tc.arguments ?? tc.input ?? {})
+          }
+        });
+      }
+    }
+    const msgObj = {
       role,
       content: Array.isArray(content) && content.length === 1 && content[0]?.type === "text" ? content[0].text : content
-    });
+    };
+    if (role === "assistant" && calls.length > 0) {
+      msgObj.tool_calls = calls;
+    }
+    result.push(msgObj);
   }
   if (result.length === 0 && typeof request.prompt === "string" && request.prompt.trim()) {
     result.push({
@@ -13723,13 +13975,15 @@ function createKiloNativeExecutor({
         reasoningEffort = lower;
       }
     }
+    const tools = buildOpenAiTools(req.tools);
     const body = {
       model: req.model ?? "kilo-auto/free",
       messages,
       stream: true,
       ...typeof req.temperature === "number" ? { temperature: req.temperature } : {},
       ...typeof req.maxTokens === "number" ? { max_tokens: req.maxTokens } : {},
-      ...reasoningEffort && reasoningEffort !== "none" ? { reasoning_effort: reasoningEffort, reasoning: { effort: reasoningEffort } } : {}
+      ...reasoningEffort && reasoningEffort !== "none" ? { reasoning_effort: reasoningEffort, reasoning: { effort: reasoningEffort } } : {},
+      ...tools ? { tools } : {}
     };
     let response;
     try {
@@ -13768,14 +14022,18 @@ function createKiloNativeExecutor({
         throw err;
       }
     }
-    let text3 = "";
-    let textIndex = 0;
-    let textOpen = false;
+    const streamEvents = [];
     let nextIndex = 1;
     let reasoning = null;
     let rawUsage = null;
     let stop = "stop";
     let probeYielded = false;
+    const activeTools = /* @__PURE__ */ new Map();
+    const textFilter = new DsmlStreamFilter({
+      onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "text" }),
+      onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
+      onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "text", text: text3 } })
+    });
     for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID14 })) {
       if (event?.done) continue;
       const parsed = event?.data;
@@ -13790,10 +14048,8 @@ function createKiloNativeExecutor({
       const delta = choice.delta ?? {};
       const reasoningDelta = extractReasoningDelta(delta);
       if (reasoningDelta) {
-        if (textOpen) {
-          yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
-          textOpen = false;
-        }
+        textFilter.closeText();
+        while (streamEvents.length > 0) yield streamEvents.shift();
         if (!reasoning) {
           reasoning = { index: nextIndex++, text: "" };
           yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
@@ -13801,20 +14057,41 @@ function createKiloNativeExecutor({
         reasoning.text += reasoningDelta;
         yield { type: "reasoning-delta", index: reasoning.index, text: reasoningDelta };
       }
+      for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
+        const key = Number(call.index ?? activeTools.size);
+        if (!activeTools.has(key)) {
+          if (reasoning) {
+            yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+            reasoning = null;
+          }
+          textFilter.closeText();
+          while (streamEvents.length > 0) yield streamEvents.shift();
+          const state2 = {
+            index: nextIndex++,
+            id: firstString11(call.id, `call_${key}_${randomUUID11().slice(0, 8)}`),
+            name: firstString11(call.function?.name, call.name, "tool"),
+            arguments: ""
+          };
+          activeTools.set(key, state2);
+          yield { type: "block-start", index: state2.index, blockType: "tool-call" };
+        }
+        const state = activeTools.get(key);
+        const argumentDelta = call.function?.arguments ?? call.arguments ?? "";
+        if (call.id) state.id = call.id;
+        if (call.function?.name) state.name = call.function.name;
+        state.arguments += argumentDelta;
+        if (argumentDelta) {
+          yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: argumentDelta };
+        }
+      }
       const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
       if (content) {
         if (reasoning) {
           yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
           reasoning = null;
         }
-        if (!textOpen) {
-          textIndex = nextIndex++;
-          text3 = "";
-          textOpen = true;
-          yield { type: "block-start", index: textIndex, blockType: "text" };
-        }
-        text3 += content;
-        yield { type: "text-delta", index: textIndex, text: content };
+        textFilter.push(content, () => nextIndex++);
+        while (streamEvents.length > 0) yield streamEvents.shift();
       }
       if (choice.finish_reason) {
         stop = choice.finish_reason;
@@ -13822,9 +14099,32 @@ function createKiloNativeExecutor({
     }
     if (reasoning) {
       yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+      reasoning = null;
     }
-    if (textOpen) {
-      yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+    const dsmlResult = textFilter.flush(() => nextIndex++);
+    while (streamEvents.length > 0) yield streamEvents.shift();
+    if (activeTools.size > 0) {
+      for (const state of activeTools.values()) {
+        yield {
+          type: "block-end",
+          index: state.index,
+          block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments || "{}" }
+        };
+      }
+      stop = "tool_calls";
+    } else if (dsmlResult?.toolCalls?.length > 0) {
+      for (const dsml of dsmlResult.toolCalls) {
+        const toolIndex = nextIndex++;
+        const toolId = `call_${randomUUID11().slice(0, 8)}`;
+        yield { type: "block-start", index: toolIndex, blockType: "tool-call" };
+        yield { type: "tool-call-delta", index: toolIndex, id: toolId, name: dsml.name, argumentsDelta: dsml.arguments };
+        yield {
+          type: "block-end",
+          index: toolIndex,
+          block: { type: "tool-call", id: toolId, name: dsml.name, arguments: dsml.arguments }
+        };
+      }
+      stop = "tool_calls";
     }
     if (rawUsage) {
       yield {

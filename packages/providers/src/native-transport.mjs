@@ -561,3 +561,150 @@ export function finishReason(value, fallback = "stop") {
   if (reason.includes("error") || reason.includes("cancel")) return { kind: "error" };
   return { kind: "stop" };
 }
+
+export function buildOpenAiTools(tools) {
+  if (!Array.isArray(tools)) return undefined;
+  const result = tools.map((tool) => ({
+    type: "function",
+    function: {
+      name: tool?.name ?? tool?.function?.name ?? "tool",
+      ...(tool?.description ? { description: String(tool.description) } : {}),
+      parameters: tool?.parameters ?? tool?.input_schema ?? tool?.function?.parameters ?? { type: "object" },
+    },
+  }));
+  return result.length > 0 ? result : undefined;
+}
+
+export function parseDsmlCalls(text) {
+  if (typeof text !== "string" || !text.includes("DSML")) return null;
+  const callsRe = /[<＜][ |｜]*DSML[ |｜]*calls[>＞]([\s\S]*?)(?:[<＜][\/／][ |｜]*DSML[ |｜]*calls[>＞]|$)/i;
+  const match = text.match(callsRe);
+  if (!match) return null;
+
+  const inner = match[1];
+  const invokeRe = /[<＜][ |｜]*DSML[ |｜]*invoke\s+name=["']?([^"'>＞\s]+)["']?[>＞]([\s\S]*?)(?:[<＜][\/／][ |｜]*DSML[ |｜]*invoke[>＞]|$)/gi;
+  const paramRe = /[<＜][ |｜]*DSML[ |｜]*parameter\s+name=["']?([^"'>＞\s]+)["']?[^>＞]*[>＞]([\s\S]*?)(?:[<＜][\/／][ |｜]*DSML[ |｜]*parameter[>＞]|$)/gi;
+
+  const toolCalls = [];
+  let invokeMatch;
+  while ((invokeMatch = invokeRe.exec(inner)) !== null) {
+    const name = invokeMatch[1];
+    const paramsBody = invokeMatch[2];
+    const args = {};
+    let paramMatch;
+    while ((paramMatch = paramRe.exec(paramsBody)) !== null) {
+      const paramName = paramMatch[1];
+      const paramVal = paramMatch[2].trim();
+      let parsedVal = paramVal;
+      if (paramVal === "true") parsedVal = true;
+      else if (paramVal === "false") parsedVal = false;
+      else if (!isNaN(Number(paramVal)) && paramVal !== "") parsedVal = Number(paramVal);
+      else {
+        try { parsedVal = JSON.parse(paramVal); } catch {}
+      }
+      args[paramName] = parsedVal;
+    }
+    toolCalls.push({
+      name,
+      arguments: JSON.stringify(args),
+    });
+  }
+  return toolCalls.length > 0 ? toolCalls : null;
+}
+
+export function stripDsmlCalls(text) {
+  if (typeof text !== "string") return "";
+  return text.replace(/[<＜][ |｜]*DSML[ |｜]*calls[>＞][\s\S]*?(?:[<＜][\/／][ |｜]*DSML[ |｜]*calls[>＞]|$)/gi, "").trim();
+}
+
+export class DsmlStreamFilter {
+  constructor({ onTextDelta, onTextBlockStart, onTextBlockEnd } = {}) {
+    this.onTextDelta = onTextDelta;
+    this.onTextBlockStart = onTextBlockStart;
+    this.onTextBlockEnd = onTextBlockEnd;
+    this.textIndex = 0;
+    this.textOpen = false;
+    this.cleanText = "";
+    this.pending = "";
+    this.inDsml = false;
+    this.dsmlBuffer = "";
+  }
+
+  push(content, getNextIndex) {
+    if (!content) return;
+    if (this.inDsml) {
+      this.dsmlBuffer += content;
+      return;
+    }
+
+    const combined = this.pending + content;
+    this.pending = "";
+
+    const dsmlMatch = combined.match(/[<＜][ |｜]*DSML/i);
+    if (dsmlMatch) {
+      const matchIndex = dsmlMatch.index;
+      const textPart = combined.slice(0, matchIndex);
+      if (textPart) {
+        this.#emitText(textPart, getNextIndex);
+      }
+      if (this.textOpen) {
+        this.onTextBlockEnd?.(this.textIndex, this.cleanText);
+        this.textOpen = false;
+      }
+      this.inDsml = true;
+      this.dsmlBuffer = combined.slice(matchIndex);
+      return;
+    }
+
+    const prefixMatch = combined.match(/[<＜][ |｜]*(?:D(?:S(?:M(?:L)?)?)?)?$/i);
+    if (prefixMatch) {
+      const safeText = combined.slice(0, prefixMatch.index);
+      if (safeText) {
+        this.#emitText(safeText, getNextIndex);
+      }
+      this.pending = prefixMatch[0];
+    } else {
+      this.#emitText(combined, getNextIndex);
+    }
+  }
+
+  #emitText(text, getNextIndex) {
+    if (!text) return;
+    if (!this.textOpen) {
+      this.textIndex = getNextIndex();
+      this.textOpen = true;
+      this.onTextBlockStart?.(this.textIndex);
+    }
+    this.cleanText += text;
+    this.onTextDelta?.(this.textIndex, text);
+  }
+
+  closeText() {
+    if (this.pending) {
+      if (!this.inDsml) {
+        this.#emitText(this.pending, () => this.textIndex || 1);
+      }
+      this.pending = "";
+    }
+    if (this.textOpen) {
+      this.onTextBlockEnd?.(this.textIndex, this.cleanText);
+      this.textOpen = false;
+    }
+  }
+
+  flush(getNextIndex) {
+    this.closeText();
+    if (this.inDsml && this.dsmlBuffer) {
+      const calls = parseDsmlCalls(this.dsmlBuffer);
+      if (calls && calls.length > 0) {
+        return { toolCalls: calls };
+      }
+      const fallbackIndex = getNextIndex();
+      this.onTextBlockStart?.(fallbackIndex);
+      this.onTextDelta?.(fallbackIndex, this.dsmlBuffer);
+      this.onTextBlockEnd?.(fallbackIndex, this.dsmlBuffer);
+    }
+    return null;
+  }
+}
+

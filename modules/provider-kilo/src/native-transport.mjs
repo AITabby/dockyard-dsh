@@ -1,10 +1,15 @@
+import { randomUUID } from "node:crypto";
 import {
+  buildOpenAiTools,
+  DsmlStreamFilter,
   fetchNativeResponse,
   finishReason,
   nativeProviderError,
   normalizeUsage,
+  parseDsmlCalls,
   readSseEvents,
   resolveImageData,
+  stripDsmlCalls,
   textFromContent,
   validateNativeEndpoint,
 } from "../../../packages/providers/src/native-transport.mjs";
@@ -91,12 +96,58 @@ export async function buildKiloMessages(request = {}, attachments = null) {
   const rawMessages = Array.isArray(request.messages) ? request.messages : [];
 
   for (const message of rawMessages) {
+    if (message?.role === "tool") {
+      result.push({
+        role: "tool",
+        tool_call_id: firstString(message.toolCallId, message.tool_call_id, message.id, "tool-result"),
+        content: typeof message.content === "string" ? message.content : textFromContent(message.content ?? message.text ?? message.output ?? message.result),
+      });
+      continue;
+    }
+
     const role = message?.role === "assistant" ? "assistant" : message?.role === "system" ? "system" : "user";
     const content = await openAiContent(message?.content ?? message?.text, attachments);
-    result.push({
+
+    const calls = [];
+    if (Array.isArray(message?.content)) {
+      for (const part of message.content) {
+        if (part?.type === "tool-call" || part?.type === "tool_call") {
+          calls.push({
+            id: firstString(part.id, part.toolCallId, `call_${calls.length}`),
+            type: "function",
+            function: {
+              name: firstString(part.name, part.function?.name, "tool"),
+              arguments: typeof (part.arguments ?? part.function?.arguments) === "string"
+                ? (part.arguments ?? part.function?.arguments)
+                : JSON.stringify(part.arguments ?? part.input ?? {}),
+            },
+          });
+        }
+      }
+    }
+    if (Array.isArray(message?.tool_calls)) {
+      for (const tc of message.tool_calls) {
+        calls.push({
+          id: firstString(tc.id, tc.toolCallId, `call_${calls.length}`),
+          type: "function",
+          function: {
+            name: firstString(tc.name, tc.function?.name, "tool"),
+            arguments: typeof (tc.arguments ?? tc.function?.arguments) === "string"
+              ? (tc.arguments ?? tc.function?.arguments)
+              : JSON.stringify(tc.arguments ?? tc.input ?? {}),
+          },
+        });
+      }
+    }
+
+    const msgObj = {
       role,
       content: Array.isArray(content) && content.length === 1 && content[0]?.type === "text" ? content[0].text : content,
-    });
+    };
+    if (role === "assistant" && calls.length > 0) {
+      msgObj.tool_calls = calls;
+    }
+    result.push(msgObj);
   }
 
   if (result.length === 0 && typeof request.prompt === "string" && request.prompt.trim()) {
@@ -168,6 +219,8 @@ export function createKiloNativeExecutor({
       }
     }
 
+    const tools = buildOpenAiTools(req.tools);
+
     const body = {
       model: req.model ?? "kilo-auto/free",
       messages,
@@ -177,6 +230,7 @@ export function createKiloNativeExecutor({
       ...(reasoningEffort && reasoningEffort !== "none"
         ? { reasoning_effort: reasoningEffort, reasoning: { effort: reasoningEffort } }
         : {}),
+      ...(tools ? { tools } : {}),
     };
 
     let response;
@@ -219,14 +273,19 @@ export function createKiloNativeExecutor({
       }
     }
 
-    let text = "";
-    let textIndex = 0;
-    let textOpen = false;
+    const streamEvents = [];
     let nextIndex = 1;
     let reasoning = null;
     let rawUsage = null;
     let stop = "stop";
     let probeYielded = false;
+    const activeTools = new Map();
+
+    const textFilter = new DsmlStreamFilter({
+      onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "text" }),
+      onTextDelta: (index, text) => streamEvents.push({ type: "text-delta", index, text }),
+      onTextBlockEnd: (index, text) => streamEvents.push({ type: "block-end", index, block: { type: "text", text } }),
+    });
 
     for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID })) {
       if (event?.done) continue;
@@ -245,10 +304,8 @@ export function createKiloNativeExecutor({
       const delta = choice.delta ?? {};
       const reasoningDelta = extractReasoningDelta(delta);
       if (reasoningDelta) {
-        if (textOpen) {
-          yield { type: "block-end", index: textIndex, block: { type: "text", text } };
-          textOpen = false;
-        }
+        textFilter.closeText();
+        while (streamEvents.length > 0) yield streamEvents.shift();
         if (!reasoning) {
           reasoning = { index: nextIndex++, text: "" };
           yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
@@ -257,20 +314,42 @@ export function createKiloNativeExecutor({
         yield { type: "reasoning-delta", index: reasoning.index, text: reasoningDelta };
       }
 
+      for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
+        const key = Number(call.index ?? activeTools.size);
+        if (!activeTools.has(key)) {
+          if (reasoning) {
+            yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+            reasoning = null;
+          }
+          textFilter.closeText();
+          while (streamEvents.length > 0) yield streamEvents.shift();
+          const state = {
+            index: nextIndex++,
+            id: firstString(call.id, `call_${key}_${randomUUID().slice(0, 8)}`),
+            name: firstString(call.function?.name, call.name, "tool"),
+            arguments: "",
+          };
+          activeTools.set(key, state);
+          yield { type: "block-start", index: state.index, blockType: "tool-call" };
+        }
+        const state = activeTools.get(key);
+        const argumentDelta = call.function?.arguments ?? call.arguments ?? "";
+        if (call.id) state.id = call.id;
+        if (call.function?.name) state.name = call.function.name;
+        state.arguments += argumentDelta;
+        if (argumentDelta) {
+          yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: argumentDelta };
+        }
+      }
+
       const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
       if (content) {
         if (reasoning) {
           yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
           reasoning = null;
         }
-        if (!textOpen) {
-          textIndex = nextIndex++;
-          text = "";
-          textOpen = true;
-          yield { type: "block-start", index: textIndex, blockType: "text" };
-        }
-        text += content;
-        yield { type: "text-delta", index: textIndex, text: content };
+        textFilter.push(content, () => nextIndex++);
+        while (streamEvents.length > 0) yield streamEvents.shift();
       }
 
       if (choice.finish_reason) {
@@ -280,10 +359,36 @@ export function createKiloNativeExecutor({
 
     if (reasoning) {
       yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+      reasoning = null;
     }
-    if (textOpen) {
-      yield { type: "block-end", index: textIndex, block: { type: "text", text } };
+
+    const dsmlResult = textFilter.flush(() => nextIndex++);
+    while (streamEvents.length > 0) yield streamEvents.shift();
+
+    if (activeTools.size > 0) {
+      for (const state of activeTools.values()) {
+        yield {
+          type: "block-end",
+          index: state.index,
+          block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments || "{}" },
+        };
+      }
+      stop = "tool_calls";
+    } else if (dsmlResult?.toolCalls?.length > 0) {
+      for (const dsml of dsmlResult.toolCalls) {
+        const toolIndex = nextIndex++;
+        const toolId = `call_${randomUUID().slice(0, 8)}`;
+        yield { type: "block-start", index: toolIndex, blockType: "tool-call" };
+        yield { type: "tool-call-delta", index: toolIndex, id: toolId, name: dsml.name, argumentsDelta: dsml.arguments };
+        yield {
+          type: "block-end",
+          index: toolIndex,
+          block: { type: "tool-call", id: toolId, name: dsml.name, arguments: dsml.arguments },
+        };
+      }
+      stop = "tool_calls";
     }
+
     if (rawUsage) {
       yield {
         type: "usage",

@@ -238,3 +238,133 @@ test("createWorkbuddyNativeExecutor streams reasoning and text chunks with usage
   assert.equal(finishEvent.usage.inputTokens, 15);
   assert.equal(finishEvent.usage.outputTokens, 10);
 });
+
+test("createWorkbuddyNativeExecutor parses native tool_calls from stream", async () => {
+  const ssePayload = [
+    `data: ${JSON.stringify({
+      id: "tool-test-1",
+      choices: [{ delta: { content: "I will fetch the url." } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      id: "tool-test-2",
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: "call_web_123",
+            type: "function",
+            function: { name: "web_fetch", arguments: "" },
+          }],
+        },
+      }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      id: "tool-test-3",
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            function: { arguments: "{\"url\":\"https://github.com/deepseek-ai/dsh\"}" },
+          }],
+        },
+      }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      id: "tool-test-4",
+      choices: [{ delta: {}, finish_reason: "tool_calls" }],
+    })}\n\n`,
+    "data: [DONE]\n\n",
+  ].join("");
+
+  const mockFetch = async () => new Response(ssePayload, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+
+  const executor = createWorkbuddyNativeExecutor({
+    accessToken: "mock-wb-token",
+    fetchImpl: mockFetch,
+  });
+
+  const events = [];
+  for await (const event of executor({
+    request: {
+      model: "deepseek-v4.1-flash",
+      messages: [{ role: "user", content: "Fetch https://github.com/deepseek-ai/dsh" }],
+      tools: [{
+        type: "function",
+        function: { name: "web_fetch", description: "fetch url", parameters: { type: "object" } },
+      }],
+    },
+    credential: { accessToken: "mock-wb-token" },
+  })) {
+    events.push(event);
+  }
+
+  const toolStarts = events.filter((e) => e.type === "block-start" && e.blockType === "tool-call");
+  assert.equal(toolStarts.length, 1);
+
+  const toolEnds = events.filter((e) => e.type === "block-end" && e.block?.type === "tool-call");
+  assert.equal(toolEnds.length, 1);
+  assert.equal(toolEnds[0].block.name, "web_fetch");
+  assert.equal(toolEnds[0].block.arguments, "{\"url\":\"https://github.com/deepseek-ai/dsh\"}");
+
+  const finish = events.find((e) => e.type === "finish");
+  assert.ok(finish);
+  assert.equal(finish.reason.kind, "tool-calls");
+});
+
+test("createWorkbuddyNativeExecutor falls back to parsing DSML tool call tags in content", async () => {
+  const dsmlContent = `< | DSML | | calls> < | DSML | | invoke name="web_fetch"> < | DSML | | parameter name="url" string="true">https://github.com/deepseek-ai/dsh-superagent-prototype</ | DSML | | parameter> </ | DSML | | invoke> </ | DSML | | calls>`;
+  const ssePayload = [
+    `data: ${JSON.stringify({
+      id: "dsml-test-1",
+      choices: [{ delta: { content: dsmlContent } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      id: "dsml-test-2",
+      choices: [{ delta: {}, finish_reason: "stop" }],
+    })}\n\n`,
+    "data: [DONE]\n\n",
+  ].join("");
+
+  const mockFetch = async () => new Response(ssePayload, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+
+  const executor = createWorkbuddyNativeExecutor({
+    accessToken: "mock-wb-token",
+    fetchImpl: mockFetch,
+  });
+
+  const events = [];
+  for await (const event of executor({
+    request: {
+      model: "deepseek-v4.1-flash",
+      messages: [{ role: "user", content: "Fetch https://github.com/deepseek-ai/dsh-superagent-prototype" }],
+    },
+    credential: { accessToken: "mock-wb-token" },
+  })) {
+    events.push(event);
+  }
+
+  // DSML tags must never be streamed in text-delta, and stripped from any text block
+  const textDeltas = events.filter((e) => e.type === "text-delta");
+  for (const td of textDeltas) {
+    assert.equal(td.text.includes("DSML"), false, "DSML tags should never be yielded as text-delta");
+  }
+  const textEnds = events.filter((e) => e.type === "block-end" && e.block?.type === "text");
+  for (const te of textEnds) {
+    assert.equal(te.block.text.includes("DSML"), false, "DSML tags should be stripped from final text block");
+  }
+
+  const toolEnds = events.filter((e) => e.type === "block-end" && e.block?.type === "tool-call");
+  assert.equal(toolEnds.length, 1);
+  assert.equal(toolEnds[0].block.name, "web_fetch");
+  assert.equal(toolEnds[0].block.arguments, JSON.stringify({ url: "https://github.com/deepseek-ai/dsh-superagent-prototype" }));
+
+  const finish = events.find((e) => e.type === "finish");
+  assert.ok(finish);
+  assert.equal(finish.reason.kind, "tool-calls");
+});

@@ -15614,6 +15614,7 @@ var DOCKYARD_LOCALES = Object.freeze({
     "status.reentryScan": "\u5982\u9700\u91CD\u65B0\u63A5\u5165\uFF0C\u8BF7\u5148\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u5B98\u65B9\u73AF\u5883\u5B8C\u6210\u767B\u5F55\uFF0C\u518D\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\u3002",
     "error.unknown": "\u672A\u77E5\u9519\u8BEF",
     "ui.close": "\u5173\u95ED",
+    "ui.closePage": "\u5173\u95ED\u5F53\u524D\u9875\u9762",
     "error.remoteNotMounted": "Dockyard Remote \u5C1A\u672A\u6302\u8F7D\uFF1A{method}",
     "value.notReturned": "\u672A\u8FD4\u56DE",
     "value.unknown": "\u672A\u77E5",
@@ -15828,6 +15829,7 @@ var DOCKYARD_LOCALES = Object.freeze({
     "status.reentryScan": "Sign in through the official client or environment, then scan local login state to connect it again.",
     "error.unknown": "Unknown error",
     "ui.close": "Close",
+    "ui.closePage": "Close current page",
     "error.remoteNotMounted": "Dockyard Remote is not mounted: {method}",
     "value.notReturned": "Not returned",
     "value.unknown": "Unknown",
@@ -17588,6 +17590,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
           ...prev,
           [modelId]: {
             status: "error",
+            statusCode: unwrapped?.status || null,
             error: errorMsg,
             fullError: unwrapped?.error || errorMsg
           }
@@ -17598,6 +17601,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
         ...prev,
         [modelId]: {
           status: "error",
+          statusCode: err?.status || err?.statusCode || null,
           error: errorText(err, t),
           fullError: err?.message || errorText(err, t)
         }
@@ -17629,7 +17633,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
         onClick: (e) => testConnection(modelId, e)
       }, `\u2713 ${text(t, "modelSelection.testSuccess", { latency: testState.latencyMs })}`);
     }
-    const errorLabel = testState.status ? `${testState.status}` : text(t, "modelSelection.testFailed");
+    const errorLabel = testState.statusCode ? `${testState.statusCode}` : text(t, "modelSelection.testFailed");
     return h("button", {
       type: "button",
       className: "dockyard-dsh-model-test-badge",
@@ -18031,7 +18035,7 @@ function NativeKeyPopup({ providerId, native, directory, modelDirectories, direc
         h("div", { className: "dockyard-dsh-model", title: current2?.model }, `${modelLabel}${compactModelId && modelLabel !== current2.model && modelLabel !== compactModelId ? ` \xB7 ${compactModelId}` : ""}`),
         model?.description ? h("div", { className: "dockyard-dsh-model-context" }, model.description) : null
       ),
-      h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": text(t, "ui.close") }, "\xD7")
+      onClose ? h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": text(t, "ui.closePage"), title: text(t, "ui.closePage") }, "\xD7") : null
     ),
     h("div", {
       className: "dockyard-dsh-status",
@@ -18148,7 +18152,7 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
   return h(
     "div",
     {
-      className: "dockyard-dsh-popup",
+      className: "dockyard-dsh-popup dockyard-dsh-overview-popup",
       role: "dialog",
       "aria-label": text(t, "subscription.aria"),
       onMouseDown: (event) => event.stopPropagation()
@@ -18163,7 +18167,13 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
         h("div", { className: "dockyard-dsh-title" }, text(t, "title.subscriptionManagement")),
         h("div", { className: "dockyard-dsh-model" }, text(t, "subtitle.subscriptionManagement"))
       ),
-      h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": text(t, "ui.close") }, "\xD7")
+      onClose ? h("button", {
+        type: "button",
+        className: "dockyard-dsh-close",
+        onClick: onClose,
+        "aria-label": text(t, "ui.close"),
+        title: text(t, "ui.close")
+      }, "\xD7") : null
     ),
     h(
       "div",
@@ -18276,7 +18286,7 @@ function SubscriptionSettingsSection({ close, controller, remote, modelDirectori
       controller,
       selectedProviderId: null,
       onSelect: setSelectedProviderId,
-      onClose: close,
+      onClose: null,
       t
     })
   );
@@ -18322,7 +18332,7 @@ function DockyardPopup({ providerId, provider, directory, modelDirectories, dire
         h("div", { className: "dockyard-dsh-model", title: current2?.model }, `${modelLabel}${compactModelId && modelLabel !== current2.model && modelLabel !== compactModelId ? ` \xB7 ${compactModelId}` : ""}`),
         model?.description ? h("div", { className: "dockyard-dsh-model-context" }, model.description) : null
       ),
-      h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": text(t, "ui.close") }, "\xD7")
+      onClose ? h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": text(t, "ui.closePage"), title: text(t, "ui.closePage") }, "\xD7") : null
     ),
     h(
       "div",
@@ -18423,6 +18433,7 @@ function DockyardAccountControl({ directory, modelDirectory, modelDirectories, c
   const [open, setOpen] = useState(false);
   const [showOverview, setShowOverview] = useState(false);
   const [detailProviderId, setDetailProviderId] = useState(null);
+  const [openedFromOverview, setOpenedFromOverview] = useState(false);
   const rootRef = useRef(null);
   const compactIndicatorCacheRef = useRef({ providerId: null, indicator: null });
   const accountSignatureRef = useRef(void 0);
@@ -18602,14 +18613,17 @@ function DockyardAccountControl({ directory, modelDirectory, modelDirectories, c
       setOpen(false);
       setShowOverview(false);
       setDetailProviderId(null);
+      setOpenedFromOverview(false);
       return;
     }
     const hasManagedProvider = Boolean(currentProvider || currentNative || nativeCandidate);
+    setOpenedFromOverview(false);
     setShowOverview(!currentProviderId || !hasManagedProvider);
     setDetailProviderId(currentProviderId && hasManagedProvider ? currentProviderId : null);
     setOpen(true);
   };
   const openSubscriptionOverview = () => {
+    setOpenedFromOverview(false);
     setShowOverview(true);
     setDetailProviderId(null);
     setOpen(true);
@@ -18651,9 +18665,12 @@ function DockyardAccountControl({ directory, modelDirectory, modelDirectories, c
       onSelect: (selectedProviderId) => {
         setShowOverview(false);
         setDetailProviderId(selectedProviderId);
+        setOpenedFromOverview(true);
       },
       onClose: () => {
         setShowOverview(false);
+        setDetailProviderId(null);
+        setOpenedFromOverview(false);
         setOpen(false);
       }
     }) : open && provider ? h(DockyardPopup, {
@@ -18667,7 +18684,15 @@ function DockyardAccountControl({ directory, modelDirectory, modelDirectories, c
       remote,
       t,
       onOpenOverview: openSubscriptionOverview,
-      onClose: () => setOpen(false)
+      onClose: () => {
+        if (openedFromOverview) {
+          setShowOverview(true);
+          setDetailProviderId(null);
+          setOpenedFromOverview(false);
+        } else {
+          setOpen(false);
+        }
+      }
     }) : open && native ? h(NativeKeyPopup, {
       t,
       providerId,
@@ -18677,7 +18702,15 @@ function DockyardAccountControl({ directory, modelDirectory, modelDirectories, c
       directoryState,
       nativeController,
       remote,
-      onClose: () => setOpen(false)
+      onClose: () => {
+        if (openedFromOverview) {
+          setShowOverview(true);
+          setDetailProviderId(null);
+          setOpenedFromOverview(false);
+        } else {
+          setOpen(false);
+        }
+      }
     }) : null
   );
 }
