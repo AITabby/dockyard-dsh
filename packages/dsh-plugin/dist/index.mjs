@@ -13567,7 +13567,7 @@ import { homedir as homedir12 } from "node:os";
 import { join as join13 } from "node:path";
 
 // modules/provider-commandcode/src/native-transport.mjs
-import { randomBytes as randomBytes5, randomUUID as randomUUID11 } from "node:crypto";
+import { createHash as createHash9, randomBytes as randomBytes5, randomUUID as randomUUID11 } from "node:crypto";
 import { existsSync as existsSync4, readFileSync as readFileSync4 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
 import { join as join12 } from "node:path";
@@ -13769,6 +13769,17 @@ async function* readNdjsonLines(response, { signal, timeoutMs, providerId } = {}
     cleanupNativeResponse(response);
   }
 }
+function deriveConversationSessionId(request, explicitSessionId) {
+  if (explicitSessionId) return explicitSessionId;
+  if (request?.sessionId) return request.sessionId;
+  const firstMsg = request?.messages?.[0];
+  if (firstMsg) {
+    const text3 = typeof firstMsg.content === "string" ? firstMsg.content : JSON.stringify(firstMsg.content || "");
+    const hash6 = createHash9("sha256").update(text3.slice(0, 500)).digest("hex").slice(0, 16);
+    return `dsh-${hash6}`;
+  }
+  return "dsh-default";
+}
 function createCommandCodeNativeExecutor({
   endpoint: endpoint2 = DEFAULT_COMMANDCODE_GENERATE_ENDPOINT,
   fetchImpl = fetch,
@@ -13781,7 +13792,8 @@ function createCommandCodeNativeExecutor({
     request = {},
     account = null,
     credential = null,
-    signal = null
+    signal = null,
+    sessionId: explicitSessionId = null
   } = {}) {
     const auth = credential || account?.auth || extractCommandCodeAuth();
     const apiKey = auth?.apiKey || auth?.access || auth?.token;
@@ -13791,7 +13803,7 @@ function createCommandCodeNativeExecutor({
       err.providerId = PROVIDER_ID13;
       throw err;
     }
-    const sessionId = request.sessionId || `dsh-${randomUUID11()}`;
+    const sessionId = deriveConversationSessionId(request, explicitSessionId);
     const headers = {
       "Content-Type": "application/json",
       "User-Agent": "command-code/1.88.1",
@@ -13802,11 +13814,12 @@ function createCommandCodeNativeExecutor({
     };
     const { systemPrompt, wireMessages } = buildCommandCodeMessages(request);
     const wireTools = toWireTools(request.tools);
+    const today = (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
     const body = {
       config: {
         workingDir: process.cwd(),
-        date: (/* @__PURE__ */ new Date()).toISOString(),
-        environment: "production",
+        date: today,
+        environment: process.platform,
         structure: [],
         isGitRepo: false,
         currentBranch: "main",
@@ -13814,10 +13827,11 @@ function createCommandCodeNativeExecutor({
         gitStatus: "",
         recentCommits: []
       },
-      memory: "",
+      memory: null,
       taste: null,
       skills: null,
       permissionMode: "standard",
+      threadId: sessionId,
       params: {
         model: request.model || "deepseek/deepseek-v4.1-flash",
         messages: wireMessages,
@@ -14535,7 +14549,8 @@ var CommandCodeDriver = class {
       request,
       account: invocation?.account ?? null,
       credential,
-      signal: context.signal ?? null
+      signal: context.signal ?? null,
+      sessionId: context.sessionId ?? request.sessionId ?? null
     });
   }
 };
@@ -16143,9 +16158,9 @@ var dockyardDshConstants = Object.freeze({
 });
 
 // packages/dsh-plugin/src/dockyard-credential-store.mjs
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 function dshCredentialRef(ref) {
-  const digest = createHash9("sha256").update(String(ref)).digest("hex");
+  const digest = createHash10("sha256").update(String(ref)).digest("hex");
   return `DOCKYARD_DSH_${digest}`;
 }
 function parseCredential(value) {

@@ -613,6 +613,7 @@ export class CommandCodeDriver {
       account: invocation?.account ?? null,
       credential,
       signal: context.signal ?? null,
+      sessionId: context.sessionId ?? request.sessionId ?? null,
     });
   }
 }
