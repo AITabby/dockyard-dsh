@@ -13109,11 +13109,20 @@ function createCommandCodeNativeExecutor({
         block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments }
       };
     }
-    const { finishKind, isError } = finishReason(stop);
+    if (activeTools.size > 0 && (!stop || stop === "stop")) {
+      stop = "tool_calls";
+    }
+    const finalUsage = normalizeUsage(rawUsage);
+    if (finalUsage) {
+      yield {
+        type: "usage",
+        usage: finalUsage
+      };
+    }
     yield {
       type: "finish",
-      reason: isError ? { kind: "error", failure: nativeProviderError(new Error(`Command Code upstream ended with ${stop}`), { providerId: PROVIDER_ID13, code: "UPSTREAM_STOP" }) } : { kind: finishKind },
-      usage: normalizeUsage(rawUsage)
+      reason: finishReason(stop),
+      ...finalUsage ? { usage: finalUsage } : {}
     };
   };
 }

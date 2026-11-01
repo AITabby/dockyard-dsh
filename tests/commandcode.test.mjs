@@ -213,9 +213,18 @@ test("createCommandCodeNativeExecutor streams NDJSON events", async () => {
   assert.ok(toolBlockEnd);
   assert.equal(toolBlockEnd.block.name, "fetch_data");
 
+  // Ensure every chunk is losslessly JSON serializable without any undefined properties
+  for (const event of events) {
+    const serialized = JSON.stringify(event);
+    assert.ok(serialized, "Chunk must serialize to JSON");
+    const deserialized = JSON.parse(serialized);
+    assert.deepEqual(event, deserialized, "Chunk must not lose any undefined or non-JSON properties");
+  }
+
   // Finish
   const finish = events.find((e) => e.type === "finish");
   assert.ok(finish);
+  assert.equal(finish.reason.kind, "stop");
   assert.equal(finish.usage.totalTokens, 80);
 });
 

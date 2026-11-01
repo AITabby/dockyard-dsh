@@ -445,13 +445,22 @@ export function createCommandCodeNativeExecutor({
       };
     }
 
-    const { finishKind, isError } = finishReason(stop);
+    if (activeTools.size > 0 && (!stop || stop === "stop")) {
+      stop = "tool_calls";
+    }
+
+    const finalUsage = normalizeUsage(rawUsage);
+    if (finalUsage) {
+      yield {
+        type: "usage",
+        usage: finalUsage,
+      };
+    }
+
     yield {
       type: "finish",
-      reason: isError
-        ? { kind: "error", failure: nativeProviderError(new Error(`Command Code upstream ended with ${stop}`), { providerId: PROVIDER_ID, code: "UPSTREAM_STOP" }) }
-        : { kind: finishKind },
-      usage: normalizeUsage(rawUsage),
+      reason: finishReason(stop),
+      ...(finalUsage ? { usage: finalUsage } : {}),
     };
   };
 }
