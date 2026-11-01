@@ -135,10 +135,13 @@ test("buildCommandCodeMessages and toWireTools transform DSH payloads", () => {
   const tcPart = wireMessages[1].content.find((p) => p.type === "tool-call");
   assert.ok(tcPart);
   assert.equal(tcPart.toolCallId, "call_1");
+  assert.deepEqual(tcPart.input, { query: "abc" });
 
   const trPart = wireMessages[2];
   assert.equal(trPart.role, "tool");
   assert.equal(trPart.content[0].type, "tool-result");
+  assert.equal(trPart.content[0].toolName, "test_tool");
+  assert.equal(trPart.content[0].output.value, "Tool result");
 
   const tools = toWireTools(request.tools);
   assert.equal(tools.length, 1);

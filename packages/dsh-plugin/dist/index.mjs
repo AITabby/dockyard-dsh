@@ -12782,6 +12782,7 @@ function buildCommandCodeMessages(request = {}) {
   const rawMessages = Array.isArray(request.messages) ? request.messages : [];
   let systemPrompt = "";
   const wireMessages = [];
+  const toolNameById = /* @__PURE__ */ new Map();
   for (const msg of rawMessages) {
     if (!msg) continue;
     const role = msg.role;
@@ -12800,12 +12801,27 @@ ${text3}` : text3;
         for (const block of msg.content) {
           if (block.type === "text" && block.text) {
             content.push({ type: "text", text: block.text });
+          } else if (block.type === "reasoning" || block.type === "thinking") {
+            const rText = block.text || block.thinking || "";
+            if (rText) content.push({ type: "reasoning", text: rText });
           } else if (block.type === "tool_use" || block.type === "tool-call") {
+            const toolCallId = block.id || block.toolCallId || `call_${randomUUID11().slice(0, 8)}`;
+            const toolName = block.name || block.toolName || "tool";
+            toolNameById.set(toolCallId, toolName);
+            const rawInput = block.arguments ?? block.input ?? block.args ?? {};
+            let input = rawInput;
+            if (typeof rawInput === "string") {
+              try {
+                input = JSON.parse(rawInput);
+              } catch {
+                input = { raw: rawInput };
+              }
+            }
             content.push({
               type: "tool-call",
-              toolCallId: block.id || block.toolCallId || `call_${randomUUID11().slice(0, 8)}`,
-              toolName: block.name || block.toolName || "tool",
-              input: block.input ?? block.args ?? {}
+              toolCallId,
+              toolName,
+              input: input && typeof input === "object" ? input : {}
             });
           }
         }
@@ -12818,6 +12834,7 @@ ${text3}` : text3;
     }
     if (role === "tool") {
       const toolCallId = msg.tool_call_id || msg.toolCallId;
+      const toolName = msg.name || msg.toolName || (toolCallId ? toolNameById.get(toolCallId) : null) || "unknown";
       const text3 = typeof msg.content === "string" ? msg.content : textFromContent(msg.content);
       wireMessages.push({
         role: "tool",
@@ -12825,7 +12842,7 @@ ${text3}` : text3;
           {
             type: "tool-result",
             toolCallId: toolCallId || "unknown",
-            toolName: msg.name || "unknown",
+            toolName,
             output: { type: "text", value: text3 || "" }
           }
         ]
