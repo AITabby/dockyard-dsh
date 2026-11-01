@@ -175,7 +175,7 @@ const indexDocument = {
       },
       versions: [
         {
-          version: "0.1.14",
+          version: "0.1.15",
           publishTimestamp: Math.floor(Date.now() / 1000),
           source: {
             type: "git",

@@ -351,6 +351,41 @@ test("createCommandCodeNativeExecutor extracts prompt cache read tokens and norm
   }
 });
 
+test("CommandCodeNativeExecutor sends valid UUID threadId and deterministic session ID", async () => {
+  const { toWireUuid, deriveConversationSessionId } = await import("../modules/provider-commandcode/src/native-transport.mjs");
+  const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+  assert.equal(toWireUuid("session-061d450d-caa8-48aa-b7b7-6519eed6ac21"), "061d450d-caa8-48aa-b7b7-6519eed6ac21");
+  assert.equal(toWireUuid("061d450d-caa8-48aa-b7b7-6519eed6ac21"), "061d450d-caa8-48aa-b7b7-6519eed6ac21");
+  assert.equal(toWireUuid("invalid-uuid"), null);
+
+  const derived = deriveConversationSessionId({ messages: [{ role: "user", content: "hello world" }] });
+  assert.ok(UUID_REGEX.test(derived), "Derived session id must be a valid UUID");
+
+  let capturedBody = null;
+  let capturedHeaders = null;
+  const executor = createCommandCodeNativeExecutor({
+    fetchImpl: async (_url, init) => {
+      capturedHeaders = init.headers;
+      capturedBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({ type: "finish", finishReason: "stop" }), {
+        status: 200,
+        headers: { "Content-Type": "application/x-ndjson" },
+      });
+    },
+  });
+
+  for await (const _ of executor({
+    request: { model: "deepseek/deepseek-v4.1-flash", messages: [{ role: "user", content: "hello world" }] },
+    credential: { apiKey: "test-key" },
+  })) {}
+
+  assert.ok(capturedBody.threadId, "threadId must be present in body");
+  assert.ok(UUID_REGEX.test(capturedBody.threadId), "threadId must be a valid UUID");
+  assert.ok(UUID_REGEX.test(capturedHeaders["x-session-id"]), "x-session-id header must be a valid UUID");
+  assert.equal(capturedBody.config.date, new Date().toISOString().split("T")[0]);
+});
+
 test("DockyardRuntime auto-provisions commandcode if local auth exists", async () => {
   const stateStore = memoryStateStore();
   const runtime = new DockyardRuntime({

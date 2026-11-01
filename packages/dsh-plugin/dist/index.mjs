@@ -13769,16 +13769,23 @@ async function* readNdjsonLines(response, { signal, timeoutMs, providerId } = {}
     cleanupNativeResponse(response);
   }
 }
-function deriveConversationSessionId(request, explicitSessionId) {
-  if (explicitSessionId) return explicitSessionId;
-  if (request?.sessionId) return request.sessionId;
-  const firstMsg = request?.messages?.[0];
-  if (firstMsg) {
-    const text3 = typeof firstMsg.content === "string" ? firstMsg.content : JSON.stringify(firstMsg.content || "");
-    const hash6 = createHash9("sha256").update(text3.slice(0, 500)).digest("hex").slice(0, 16);
-    return `dsh-${hash6}`;
+var UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function toWireUuid(value) {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (UUID_REGEX.test(trimmed)) return trimmed;
+    const stripped = trimmed.replace(/^(?:session|dsh|thread)[-_:]+/i, "");
+    if (UUID_REGEX.test(stripped)) return stripped;
   }
-  return "dsh-default";
+  return null;
+}
+function deriveConversationSessionId(request, explicitSessionId) {
+  const direct = toWireUuid(explicitSessionId) || toWireUuid(request?.sessionId);
+  if (direct) return direct;
+  const firstMsg = request?.messages?.[0];
+  const seed = firstMsg ? typeof firstMsg.content === "string" ? firstMsg.content : JSON.stringify(firstMsg.content || "") : "default-dsh-session";
+  const hash6 = createHash9("sha256").update(seed.slice(0, 500)).digest("hex");
+  return `${hash6.slice(0, 8)}-${hash6.slice(8, 12)}-4${hash6.slice(13, 16)}-a${hash6.slice(17, 20)}-${hash6.slice(20, 32)}`;
 }
 function createCommandCodeNativeExecutor({
   endpoint: endpoint2 = DEFAULT_COMMANDCODE_GENERATE_ENDPOINT,
@@ -13815,6 +13822,7 @@ function createCommandCodeNativeExecutor({
     const { systemPrompt, wireMessages } = buildCommandCodeMessages(request);
     const wireTools = toWireTools(request.tools);
     const today = (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
+    const threadId = toWireUuid(sessionId);
     const body = {
       config: {
         workingDir: process.cwd(),
@@ -13831,7 +13839,7 @@ function createCommandCodeNativeExecutor({
       taste: null,
       skills: null,
       permissionMode: "standard",
-      threadId: sessionId,
+      ...threadId ? { threadId } : {},
       params: {
         model: request.model || "deepseek/deepseek-v4.1-flash",
         messages: wireMessages,
