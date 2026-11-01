@@ -413,6 +413,13 @@ export function cliEventResult(payload) {
 export function cliEventUsage(payload) {
   const usage = payload?.usage ?? payload?.message?.usage ?? payload?.result?.usage;
   if (!usage || typeof usage !== "object") return null;
+  const rawCacheRead = usage.cache_read_input_tokens
+    ?? usage.cacheReadInputTokens
+    ?? usage.cacheReadTokens
+    ?? usage.cachedInputTokens
+    ?? usage.cached_tokens
+    ?? usage.prompt_tokens_details?.cached_tokens;
+  const cacheReadTokens = Number(rawCacheRead);
   const inputTokens = Number(usage.input_tokens ?? usage.inputTokens ?? usage.input);
   const outputTokens = Number(usage.output_tokens ?? usage.outputTokens ?? usage.output);
   const totalTokens = Number(usage.total_tokens ?? usage.totalTokens ?? usage.total);
@@ -421,9 +428,7 @@ export function cliEventUsage(payload) {
     ...(Number.isFinite(inputTokens) ? { inputTokens } : {}),
     ...(Number.isFinite(outputTokens) ? { outputTokens } : {}),
     ...(Number.isFinite(totalTokens) ? { totalTokens } : {}),
-    ...(Number.isFinite(Number(usage.cache_read_input_tokens ?? usage.cacheReadInputTokens))
-      ? { cacheReadInputTokens: Number(usage.cache_read_input_tokens ?? usage.cacheReadInputTokens) }
-      : {}),
+    ...(Number.isFinite(cacheReadTokens) ? { cacheReadTokens, cacheReadInputTokens: cacheReadTokens } : {}),
   };
 }
 

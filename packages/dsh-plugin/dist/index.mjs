@@ -5198,11 +5198,32 @@ async function* readSseEvents(response) {
 }
 function normalizeUsage(value) {
   if (!value || typeof value !== "object") return null;
-  const inputTokens = Number(value.input_tokens ?? value.inputTokens ?? value.prompt_tokens ?? value.promptTokens ?? value.promptTokenCount);
-  const outputTokens = Number(value.output_tokens ?? value.outputTokens ?? value.completion_tokens ?? value.completionTokens ?? value.candidatesTokenCount);
+  const rawCacheRead = value.cache_read_input_tokens ?? value.cacheReadInputTokens ?? value.cachedInputTokens ?? value.inputTokenDetails?.cacheReadTokens ?? value.prompt_tokens_details?.cached_tokens ?? value.prompt_tokens_details?.cache_read_tokens ?? value.prompt_cache_hit_tokens ?? value.cached_tokens ?? value.cachedContentTokenCount ?? value.cacheReadTokens;
+  const rawCacheWrite = value.cache_creation_input_tokens ?? value.cacheCreationInputTokens ?? value.inputTokenDetails?.cacheCreationInputTokens ?? value.prompt_tokens_details?.cache_write_tokens ?? value.prompt_tokens_details?.cache_creation_tokens ?? value.cacheWriteTokens;
+  const cacheReadTokens = Number(rawCacheRead);
+  const cacheWriteTokens = Number(rawCacheWrite);
+  const rawInput = Number(
+    value.inputTokenDetails?.noCacheTokens ?? value.input_tokens ?? value.inputTokens ?? value.prompt_tokens ?? value.promptTokens ?? value.promptTokenCount
+  );
+  const outputTokens = Number(
+    value.output_tokens ?? value.outputTokens ?? value.completion_tokens ?? value.completionTokens ?? value.candidatesTokenCount
+  );
   const totalTokens = Number(value.total_tokens ?? value.totalTokens ?? value.totalTokenCount);
-  const cacheReadTokens = Number(value.cache_read_input_tokens ?? value.cacheReadInputTokens ?? value.cachedContentTokenCount);
-  const cacheWriteTokens = Number(value.cache_creation_input_tokens ?? value.cacheCreationInputTokens);
+  let inputTokens = rawInput;
+  if (value.inputTokenDetails?.noCacheTokens !== void 0) {
+    inputTokens = Number(value.inputTokenDetails.noCacheTokens);
+  } else if (Number.isFinite(inputTokens) && (Number.isFinite(cacheReadTokens) || Number.isFinite(cacheWriteTokens))) {
+    const hasOpenAiStyleCache = value.prompt_tokens_details?.cached_tokens !== void 0 || value.prompt_tokens_details?.cache_read_tokens !== void 0 || value.prompt_cache_hit_tokens !== void 0 || value.cached_tokens !== void 0 || value.cachedInputTokens !== void 0;
+    const totalEqualsPromptPlusOutput = Number.isFinite(totalTokens) && Number.isFinite(outputTokens) && totalTokens === inputTokens + outputTokens;
+    const isAnthropicStyle = (value.cache_read_input_tokens !== void 0 || value.cache_creation_input_tokens !== void 0) && !hasOpenAiStyleCache && !totalEqualsPromptPlusOutput;
+    if ((hasOpenAiStyleCache || totalEqualsPromptPlusOutput && !value.cachedContentTokenCount) && !isAnthropicStyle) {
+      const read = Number.isFinite(cacheReadTokens) ? cacheReadTokens : 0;
+      const write = Number.isFinite(cacheWriteTokens) ? cacheWriteTokens : 0;
+      if (inputTokens >= read + write) {
+        inputTokens = Math.max(0, inputTokens - read - write);
+      }
+    }
+  }
   const result = {};
   if (Number.isFinite(inputTokens)) result.inputTokens = inputTokens;
   if (Number.isFinite(outputTokens)) result.outputTokens = outputTokens;
@@ -13944,6 +13965,15 @@ function createCommandCodeNativeExecutor({
         else if (event.usage) rawUsage = event.usage;
         if (event.finishReason) {
           stop = event.finishReason === "tool-calls" ? "tool_calls" : event.finishReason;
+        }
+        if (event.type === "finish-step" && rawUsage) {
+          const stepUsage = normalizeUsage(rawUsage);
+          if (stepUsage) {
+            yield {
+              type: "usage",
+              usage: stepUsage
+            };
+          }
         }
       }
     }

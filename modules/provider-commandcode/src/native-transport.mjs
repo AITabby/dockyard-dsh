@@ -445,6 +445,15 @@ export function createCommandCodeNativeExecutor({
         if (event.finishReason) {
           stop = event.finishReason === "tool-calls" ? "tool_calls" : event.finishReason;
         }
+        if (event.type === "finish-step" && rawUsage) {
+          const stepUsage = normalizeUsage(rawUsage);
+          if (stepUsage) {
+            yield {
+              type: "usage",
+              usage: stepUsage,
+            };
+          }
+        }
       }
     }
 

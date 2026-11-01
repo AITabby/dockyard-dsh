@@ -460,21 +460,74 @@ export async function* readSseEvents(response) {
 
 export function normalizeUsage(value) {
   if (!value || typeof value !== "object") return null;
-  const inputTokens = Number(value.input_tokens
+
+  const rawCacheRead = value.cache_read_input_tokens
+    ?? value.cacheReadInputTokens
+    ?? value.cachedInputTokens
+    ?? value.inputTokenDetails?.cacheReadTokens
+    ?? value.prompt_tokens_details?.cached_tokens
+    ?? value.prompt_tokens_details?.cache_read_tokens
+    ?? value.prompt_cache_hit_tokens
+    ?? value.cached_tokens
+    ?? value.cachedContentTokenCount
+    ?? value.cacheReadTokens;
+
+  const rawCacheWrite = value.cache_creation_input_tokens
+    ?? value.cacheCreationInputTokens
+    ?? value.inputTokenDetails?.cacheCreationInputTokens
+    ?? value.prompt_tokens_details?.cache_write_tokens
+    ?? value.prompt_tokens_details?.cache_creation_tokens
+    ?? value.cacheWriteTokens;
+
+  const cacheReadTokens = Number(rawCacheRead);
+  const cacheWriteTokens = Number(rawCacheWrite);
+
+  const rawInput = Number(
+    value.inputTokenDetails?.noCacheTokens
+    ?? value.input_tokens
     ?? value.inputTokens
     ?? value.prompt_tokens
     ?? value.promptTokens
-    ?? value.promptTokenCount);
-  const outputTokens = Number(value.output_tokens
+    ?? value.promptTokenCount
+  );
+
+  const outputTokens = Number(
+    value.output_tokens
     ?? value.outputTokens
     ?? value.completion_tokens
     ?? value.completionTokens
-    ?? value.candidatesTokenCount);
+    ?? value.candidatesTokenCount
+  );
+
   const totalTokens = Number(value.total_tokens ?? value.totalTokens ?? value.totalTokenCount);
-  const cacheReadTokens = Number(value.cache_read_input_tokens
-    ?? value.cacheReadInputTokens
-    ?? value.cachedContentTokenCount);
-  const cacheWriteTokens = Number(value.cache_creation_input_tokens ?? value.cacheCreationInputTokens);
+
+  let inputTokens = rawInput;
+  if (value.inputTokenDetails?.noCacheTokens !== undefined) {
+    inputTokens = Number(value.inputTokenDetails.noCacheTokens);
+  } else if (Number.isFinite(inputTokens) && (Number.isFinite(cacheReadTokens) || Number.isFinite(cacheWriteTokens))) {
+    const hasOpenAiStyleCache = value.prompt_tokens_details?.cached_tokens !== undefined
+      || value.prompt_tokens_details?.cache_read_tokens !== undefined
+      || value.prompt_cache_hit_tokens !== undefined
+      || value.cached_tokens !== undefined
+      || value.cachedInputTokens !== undefined;
+
+    const totalEqualsPromptPlusOutput = Number.isFinite(totalTokens)
+      && Number.isFinite(outputTokens)
+      && totalTokens === inputTokens + outputTokens;
+
+    const isAnthropicStyle = (value.cache_read_input_tokens !== undefined || value.cache_creation_input_tokens !== undefined)
+      && !hasOpenAiStyleCache
+      && !totalEqualsPromptPlusOutput;
+
+    if ((hasOpenAiStyleCache || (totalEqualsPromptPlusOutput && !value.cachedContentTokenCount)) && !isAnthropicStyle) {
+      const read = Number.isFinite(cacheReadTokens) ? cacheReadTokens : 0;
+      const write = Number.isFinite(cacheWriteTokens) ? cacheWriteTokens : 0;
+      if (inputTokens >= read + write) {
+        inputTokens = Math.max(0, inputTokens - read - write);
+      }
+    }
+  }
+
   const result = {};
   if (Number.isFinite(inputTokens)) result.inputTokens = inputTokens;
   if (Number.isFinite(outputTokens)) result.outputTokens = outputTokens;

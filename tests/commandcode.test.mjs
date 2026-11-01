@@ -281,6 +281,76 @@ test("CommandCodeDriver discover and importAccount work with mock endpoints", as
   assert.ok(account.auth.credentialRef.startsWith("keychain://dockyard-dsh/"));
 });
 
+test("createCommandCodeNativeExecutor extracts prompt cache read tokens and normalizes input tokens", async () => {
+  const ndjsonLines = [
+    JSON.stringify({ type: "text-delta", text: "Answer with prompt caching" }),
+    JSON.stringify({
+      type: "finish-step",
+      usage: {
+        inputTokens: 7605,
+        inputTokenDetails: {
+          noCacheTokens: 1461,
+          cacheReadTokens: 6144,
+        },
+        outputTokens: 15,
+        totalTokens: 7620,
+        cachedInputTokens: 6144,
+      },
+    }),
+    JSON.stringify({
+      type: "finish",
+      finishReason: "stop",
+      totalUsage: {
+        inputTokens: 7605,
+        inputTokenDetails: {
+          noCacheTokens: 1461,
+          cacheReadTokens: 6144,
+        },
+        outputTokens: 15,
+        totalTokens: 7620,
+        cachedInputTokens: 6144,
+      },
+    }),
+  ].join("\n");
+
+  const mockResponse = new Response(ndjsonLines, {
+    status: 200,
+    headers: { "Content-Type": "application/x-ndjson" },
+  });
+
+  const executor = createCommandCodeNativeExecutor({ fetchImpl: async () => mockResponse });
+  const events = [];
+  for await (const event of executor({
+    request: { model: "deepseek-v4.1-flash", messages: [{ role: "user", content: "Hi" }] },
+    credential: { apiKey: "test-key" },
+  })) {
+    events.push(event);
+  }
+
+  const usageEvent = events.find((e) => e.type === "usage");
+  assert.ok(usageEvent, "usage event must be emitted");
+  assert.deepEqual(usageEvent.usage, {
+    inputTokens: 1461,
+    outputTokens: 15,
+    totalTokens: 7620,
+    cacheReadTokens: 6144,
+  });
+
+  const finishEvent = events.find((e) => e.type === "finish");
+  assert.ok(finishEvent, "finish event must be emitted");
+  assert.deepEqual(finishEvent.usage, {
+    inputTokens: 1461,
+    outputTokens: 15,
+    totalTokens: 7620,
+    cacheReadTokens: 6144,
+  });
+
+  for (const event of events) {
+    const serialized = JSON.stringify(event);
+    assert.deepEqual(event, JSON.parse(serialized));
+  }
+});
+
 test("DockyardRuntime auto-provisions commandcode if local auth exists", async () => {
   const stateStore = memoryStateStore();
   const runtime = new DockyardRuntime({
