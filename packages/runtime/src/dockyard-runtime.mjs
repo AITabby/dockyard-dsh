@@ -17,6 +17,11 @@ import { createCursorDriver, createCursorModule, summarizeCursorCandidate } from
 import { createOpencodeDriver, createOpencodeModule, summarizeOpencodeCandidate } from "../../../modules/provider-opencode/src/index.mjs";
 import { createWorkbuddyDriver, createWorkbuddyModule, summarizeWorkbuddyCandidate } from "../../../modules/provider-workbuddy/src/index.mjs";
 import { createKiloDriver, createKiloModule, summarizeKiloCandidate } from "../../../modules/provider-kilo/src/index.mjs";
+import {
+  createCommandCodeDriver,
+  createCommandCodeModule,
+  summarizeCommandCodeCandidate,
+} from "../../../modules/provider-commandcode/src/index.mjs";
 import { redactError } from "../../providers/src/provider-utils.mjs";
 
 const candidateSummarizers = new Map([
@@ -28,6 +33,7 @@ const candidateSummarizers = new Map([
   ["opencode", summarizeOpencodeCandidate],
   ["workbuddy", summarizeWorkbuddyCandidate],
   ["kilo", summarizeKiloCandidate],
+  ["commandcode", summarizeCommandCodeCandidate],
 ]);
 
 // Official provider CLIs may need a network round-trip to rotate OAuth
@@ -237,6 +243,15 @@ export function createDefaultProviderEntries(options = {}) {
       }),
       driver: options.workbuddyDriver,
     },
+    {
+      module: createCommandCodeModule({
+        driver: options.commandcodeDriver ?? createCommandCodeDriver({
+          ...withRequestExecutor("commandcode", options.commandcode, requestExecutors),
+          ...(catalogLoaders.commandcode ? { catalogLoader: catalogLoaders.commandcode } : {}),
+        }),
+      }),
+      driver: options.commandcodeDriver,
+    },
   ];
 }
 
@@ -363,7 +378,7 @@ export class DockyardRuntime {
         }
         const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
         const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
-        if ((providerId === "workbuddy" && pool.list().length === 0) || (hasExpiredOfficialSession && hasNoEligible)) {
+        if ((providerId === "workbuddy" && pool.list().length === 0) || (providerId === "commandcode" && pool.list().length === 0) || (hasExpiredOfficialSession && hasNoEligible)) {
           try {
             const discovery = await (entry.module?.discover?.(providerContext(this)) ?? entry.driver?.discover?.(providerContext(this)));
             const candidate = Array.isArray(discovery?.candidates)

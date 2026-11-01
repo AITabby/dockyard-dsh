@@ -20,6 +20,7 @@ Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harnes
 - **Claude** — Claude 官方浏览器 OAuth（支持带 state 的手动回调地址/授权码）、CLI fallback 与原生请求适配。
 - **Cursor** — Cursor 官方浏览器登录轮询、CLI fallback 与原生请求适配。
 - **WorkBuddy** — WorkBuddy 国际版桌面端会话自动检测、零成本免费模型发现（`deepseek-v4.1-flash`、`hy3`）、实时模型按需选择与官方端点原生流式请求。
+- **Command Code** — Command Code 官方网关直接接入，支持 100+ 款开源及旗舰大模型（DeepSeek V4.1 Flash/Pro、Claude Sonnet 5.5/4.6、Grok 4.7、Muse Spark 1.2、Mistral Large 4 等），自动读取本地认证、套餐订阅与多窗口额度（5 小时 / 每周），支持原生流式与 Native Tool Calling。
 
 如果对应的官方客户端、CLI 或 OAuth 源没有安装、没有登录，Dockyard 会返回明确的 unavailable/degraded 状态；不会用硬编码的账号、模型、版本、套餐或额度伪造可用结果。
 
@@ -234,6 +235,7 @@ Current provider modules:
 - **Claude** — official browser OAuth (including state-bound manual callback/code entry), CLI fallback, and native request adapter.
 - **Cursor** — official browser login polling, CLI fallback, and native request adapter.
 - **WorkBuddy** — WorkBuddy international desktop session auto-detection, zero-credit free model discovery (`deepseek-v4.1-flash`, `hy3`), real-time model selection, and official streaming completions.
+- **Command Code** — direct integration with Command Code official gateway, supporting 100+ open-source and flagship LLMs (DeepSeek V4.1 Flash/Pro, Claude Sonnet 5.5/4.6, Grok 4.7, Muse Spark 1.2, Mistral Large 4, etc.), auto-detecting local credentials, subscription plans, multi-window quotas (5-hour / weekly), and full streaming with native tool-calling.
 
 When an official client, CLI, or OAuth source is missing or not signed in, Dockyard reports an explicit unavailable/degraded state. It does not invent accounts, models, versions, plans, or quota values.
 

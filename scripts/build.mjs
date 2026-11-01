@@ -11,6 +11,7 @@ import { createCursorModule } from "../modules/provider-cursor/src/index.mjs";
 import { createOpencodeModule } from "../modules/provider-opencode/src/index.mjs";
 import { createWorkbuddyModule } from "../modules/provider-workbuddy/src/index.mjs";
 import { createKiloModule } from "../modules/provider-kilo/src/index.mjs";
+import { createCommandCodeModule } from "../modules/provider-commandcode/src/index.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -48,9 +49,10 @@ await runtime.register(createCursorModule());
 await runtime.register(createOpencodeModule());
 await runtime.register(createWorkbuddyModule());
 await runtime.register(createKiloModule());
+await runtime.register(createCommandCodeModule());
 
 const ids = runtime.list().map((module) => module.id);
-if (!ids.includes("openai-codex") || !ids.includes("antigravity") || !ids.includes("grok") || !ids.includes("claude") || !ids.includes("cursor") || !ids.includes("opencode") || !ids.includes("workbuddy") || !ids.includes("kilo")) {
+if (!ids.includes("openai-codex") || !ids.includes("antigravity") || !ids.includes("grok") || !ids.includes("claude") || !ids.includes("cursor") || !ids.includes("opencode") || !ids.includes("workbuddy") || !ids.includes("kilo") || !ids.includes("commandcode")) {
   throw new Error("Initial provider modules are not registered");
 }
 

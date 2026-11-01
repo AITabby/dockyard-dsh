@@ -263,6 +263,9 @@ export function resolveFallbackModelMetadata(provider, model) {
   } else if (id.includes("gpt-") || id.includes("codex-") || provider === "openai-codex") {
     contextWindow = 200000;
     maxTokens = 8192;
+  } else if (provider === "commandcode") {
+    contextWindow = 1000000;
+    maxTokens = 16384;
   }
   return {
     provider,

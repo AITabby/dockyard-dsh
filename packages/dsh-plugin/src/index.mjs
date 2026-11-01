@@ -12,6 +12,7 @@ import { createGrokCatalogLoader, createGrokNativeExecutor } from "../../../modu
 import { createClaudeCatalogLoader, createClaudeNativeExecutor } from "../../../modules/provider-claude/src/index.mjs";
 import { createCursorCatalogLoader, createCursorNativeExecutor } from "../../../modules/provider-cursor/src/index.mjs";
 import { createWorkbuddyCatalogLoader, createWorkbuddyNativeExecutor } from "../../../modules/provider-workbuddy/src/index.mjs";
+import { createCommandCodeCatalogLoader, createCommandCodeNativeExecutor } from "../../../modules/provider-commandcode/src/index.mjs";
 import { runCliCommand } from "../../providers/src/cli-agent-transport.mjs";
 import {
   createCodexDshCatalogLoader,
@@ -72,6 +73,7 @@ export function apply(ctx, config = {}) {
       cursor: runtimeOptions.requestExecutors?.cursor ?? createCursorNativeExecutor(runtimeOptions.cursor ?? {}),
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
       workbuddy: runtimeOptions.requestExecutors?.workbuddy ?? createWorkbuddyNativeExecutor(runtimeOptions.workbuddy ?? {}),
+      commandcode: runtimeOptions.requestExecutors?.commandcode ?? createCommandCodeNativeExecutor(runtimeOptions.commandcode ?? {}),
     };
     runtimeOptions.catalogLoaders = {
       ...(runtimeOptions.catalogLoaders ?? {}),
@@ -85,6 +87,7 @@ export function apply(ctx, config = {}) {
       claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
       workbuddy: runtimeOptions.catalogLoaders?.workbuddy ?? createWorkbuddyCatalogLoader(runtimeOptions.workbuddy ?? {}),
+      commandcode: runtimeOptions.catalogLoaders?.commandcode ?? createCommandCodeCatalogLoader(runtimeOptions.commandcode ?? {}),
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders)
@@ -106,7 +109,7 @@ export function apply(ctx, config = {}) {
       );
       const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
       await Promise.all(catalogWarmers
-        .filter(([providerId]) => providerId === "openai-codex" || providerId === "workbuddy" || connected.has(providerId))
+        .filter(([providerId]) => providerId === "openai-codex" || providerId === "workbuddy" || providerId === "commandcode" || connected.has(providerId))
         .map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);

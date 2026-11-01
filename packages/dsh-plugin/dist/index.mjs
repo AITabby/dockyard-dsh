@@ -173,8 +173,8 @@ var init_dockyard_remote_host = __esm({
 });
 
 // packages/dsh-plugin/src/index.mjs
-import { existsSync as existsSync4, readFileSync as readFileSync4 } from "node:fs";
-import { join as join14 } from "node:path";
+import { existsSync as existsSync6, readFileSync as readFileSync6 } from "node:fs";
+import { join as join16 } from "node:path";
 
 // packages/core/src/errors.mjs
 var DockyardError = class extends Error {
@@ -1501,6 +1501,9 @@ function resolveFallbackModelMetadata(provider, model) {
   } else if (id.includes("gpt-") || id.includes("codex-") || provider === "openai-codex") {
     contextWindow = 2e5;
     maxTokens = 8192;
+  } else if (provider === "commandcode") {
+    contextWindow = 1e6;
+    maxTokens = 16384;
   }
   return {
     provider,
@@ -12703,6 +12706,968 @@ function summarizeKiloCandidate(candidate2) {
   };
 }
 
+// modules/provider-commandcode/src/driver.mjs
+import { existsSync as existsSync5, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "node:fs";
+import { homedir as homedir12 } from "node:os";
+import { join as join13 } from "node:path";
+
+// modules/provider-commandcode/src/native-transport.mjs
+import { randomBytes as randomBytes5, randomUUID as randomUUID11 } from "node:crypto";
+import { existsSync as existsSync4, readFileSync as readFileSync4 } from "node:fs";
+import { homedir as homedir11 } from "node:os";
+import { join as join12 } from "node:path";
+function firstString10(...values) {
+  for (const val of values) {
+    if (typeof val === "string" && val.length > 0) return val;
+  }
+  return null;
+}
+var PROVIDER_ID13 = "commandcode";
+var DEFAULT_COMMANDCODE_GENERATE_ENDPOINT = "https://api.commandcode.ai/alpha/generate";
+var DEFAULT_COMMANDCODE_WHOAMI_ENDPOINT = "https://api.commandcode.ai/alpha/whoami";
+var DEFAULT_COMMANDCODE_CREDITS_ENDPOINT = "https://api.commandcode.ai/alpha/billing/credits";
+var DEFAULT_COMMANDCODE_SUBSCRIPTIONS_ENDPOINT = "https://api.commandcode.ai/alpha/billing/subscriptions";
+var DEFAULT_COMMANDCODE_MODELS_ENDPOINT = "https://api.commandcode.ai/provider/v1/models?view=client";
+function findCommandCodeAuthFilePath() {
+  if (process.env.COMMAND_CODE_AUTH_PATH && existsSync4(process.env.COMMAND_CODE_AUTH_PATH)) {
+    return process.env.COMMAND_CODE_AUTH_PATH;
+  }
+  const candidate2 = join12(homedir11(), ".commandcode", "auth.json");
+  if (existsSync4(candidate2)) return candidate2;
+  return null;
+}
+function extractCommandCodeAuth({ force = false } = {}) {
+  const envKey = firstString10(process.env.COMMAND_CODE_API_KEY, process.env.COMMANDCODE_API_KEY);
+  if (envKey) {
+    return {
+      apiKey: envKey,
+      userId: process.env.COMMAND_CODE_USER_ID || "env-user",
+      userName: process.env.COMMAND_CODE_USER_NAME || "API Key User",
+      source: "env"
+    };
+  }
+  const authPath = findCommandCodeAuthFilePath();
+  if (!authPath) return null;
+  try {
+    const raw = readFileSync4(authPath, "utf8");
+    const json = JSON.parse(raw);
+    if (!json?.apiKey) return null;
+    return {
+      apiKey: json.apiKey,
+      userId: json.userId || null,
+      userName: json.userName || null,
+      keyName: json.keyName || null,
+      authenticatedAt: json.authenticatedAt || null,
+      source: "local_auth_json"
+    };
+  } catch {
+    return null;
+  }
+}
+function toWireTools(tools = []) {
+  if (!Array.isArray(tools) || tools.length === 0) return null;
+  return tools.map((tool) => {
+    const fn = tool.function || tool;
+    const name2 = fn.name || tool.name;
+    const description = fn.description || tool.description || "";
+    const inputSchema = fn.parameters || fn.input_schema || tool.input_schema || tool.parameters || { type: "object", properties: {} };
+    return {
+      name: name2,
+      description,
+      input_schema: inputSchema
+    };
+  });
+}
+function buildCommandCodeMessages(request = {}) {
+  const rawMessages = Array.isArray(request.messages) ? request.messages : [];
+  let systemPrompt = "";
+  const wireMessages = [];
+  for (const msg of rawMessages) {
+    if (!msg) continue;
+    const role = msg.role;
+    if (role === "system") {
+      const text3 = typeof msg.content === "string" ? msg.content : textFromContent(msg.content);
+      if (text3) {
+        systemPrompt = systemPrompt ? `${systemPrompt}
+
+${text3}` : text3;
+      }
+      continue;
+    }
+    if (role === "assistant") {
+      if (Array.isArray(msg.content)) {
+        const content = [];
+        for (const block of msg.content) {
+          if (block.type === "text" && block.text) {
+            content.push({ type: "text", text: block.text });
+          } else if (block.type === "tool_use" || block.type === "tool-call") {
+            content.push({
+              type: "tool-call",
+              toolCallId: block.id || block.toolCallId || `call_${randomUUID11().slice(0, 8)}`,
+              toolName: block.name || block.toolName || "tool",
+              input: block.input ?? block.args ?? {}
+            });
+          }
+        }
+        wireMessages.push({ role: "assistant", content: content.length > 0 ? content : [{ type: "text", text: "" }] });
+      } else {
+        const text3 = typeof msg.content === "string" ? msg.content : textFromContent(msg.content);
+        wireMessages.push({ role: "assistant", content: text3 || "" });
+      }
+      continue;
+    }
+    if (role === "tool") {
+      const toolCallId = msg.tool_call_id || msg.toolCallId;
+      const text3 = typeof msg.content === "string" ? msg.content : textFromContent(msg.content);
+      wireMessages.push({
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: toolCallId || "unknown",
+            toolName: msg.name || "unknown",
+            output: { type: "text", value: text3 || "" }
+          }
+        ]
+      });
+      continue;
+    }
+    if (Array.isArray(msg.content)) {
+      const parts = [];
+      for (const block of msg.content) {
+        if (block.type === "text" && block.text) {
+          parts.push({ type: "text", text: block.text });
+        } else if (block.type === "image" && block.image) {
+          parts.push({
+            type: "image",
+            image: block.image.startsWith("data:") ? block.image : `data:${block.mimeType || "image/png"};base64,${block.image}`,
+            mimeType: block.mimeType || "image/png"
+          });
+        }
+      }
+      wireMessages.push({ role: "user", content: parts.length > 0 ? parts : [{ type: "text", text: "" }] });
+    } else {
+      const text3 = typeof msg.content === "string" ? msg.content : textFromContent(msg.content);
+      wireMessages.push({ role: "user", content: text3 || "" });
+    }
+  }
+  if (request.system && typeof request.system === "string") {
+    systemPrompt = systemPrompt ? `${request.system}
+
+${systemPrompt}` : request.system;
+  }
+  return { systemPrompt, wireMessages };
+}
+async function* readNdjsonLines(response, { signal, timeoutMs, providerId } = {}) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      if (signal?.aborted) {
+        const err = new Error("Request aborted");
+        err.name = "AbortError";
+        throw err;
+      }
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line) {
+          try {
+            yield JSON.parse(line);
+          } catch {
+          }
+        }
+        newline = buffer.indexOf("\n");
+      }
+    }
+    const last = buffer.trim();
+    if (last) {
+      try {
+        yield JSON.parse(last);
+      } catch {
+      }
+    }
+  } finally {
+    reader.releaseLock();
+    cleanupNativeResponse(response);
+  }
+}
+function createCommandCodeNativeExecutor({
+  endpoint: endpoint2 = DEFAULT_COMMANDCODE_GENERATE_ENDPOINT,
+  fetchImpl = fetch,
+  timeoutMs = 18e4
+} = {}) {
+  const validatedEndpoint = validateNativeEndpoint(endpoint2, "COMMANDCODE_ENDPOINT", {
+    defaultEndpoint: DEFAULT_COMMANDCODE_GENERATE_ENDPOINT
+  });
+  return async function* commandCodeNativeExecutor({
+    request = {},
+    account = null,
+    credential = null,
+    signal = null
+  } = {}) {
+    const auth = credential || account?.auth || extractCommandCodeAuth();
+    const apiKey = auth?.apiKey || auth?.access || auth?.token;
+    if (!apiKey) {
+      const err = new Error("Command Code API Key \u672A\u914D\u7F6E\uFF0C\u8BF7\u5148\u8FD0\u884C cmd login \u6216\u5728\u9762\u677F\u4E2D\u8BBE\u7F6E API Key\u3002");
+      err.code = "AUTH_REQUIRED";
+      err.providerId = PROVIDER_ID13;
+      throw err;
+    }
+    const sessionId = request.sessionId || `dsh-${randomUUID11()}`;
+    const headers = {
+      "Content-Type": "application/json",
+      "User-Agent": "command-code/1.88.1",
+      "x-command-code-version": "1.88.1",
+      "x-cli-environment": "production",
+      "x-session-id": sessionId,
+      Authorization: `Bearer ${apiKey}`
+    };
+    const { systemPrompt, wireMessages } = buildCommandCodeMessages(request);
+    const wireTools = toWireTools(request.tools);
+    const body = {
+      config: {
+        workingDir: process.cwd(),
+        date: (/* @__PURE__ */ new Date()).toISOString(),
+        environment: "production",
+        structure: [],
+        isGitRepo: false,
+        currentBranch: "main",
+        mainBranch: "main",
+        gitStatus: "",
+        recentCommits: []
+      },
+      memory: "",
+      taste: null,
+      skills: null,
+      permissionMode: "standard",
+      params: {
+        model: request.model || "deepseek/deepseek-v4.1-flash",
+        messages: wireMessages,
+        ...wireTools ? { tools: wireTools } : {},
+        ...systemPrompt ? { system: systemPrompt } : {},
+        stream: true,
+        ...typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {},
+        ...typeof request.temperature === "number" ? { temperature: request.temperature } : {},
+        ...request.reasoning?.effort ? { reasoning_effort: request.reasoning.effort } : {}
+      }
+    };
+    const response = await fetchNativeResponse(
+      validatedEndpoint,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal
+      },
+      {
+        providerId: PROVIDER_ID13,
+        timeoutMs,
+        fetchImpl
+      }
+    );
+    const streamEvents = [];
+    let nextIndex = 1;
+    let reasoning = null;
+    let rawUsage = null;
+    let stop = "stop";
+    const activeTools = /* @__PURE__ */ new Map();
+    const textFilter = new DsmlStreamFilter({
+      onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "text" }),
+      onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
+      onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "text", text: text3 } })
+    });
+    for await (const event of readNdjsonLines(response, { signal, timeoutMs, providerId: PROVIDER_ID13 })) {
+      if (!event || typeof event !== "object") continue;
+      if (event.type === "reasoning-start") {
+        textFilter.closeText();
+        while (streamEvents.length > 0) yield streamEvents.shift();
+        if (!reasoning) {
+          reasoning = { index: nextIndex++, text: "" };
+          yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+        }
+        continue;
+      }
+      if (event.type === "reasoning-delta") {
+        const text3 = event.text ?? "";
+        if (text3) {
+          if (!reasoning) {
+            reasoning = { index: nextIndex++, text: "" };
+            yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+          }
+          reasoning.text += text3;
+          yield { type: "reasoning-delta", index: reasoning.index, text: text3 };
+        }
+        continue;
+      }
+      if (event.type === "reasoning-end") {
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        continue;
+      }
+      if (event.type === "text-delta") {
+        const text3 = event.text ?? "";
+        if (text3) {
+          if (reasoning) {
+            yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+            reasoning = null;
+          }
+          textFilter.push(text3, () => nextIndex++);
+          while (streamEvents.length > 0) yield streamEvents.shift();
+        }
+        continue;
+      }
+      if (event.type === "tool-input-start") {
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        textFilter.closeText();
+        while (streamEvents.length > 0) yield streamEvents.shift();
+        const toolId = event.id || `call_${activeTools.size}_${randomUUID11().slice(0, 8)}`;
+        const state = {
+          index: nextIndex++,
+          id: toolId,
+          name: event.toolName || "tool",
+          arguments: ""
+        };
+        activeTools.set(toolId, state);
+        yield { type: "block-start", index: state.index, blockType: "tool-call" };
+        continue;
+      }
+      if (event.type === "tool-input-delta") {
+        const toolId = event.id;
+        const state = activeTools.get(toolId);
+        const delta = event.delta ?? "";
+        if (state && delta) {
+          state.arguments += delta;
+          yield {
+            type: "tool-call-delta",
+            index: state.index,
+            id: state.id,
+            name: state.name,
+            argumentsDelta: delta
+          };
+        }
+        continue;
+      }
+      if (event.type === "tool-call") {
+        const toolId = event.toolCallId || event.id;
+        const existing = activeTools.get(toolId);
+        if (!existing) {
+          if (reasoning) {
+            yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+            reasoning = null;
+          }
+          textFilter.closeText();
+          while (streamEvents.length > 0) yield streamEvents.shift();
+          const argsStr = typeof event.input === "string" ? event.input : JSON.stringify(event.input ?? {});
+          const state = {
+            index: nextIndex++,
+            id: toolId || `call_${randomUUID11().slice(0, 8)}`,
+            name: event.toolName || "tool",
+            arguments: argsStr
+          };
+          yield { type: "block-start", index: state.index, blockType: "tool-call" };
+          yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: argsStr };
+          yield { type: "block-end", index: state.index, block: { type: "tool-call", id: state.id, name: state.name, arguments: argsStr } };
+        } else {
+          yield {
+            type: "block-end",
+            index: existing.index,
+            block: { type: "tool-call", id: existing.id, name: existing.name, arguments: existing.arguments }
+          };
+          activeTools.delete(toolId);
+        }
+        continue;
+      }
+      if (event.type === "finish" || event.type === "finish-step") {
+        if (event.totalUsage) rawUsage = event.totalUsage;
+        else if (event.usage) rawUsage = event.usage;
+        if (event.finishReason) {
+          stop = event.finishReason === "tool-calls" ? "tool_calls" : event.finishReason;
+        }
+      }
+    }
+    if (reasoning) {
+      yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+      reasoning = null;
+    }
+    textFilter.closeText();
+    while (streamEvents.length > 0) yield streamEvents.shift();
+    for (const [, state] of activeTools) {
+      yield {
+        type: "block-end",
+        index: state.index,
+        block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments }
+      };
+    }
+    const { finishKind, isError } = finishReason(stop);
+    yield {
+      type: "finish",
+      reason: isError ? { kind: "error", failure: nativeProviderError(new Error(`Command Code upstream ended with ${stop}`), { providerId: PROVIDER_ID13, code: "UPSTREAM_STOP" }) } : { kind: finishKind },
+      usage: normalizeUsage(rawUsage)
+    };
+  };
+}
+
+// modules/provider-commandcode/src/driver.mjs
+var PROVIDER_ID14 = "commandcode";
+function capitalize(str) {
+  if (!str || typeof str !== "string") return "";
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+var BUILTIN_COMMANDCODE_MODELS = Object.freeze([
+  {
+    id: "deepseek/deepseek-v4.1-flash",
+    name: "DeepSeek V4.1 Flash (Command Code)",
+    contextWindow: 1e6,
+    maxTokens: 16384,
+    reasoning: {
+      efforts: [
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High", default: true },
+        { id: "max", name: "Max" }
+      ],
+      defaultEffort: "high"
+    },
+    inputModalities: ["text"]
+  },
+  {
+    id: "deepseek/deepseek-v4-pro",
+    name: "DeepSeek V4 Pro (Command Code)",
+    contextWindow: 1e6,
+    maxTokens: 16384,
+    reasoning: {
+      efforts: [
+        { id: "high", name: "High", default: true },
+        { id: "max", name: "Max" }
+      ],
+      defaultEffort: "high"
+    },
+    inputModalities: ["text"]
+  },
+  {
+    id: "claude-sonnet-5-5",
+    name: "Claude Sonnet 5.5 (Command Code)",
+    contextWindow: 1e6,
+    maxTokens: 16384,
+    reasoning: {
+      efforts: [
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High", default: true },
+        { id: "xhigh", name: "Extra High" },
+        { id: "max", name: "Max" }
+      ],
+      defaultEffort: "high"
+    },
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "claude-sonnet-4-6",
+    name: "Claude Sonnet 4.6 (Command Code)",
+    contextWindow: 1e6,
+    maxTokens: 16384,
+    reasoning: {
+      efforts: [
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High", default: true },
+        { id: "max", name: "Max" }
+      ],
+      defaultEffort: "high"
+    },
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "xai/grok-4.7",
+    name: "Grok 4.7 (Command Code)",
+    contextWindow: 5e5,
+    maxTokens: 16384,
+    reasoning: {
+      efforts: [
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High", default: true },
+        { id: "xhigh", name: "Extra High" }
+      ],
+      defaultEffort: "high"
+    },
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "meta/muse-spark-1.2",
+    name: "Muse Spark 1.2 (Command Code)",
+    contextWindow: 1048576,
+    maxTokens: 16384,
+    reasoning: {
+      efforts: [
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High", default: true },
+        { id: "xhigh", name: "Extra High" }
+      ],
+      defaultEffort: "high"
+    },
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "mistral/mistral-large-4",
+    name: "Mistral Large 4 (Command Code)",
+    contextWindow: 524288,
+    maxTokens: 16384,
+    reasoning: {
+      efforts: [
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High", default: true }
+      ],
+      defaultEffort: "high"
+    },
+    inputModalities: ["text", "image"]
+  }
+]);
+function summarizeCommandCodeCandidate(candidate2) {
+  return {
+    providerId: PROVIDER_ID14,
+    candidateId: candidate2?.candidateId ?? "commandcode-default",
+    accountId: candidate2?.accountId ?? "commandcode-default",
+    displayName: candidate2?.displayName ?? "Command Code",
+    email: candidate2?.email ?? "user@commandcode.ai",
+    source: candidate2?.source ?? "commandcode_auth",
+    subscription: { ...candidate2?.subscription },
+    quota: { ...candidate2?.quota }
+  };
+}
+function findLocalCommandCodeCatalogFile() {
+  const dir = join13(homedir12(), ".commandcode", "cache", "model-catalog", "v1");
+  if (existsSync5(dir)) {
+    try {
+      const files = readdirSync2(dir).filter((f) => f.startsWith("catalog-") && f.endsWith(".json"));
+      if (files.length > 0) {
+        return join13(dir, files[0]);
+      }
+    } catch {
+    }
+  }
+  const devJson = join13(homedir12(), ".commandcode", "cache", "models-dev.json");
+  if (existsSync5(devJson)) return devJson;
+  return null;
+}
+function parseCommandCodeCatalog(data) {
+  let rawModels = [];
+  if (Array.isArray(data?.data)) {
+    rawModels = data.data;
+  } else if (Array.isArray(data?.models)) {
+    rawModels = data.models;
+  } else if (data?.data && typeof data.data === "object") {
+    for (const providerGroup of Object.values(data.data)) {
+      if (providerGroup?.models && typeof providerGroup.models === "object") {
+        for (const [mId, mObj] of Object.entries(providerGroup.models)) {
+          rawModels.push({ id: mId, ...mObj });
+        }
+      }
+    }
+  }
+  if (!rawModels || rawModels.length === 0) {
+    return { models: [...BUILTIN_COMMANDCODE_MODELS] };
+  }
+  const models = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const item of rawModels) {
+    const id = stringValue(item?.id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const baseName = stringValue(item?.display?.label) || stringValue(item?.name) || stringValue(item?.display?.name) || id;
+    const name2 = baseName.toLowerCase().includes("command code") ? baseName : `${baseName} (Command Code)`;
+    const contextWindow = Number.isInteger(item?.context_length) ? item.context_length : resolveContextWindowFromModel(item, 131072);
+    const maxTokens = Number.isInteger(item?.maxOutputTokens) ? Math.min(item.maxOutputTokens, 32768) : resolveMaxTokensFromModel(item, 16384);
+    let reasoning = null;
+    if (Array.isArray(item?.reasoningEfforts) && item.reasoningEfforts.length > 0) {
+      const efforts = item.reasoningEfforts.filter((e) => e && e !== "off" && e !== "none").map((e) => ({ id: e, name: capitalize(e), default: e === "high" }));
+      if (efforts.length > 0) {
+        reasoning = {
+          efforts,
+          defaultEffort: efforts.find((e) => e.default)?.id || efforts[0].id
+        };
+      }
+    } else {
+      reasoning = resolveReasoningFromModel(item);
+    }
+    const inputModalities = Array.isArray(item?.inputModalities) ? item.inputModalities : Array.isArray(item?.modalities?.input) ? item.modalities.input : ["text"];
+    models.push({
+      id,
+      name: name2,
+      contextWindow,
+      maxTokens,
+      inputModalities,
+      ...item?.display?.description ? { description: item.display.description } : {},
+      ...reasoning ? { reasoning } : {}
+    });
+  }
+  for (const builtin of BUILTIN_COMMANDCODE_MODELS) {
+    if (!seen.has(builtin.id)) {
+      models.unshift(builtin);
+      seen.add(builtin.id);
+    }
+  }
+  return { models };
+}
+function createCommandCodeCatalogLoader({
+  modelsUrl = DEFAULT_COMMANDCODE_MODELS_ENDPOINT,
+  cacheTtlMs = 6e4,
+  fetchImpl = fetch
+} = {}) {
+  let cached = null;
+  let cachedAt = 0;
+  return async function commandCodeCatalogLoader({ force = false, credential = null } = {}) {
+    const now = Date.now();
+    if (!force && cached && now - cachedAt < cacheTtlMs) {
+      return cached;
+    }
+    const auth = credential || extractCommandCodeAuth();
+    if (auth?.apiKey && typeof fetchImpl === "function") {
+      try {
+        const res = await fetchImpl(modelsUrl, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${auth.apiKey}`,
+            "User-Agent": "command-code/1.88.1",
+            "x-command-code-version": "1.88.1",
+            "x-cli-environment": "production"
+          }
+        });
+        if (res.ok) {
+          const json = await res.json();
+          cached = parseCommandCodeCatalog(json);
+          cachedAt = Date.now();
+          return cached;
+        }
+      } catch {
+      }
+    }
+    const localCatalog = findLocalCommandCodeCatalogFile();
+    if (localCatalog) {
+      try {
+        const raw = readFileSync5(localCatalog, "utf8");
+        const json = JSON.parse(raw);
+        cached = parseCommandCodeCatalog(json);
+        cachedAt = Date.now();
+        return cached;
+      } catch {
+      }
+    }
+    cached = { models: [...BUILTIN_COMMANDCODE_MODELS] };
+    cachedAt = Date.now();
+    return cached;
+  };
+}
+function formatCommandCodePlan(planId) {
+  if (!planId) return "Command Code Subscription";
+  if (planId.includes("go")) return "Command Code Go Plan";
+  if (planId.includes("goat")) return "Command Code GOAT Plan";
+  if (planId.includes("pro")) return "Command Code Pro Plan";
+  if (planId.includes("max")) return "Command Code Max Plan";
+  return `Command Code (${planId})`;
+}
+var CommandCodeDriver = class {
+  constructor({
+    endpoint: endpoint2 = DEFAULT_COMMANDCODE_GENERATE_ENDPOINT,
+    catalogLoader = null,
+    requestExecutor = null,
+    fetchImpl = fetch,
+    timeoutMs = 18e4
+  } = {}) {
+    this.endpoint = endpoint2;
+    this.fetchImpl = fetchImpl;
+    this.timeoutMs = timeoutMs;
+    this.catalogLoader = catalogLoader ?? createCommandCodeCatalogLoader({ fetchImpl });
+    this.requestExecutor = requestExecutor ?? createCommandCodeNativeExecutor({
+      endpoint: endpoint2,
+      fetchImpl,
+      timeoutMs
+    });
+  }
+  async discover() {
+    const auth = extractCommandCodeAuth();
+    if (!auth || !auth.apiKey) {
+      return {
+        candidates: [],
+        source: "commandcode_auth",
+        diagnostics: ["\u672A\u5728 ~/.commandcode/auth.json \u68C0\u6D4B\u5230\u767B\u5F55\u6001\uFF0C\u53EF\u5728\u9762\u677F\u4E2D\u914D\u7F6E API Key\u3002"]
+      };
+    }
+    let whoamiData = null;
+    let creditsData = null;
+    let subData = null;
+    try {
+      const headers = {
+        Authorization: `Bearer ${auth.apiKey}`,
+        "User-Agent": "command-code/1.88.1",
+        "x-command-code-version": "1.88.1",
+        "x-cli-environment": "production"
+      };
+      const [whoamiRes, creditsRes, subRes] = await Promise.all([
+        this.fetchImpl(DEFAULT_COMMANDCODE_WHOAMI_ENDPOINT, { headers }).catch(() => null),
+        this.fetchImpl(DEFAULT_COMMANDCODE_CREDITS_ENDPOINT, { headers }).catch(() => null),
+        this.fetchImpl(DEFAULT_COMMANDCODE_SUBSCRIPTIONS_ENDPOINT, { headers }).catch(() => null)
+      ]);
+      if (whoamiRes?.ok) whoamiData = await whoamiRes.json().catch(() => null);
+      if (creditsRes?.ok) creditsData = await creditsRes.json().catch(() => null);
+      if (subRes?.ok) subData = await subRes.json().catch(() => null);
+    } catch {
+    }
+    const userId = whoamiData?.user?.id || auth.userId || "commandcode-user";
+    const userName = whoamiData?.user?.name || whoamiData?.user?.userName || auth.userName || "Command Code User";
+    const email = whoamiData?.user?.email || "user@commandcode.ai";
+    const displayName = `${userName} (${email})`;
+    const planId = subData?.data?.planId;
+    const planName = formatCommandCodePlan(planId);
+    const subStatus = subData?.data?.status || "active";
+    const currentPeriodEnd = subData?.data?.currentPeriodEnd || null;
+    const remainingCredits = typeof creditsData?.credits?.monthlyCredits === "number" ? creditsData.credits.monthlyCredits : 10;
+    const windows = [];
+    if (creditsData?.windowLimits?.fiveHour) {
+      const fh = creditsData.windowLimits.fiveHour;
+      windows.push({
+        id: "commandcode:5h",
+        name: "5 \u5C0F\u65F6\u7A97\u53E3\u989D\u5EA6",
+        remaining: Math.max(0, (fh.cap ?? 3) - (fh.used ?? 0)),
+        limit: fh.cap ?? 3,
+        unit: "credits",
+        resetAt: fh.resetAt ? new Date(fh.resetAt).toISOString() : null
+      });
+    }
+    if (creditsData?.windowLimits?.weekly) {
+      const wk = creditsData.windowLimits.weekly;
+      windows.push({
+        id: "commandcode:weekly",
+        name: "\u5468\u5EA6\u989D\u5EA6",
+        remaining: Math.max(0, (wk.cap ?? 6) - (wk.used ?? 0)),
+        limit: wk.cap ?? 6,
+        unit: "credits",
+        resetAt: wk.resetAt ? new Date(wk.resetAt).toISOString() : null
+      });
+    }
+    return {
+      candidates: [
+        {
+          candidateId: userId,
+          accountId: userId,
+          displayName,
+          email,
+          subscription: {
+            plan: planName,
+            status: subStatus,
+            expiresAt: currentPeriodEnd
+          },
+          quota: {
+            remaining: remainingCredits,
+            limit: 10,
+            unit: "credits",
+            resetAt: currentPeriodEnd,
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+            windows
+          },
+          source: "commandcode_auth",
+          health: {
+            status: "healthy"
+          }
+        }
+      ],
+      source: "commandcode_auth",
+      diagnostics: []
+    };
+  }
+  async importAccount(candidate2, context = {}) {
+    const auth = extractCommandCodeAuth();
+    const accountId = candidate2?.accountId || auth?.userId || "commandcode-default";
+    const ref = createCredentialRef(PROVIDER_ID14, accountId);
+    if (context.secretStore) {
+      await context.secretStore.write(ref, {
+        type: "commandcode_auth",
+        apiKey: auth?.apiKey || candidate2?.apiKey || "",
+        userId: accountId,
+        userName: candidate2?.displayName || auth?.userName || null,
+        email: candidate2?.email || null
+      }).catch(() => {
+      });
+    }
+    return createAccountRecord({
+      accountId,
+      providerId: PROVIDER_ID14,
+      displayName: candidate2?.displayName || "Command Code User",
+      email: candidate2?.email || "user@commandcode.ai",
+      auth: {
+        kind: "commandcode_auth",
+        credentialRef: ref
+      },
+      subscription: {
+        plan: candidate2?.subscription?.plan || "Command Code Subscription",
+        status: candidate2?.subscription?.status || "active",
+        expiresAt: candidate2?.subscription?.expiresAt || null
+      },
+      quota: createQuotaSnapshot(candidate2?.quota || {
+        remaining: 10,
+        limit: 10,
+        unit: "credits"
+      }),
+      health: {
+        status: "healthy"
+      }
+    });
+  }
+  async getActiveSession() {
+    return this.discover().then((res) => Array.isArray(res?.candidates) ? res.candidates[0] : null);
+  }
+  async refreshAccount(account, context = {}) {
+    let apiKey = null;
+    if (context.secretStore && account?.auth?.credentialRef) {
+      try {
+        const secret = await context.secretStore.read(account.auth.credentialRef);
+        apiKey = secret?.apiKey;
+      } catch {
+      }
+    }
+    if (!apiKey) {
+      const auth = extractCommandCodeAuth();
+      apiKey = auth?.apiKey;
+    }
+    if (!apiKey) {
+      return {
+        health: { status: "auth_expired" }
+      };
+    }
+    try {
+      const headers = {
+        Authorization: `Bearer ${apiKey}`,
+        "User-Agent": "command-code/1.88.1",
+        "x-command-code-version": "1.88.1",
+        "x-cli-environment": "production"
+      };
+      const [creditsRes, subRes] = await Promise.all([
+        this.fetchImpl(DEFAULT_COMMANDCODE_CREDITS_ENDPOINT, { headers }).catch(() => null),
+        this.fetchImpl(DEFAULT_COMMANDCODE_SUBSCRIPTIONS_ENDPOINT, { headers }).catch(() => null)
+      ]);
+      const creditsData = creditsRes?.ok ? await creditsRes.json().catch(() => null) : null;
+      const subData = subRes?.ok ? await subRes.json().catch(() => null) : null;
+      const remainingCredits = typeof creditsData?.credits?.monthlyCredits === "number" ? creditsData.credits.monthlyCredits : account.quota?.remaining ?? 10;
+      const windows = [];
+      if (creditsData?.windowLimits?.fiveHour) {
+        const fh = creditsData.windowLimits.fiveHour;
+        windows.push({
+          id: "commandcode:5h",
+          name: "5 \u5C0F\u65F6\u7A97\u53E3\u989D\u5EA6",
+          remaining: Math.max(0, (fh.cap ?? 3) - (fh.used ?? 0)),
+          limit: fh.cap ?? 3,
+          unit: "credits",
+          resetAt: fh.resetAt ? new Date(fh.resetAt).toISOString() : null
+        });
+      }
+      if (creditsData?.windowLimits?.weekly) {
+        const wk = creditsData.windowLimits.weekly;
+        windows.push({
+          id: "commandcode:weekly",
+          name: "\u5468\u5EA6\u989D\u5EA6",
+          remaining: Math.max(0, (wk.cap ?? 6) - (wk.used ?? 0)),
+          limit: wk.cap ?? 6,
+          unit: "credits",
+          resetAt: wk.resetAt ? new Date(wk.resetAt).toISOString() : null
+        });
+      }
+      const planId = subData?.data?.planId;
+      const planName = planId ? formatCommandCodePlan(planId) : account.subscription?.plan;
+      const subStatus = subData?.data?.status || account.subscription?.status || "active";
+      const currentPeriodEnd = subData?.data?.currentPeriodEnd || account.subscription?.expiresAt || null;
+      return {
+        subscription: {
+          ...account.subscription,
+          plan: planName,
+          status: subStatus,
+          expiresAt: currentPeriodEnd
+        },
+        quota: createQuotaSnapshot({
+          remaining: remainingCredits,
+          limit: account.quota?.limit ?? 10,
+          unit: "credits",
+          resetAt: currentPeriodEnd,
+          updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          windows
+        }),
+        health: {
+          status: "healthy",
+          lastCheckedAt: (/* @__PURE__ */ new Date()).toISOString()
+        }
+      };
+    } catch {
+      return {
+        health: { status: "degraded", lastCheckedAt: (/* @__PURE__ */ new Date()).toISOString() }
+      };
+    }
+  }
+  async getCatalog(context = {}) {
+    let credential = null;
+    if (context.secretStore && context.accounts?.[0]?.auth?.credentialRef) {
+      try {
+        credential = await context.secretStore.read(context.accounts[0].auth.credentialRef);
+      } catch {
+      }
+    }
+    return this.catalogLoader({ force: Boolean(context.force), credential });
+  }
+  async invoke(request, invocation, context = {}) {
+    let output = "";
+    for await (const chunk of this.stream(request, invocation, context)) {
+      if (chunk.type === "text-delta" && chunk.text) {
+        output += chunk.text;
+      }
+    }
+    return { output };
+  }
+  async *stream(request, invocation, context = {}) {
+    let credential = null;
+    if (context.secretStore && invocation?.account?.auth?.credentialRef) {
+      try {
+        credential = await context.secretStore.read(invocation.account.auth.credentialRef);
+      } catch {
+      }
+    }
+    yield* this.requestExecutor({
+      request,
+      account: invocation?.account ?? null,
+      credential,
+      signal: context.signal ?? null
+    });
+  }
+};
+function createCommandCodeDriver(options = {}) {
+  return new CommandCodeDriver(options);
+}
+
+// modules/provider-commandcode/src/index.mjs
+function createCommandCodeModule({ driver = {} } = {}) {
+  return defineProviderModule({
+    id: "commandcode",
+    displayName: "Command Code",
+    capabilities: [
+      "quota",
+      "catalog",
+      "invoke",
+      "stream"
+    ],
+    driver
+  });
+}
+
 // packages/runtime/src/dockyard-runtime.mjs
 var candidateSummarizers = /* @__PURE__ */ new Map([
   ["openai-codex", summarizeCodexCandidate],
@@ -12712,7 +13677,8 @@ var candidateSummarizers = /* @__PURE__ */ new Map([
   ["cursor", summarizeCursorCandidate],
   ["opencode", summarizeOpencodeCandidate],
   ["workbuddy", summarizeWorkbuddyCandidate],
-  ["kilo", summarizeKiloCandidate]
+  ["kilo", summarizeKiloCandidate],
+  ["commandcode", summarizeCommandCodeCandidate]
 ]);
 var DEFAULT_REFRESH_TIMEOUT_MS = 3e4;
 function numericOption(value, fallback) {
@@ -12878,6 +13844,15 @@ function createDefaultProviderEntries(options = {}) {
         })
       }),
       driver: options.workbuddyDriver
+    },
+    {
+      module: createCommandCodeModule({
+        driver: options.commandcodeDriver ?? createCommandCodeDriver({
+          ...withRequestExecutor("commandcode", options.commandcode, requestExecutors),
+          ...catalogLoaders.commandcode ? { catalogLoader: catalogLoaders.commandcode } : {}
+        })
+      }),
+      driver: options.commandcodeDriver
     }
   ];
 }
@@ -13000,7 +13975,7 @@ var DockyardRuntime = class {
         }
         const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
         const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
-        if (providerId === "workbuddy" && pool.list().length === 0 || hasExpiredOfficialSession && hasNoEligible) {
+        if (providerId === "workbuddy" && pool.list().length === 0 || providerId === "commandcode" && pool.list().length === 0 || hasExpiredOfficialSession && hasNoEligible) {
           try {
             const discovery = await (entry.module?.discover?.(providerContext(this)) ?? entry.driver?.discover?.(providerContext(this)));
             const candidate2 = Array.isArray(discovery?.candidates) ? discovery.candidates[0] : Array.isArray(discovery) ? discovery[0] : null;
@@ -13526,7 +14501,7 @@ var DockyardRuntime = class {
 // packages/dsh-plugin/src/codex-transport.mjs
 import { access, readFile as readFile7 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname as dirname5, join as join12, resolve } from "node:path";
+import { dirname as dirname5, join as join14, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 var activeCodexModels = /* @__PURE__ */ new Map();
 function recordCodexModels(models) {
@@ -13572,15 +14547,15 @@ async function findPackageRoot(startDirectory, packageName) {
   const packageParts = packageName.split("/");
   let current = resolve(startDirectory);
   while (true) {
-    const candidate2 = join12(current, "node_modules", ...packageParts);
-    if (await isFile(join12(candidate2, "package.json"))) return candidate2;
+    const candidate2 = join14(current, "node_modules", ...packageParts);
+    if (await isFile(join14(candidate2, "package.json"))) return candidate2;
     const parent = dirname5(current);
     if (parent === current) return null;
     current = parent;
   }
 }
 async function packageImportUrl(packageRoot, subpath = null) {
-  const packageJson = JSON.parse(await readFile7(join12(packageRoot, "package.json"), "utf8"));
+  const packageJson = JSON.parse(await readFile7(join14(packageRoot, "package.json"), "utf8"));
   const exports = packageJson.exports;
   let target = null;
   if (!subpath) {
@@ -13602,7 +14577,7 @@ async function packageImportUrl(packageRoot, subpath = null) {
   if (typeof target !== "string") {
     throw new Error(`Cannot resolve ${subpath ?? "."} from ${packageRoot}`);
   }
-  return pathToFileURL(join12(packageRoot, target)).href;
+  return pathToFileURL(join14(packageRoot, target)).href;
 }
 async function importFromDshInstall(moduleAnchor) {
   const anchor = moduleAnchor ?? process.env.DOCKYARD_DSH_CLI_PATH ?? process.argv[1] ?? import.meta.url;
@@ -14320,7 +15295,7 @@ function createDockyardCredentialStore(credentials, fallback = null) {
 // packages/dsh-plugin/src/native-key-pool-host.mjs
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAgentLoopRequest, markAgentLoopRequest } from "@deepseek-ai/dsh-llm";
-import { join as join13 } from "node:path";
+import { join as join15 } from "node:path";
 
 // packages/dsh-plugin/src/native-usage.mjs
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -14600,7 +15575,7 @@ var NativeKeyPoolHost = class {
     this.logger = logger ?? console;
     this.contextWindowOverrides = contextWindowOverrides;
     this.stateStore = stateStore ?? new JsonStateStore({
-      filePath: join13(defaultDockyardHome(), "native-key-pools.json")
+      filePath: join15(defaultDockyardHome(), "native-key-pools.json")
     });
     this.readyPromise = this.loadState();
   }
@@ -14995,7 +15970,8 @@ function apply(ctx, config = {}) {
       claude: runtimeOptions.requestExecutors?.claude ?? createClaudeNativeExecutor(runtimeOptions.claude ?? {}),
       cursor: runtimeOptions.requestExecutors?.cursor ?? createCursorNativeExecutor(runtimeOptions.cursor ?? {}),
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
-      workbuddy: runtimeOptions.requestExecutors?.workbuddy ?? createWorkbuddyNativeExecutor(runtimeOptions.workbuddy ?? {})
+      workbuddy: runtimeOptions.requestExecutors?.workbuddy ?? createWorkbuddyNativeExecutor(runtimeOptions.workbuddy ?? {}),
+      commandcode: runtimeOptions.requestExecutors?.commandcode ?? createCommandCodeNativeExecutor(runtimeOptions.commandcode ?? {})
     };
     runtimeOptions.catalogLoaders = {
       ...runtimeOptions.catalogLoaders ?? {},
@@ -15008,7 +15984,8 @@ function apply(ctx, config = {}) {
       }),
       claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
-      workbuddy: runtimeOptions.catalogLoaders?.workbuddy ?? createWorkbuddyCatalogLoader(runtimeOptions.workbuddy ?? {})
+      workbuddy: runtimeOptions.catalogLoaders?.workbuddy ?? createWorkbuddyCatalogLoader(runtimeOptions.workbuddy ?? {}),
+      commandcode: runtimeOptions.catalogLoaders?.commandcode ?? createCommandCodeCatalogLoader(runtimeOptions.commandcode ?? {})
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders).filter(([, loader]) => typeof loader === "function");
@@ -15022,7 +15999,7 @@ function apply(ctx, config = {}) {
         providers.filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length > 0).map((provider) => provider.providerId)
       );
       const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
-      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || providerId === "workbuddy" || connected.has(providerId)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
+      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || providerId === "workbuddy" || providerId === "commandcode" || connected.has(providerId)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
     });
@@ -15118,8 +16095,8 @@ function apply(ctx, config = {}) {
                   res.end("Forbidden");
                   return;
                 }
-                const filePath = join14(process.cwd(), "artifacts", cleanPath);
-                if (!existsSync4(filePath)) {
+                const filePath = join16(process.cwd(), "artifacts", cleanPath);
+                if (!existsSync6(filePath)) {
                   res.writeHead(404);
                   res.end("Not Found");
                   return;
@@ -15134,7 +16111,7 @@ function apply(ctx, config = {}) {
                   svg: "image/svg+xml"
                 };
                 const contentType = mimeTypes[ext] ?? "application/octet-stream";
-                const content = readFileSync4(filePath);
+                const content = readFileSync6(filePath);
                 res.writeHead(200, {
                   "Content-Type": contentType,
                   "Content-Length": content.length,

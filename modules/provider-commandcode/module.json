@@ -1,0 +1,11 @@
+{
+  "id": "commandcode",
+  "kind": "provider",
+  "dataSource": "live_oauth",
+  "capabilities": [
+    "quota",
+    "catalog",
+    "invoke",
+    "stream"
+  ]
+}
