@@ -175,12 +175,24 @@ const indexDocument = {
       },
       versions: [
         {
-          version: "0.1.11",
+          version: "0.1.12",
           publishTimestamp: Math.floor(Date.now() / 1000),
           source: {
             type: "git",
             url: "https://github.com/AITabby/dockyard-dsh",
             commit: currentCommit,
+          },
+          engines: {
+            dsh: ">=0.1.0",
+          },
+        },
+        {
+          version: "0.1.11",
+          publishTimestamp: 1793547152,
+          source: {
+            type: "git",
+            url: "https://github.com/AITabby/dockyard-dsh",
+            commit: "62e4ee0e482352277d337ee9bf8ea70500bf68ef",
           },
           engines: {
             dsh: ">=0.1.0",

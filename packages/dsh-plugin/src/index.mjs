@@ -22,6 +22,10 @@ import {
 import { createDockyardCommand, DockyardDshService } from "./dockyard-service.mjs";
 import { createDockyardCredentialStore } from "./dockyard-credential-store.mjs";
 import { NativeKeyPoolHost } from "./native-key-pool-host.mjs";
+import { patchFakeIpVpnSupport } from "./vpn-ssrf-patch.mjs";
+
+// Ensure VPN / Fake-IP SSRF protection is patched as early as possible
+patchFakeIpVpnSupport();
 
 export const name = "dockyard-dsh";
 export const inject = ["llm", "commands", "credentials", "settings", "webServer"];
@@ -44,6 +48,7 @@ function contextLogger(ctx, name) {
  * require another branch in the DSH integration.
  */
 export function apply(ctx, config = {}) {
+  patchFakeIpVpnSupport();
   const runtimeOptions = { ...(config.runtimeOptions ?? {}) };
   let catalogWarmers = [];
   if (!config.runtime && !runtimeOptions.providers) {

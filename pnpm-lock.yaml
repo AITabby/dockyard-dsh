@@ -32,6 +32,9 @@ importers:
       '@earendil-works/pi-ai':
         specifier: ^0.82.1
         version: 0.82.1(ws@8.21.3)(zod@4.6.5)
+      ipaddr.js:
+        specifier: ^2.5.0
+        version: 2.5.0
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -1293,6 +1296,10 @@ packages:
 
   immer@10.2.0:
     resolution: {integrity: sha512-d/+XTN3zfODyjr89gM3mPq1WNX2B8pYsu7eORitdwyA2sBubnTl3laYlBk4sXY5FUa5qTZGBDPJICVbvqzjlbw==}
+
+  ipaddr.js@2.5.0:
+    resolution: {integrity: sha512-aq+t5NAc+cS6rZQQVWC2x98CPqGtKKTMDd4Gaodv0wShnItdKg/51djkGJ1hqH+Oy0ivDftCbSLCQob8zso01w==}
+    engines: {node: '>= 10'}
 
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
@@ -2925,6 +2932,8 @@ snapshots:
       - supports-color
 
   immer@10.2.0: {}
+
+  ipaddr.js@2.5.0: {}
 
   js-tokens@4.0.0: {}
 
