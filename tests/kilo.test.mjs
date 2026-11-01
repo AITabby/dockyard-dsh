@@ -193,7 +193,7 @@ test("createKiloNativeExecutor streams reasoning and text chunks with usage", as
   assert.equal(finish.usage.totalTokens, 30);
 });
 
-test("DockyardRuntime auto-provisions Kilo free account without requiring any local CLI or App", async () => {
+test("DockyardRuntime scan discovers Kilo free account and LLM adapter lists models", async () => {
   const { DockyardRuntime } = await import("../packages/runtime/src/dockyard-runtime.mjs");
   const { createDockyardLlmAdapter } = await import("../packages/dsh-bridge/src/llm-adapter.mjs");
 
@@ -217,11 +217,15 @@ test("DockyardRuntime auto-provisions Kilo free account without requiring any lo
   });
 
   await runtime.init();
+  const scanResult = await runtime.scan("kilo");
+  const candidates = scanResult.providers?.[0]?.candidates ?? [];
+  assert.ok(candidates.length > 0);
+  await runtime.importCandidate("kilo", candidates[0].candidateId);
 
   const snapshot = runtime.snapshot();
   const kiloEntry = snapshot.providers.find((p) => p.providerId === "kilo");
   assert.ok(kiloEntry, "Kilo provider should be registered");
-  assert.equal(kiloEntry.accounts.length, 1, "Kilo should auto-provision the free account candidate");
+  assert.equal(kiloEntry.accounts.length, 1, "Kilo should import the free account candidate");
   assert.equal(kiloEntry.accounts[0].accountId, "kilo-free");
 
   const adapter = createDockyardLlmAdapter({

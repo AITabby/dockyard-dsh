@@ -173,8 +173,8 @@ var init_dockyard_remote_host = __esm({
 });
 
 // packages/dsh-plugin/src/index.mjs
-import { existsSync as existsSync5, readFileSync as readFileSync4 } from "node:fs";
-import { join as join15 } from "node:path";
+import { existsSync as existsSync4, readFileSync as readFileSync4 } from "node:fs";
+import { join as join14 } from "node:path";
 
 // packages/core/src/errors.mjs
 var DockyardError = class extends Error {
@@ -1370,7 +1370,7 @@ function manifestFor(runtime, providerId) {
   return runtime.listProviderManifests?.().find((manifest) => manifest.id === providerId) ?? null;
 }
 function providerHasConnectedAccount(runtime, providerId) {
-  if (providerId === "opencode" || providerId === "workbuddy" || providerId === "kilo") return true;
+  if (providerId === "workbuddy") return true;
   if (typeof runtime.snapshot !== "function") return true;
   const snapshot = runtime.snapshot();
   if (!Array.isArray(snapshot?.providers)) return true;
@@ -7809,15 +7809,22 @@ function createGrokCatalogLoader({
         source = "official_grok_local_cache";
       }
       if (discoveredModels.length > 0) {
-        let finalModels = discoveredModels;
-        if (source === "official_grok_models_api") {
-          const modelsMap2 = /* @__PURE__ */ new Map();
-          for (const m of discoveredModels) modelsMap2.set(m.id, { ...m });
-          for (const m of BUILTIN_GROK_MODELS) {
-            if (!modelsMap2.has(m.id)) modelsMap2.set(m.id, { ...m });
+        const modelsMap2 = /* @__PURE__ */ new Map();
+        for (const m of discoveredModels) modelsMap2.set(m.id, { ...m });
+        for (const m of BUILTIN_GROK_MODELS) {
+          if (!modelsMap2.has(m.id)) {
+            modelsMap2.set(m.id, { ...m });
+          } else {
+            const existing = modelsMap2.get(m.id);
+            modelsMap2.set(m.id, {
+              ...m,
+              ...existing,
+              reasoning: existing.reasoning ?? m.reasoning,
+              inputModalities: existing.inputModalities ?? m.inputModalities
+            });
           }
-          finalModels = [...modelsMap2.values()];
         }
+        const finalModels = [...modelsMap2.values()];
         cached = {
           models: finalModels,
           source,
@@ -11671,953 +11678,7 @@ function createCursorModule({ driver = {} } = {}) {
   });
 }
 
-// modules/provider-opencode/src/native-transport.mjs
-import { execFileSync as execFileSync3, spawn as spawn6 } from "node:child_process";
-import { randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync2, readdirSync } from "node:fs";
-import { homedir as homedir10 } from "node:os";
-import { join as join10 } from "node:path";
-import readline from "node:readline";
-var PROVIDER_ID10 = "opencode";
-var DEFAULT_ENDPOINT5 = "https://opencode.ai/inference/openai/v1/chat/completions";
-function findOpencodeCliPath() {
-  const appSupportCliDir = join10(homedir10(), "Library/Application Support/ai.opencode.desktop/cli");
-  if (existsSync2(appSupportCliDir)) {
-    try {
-      const entries = readdirSync(appSupportCliDir);
-      for (const entry of entries) {
-        const candidate2 = join10(appSupportCliDir, entry, "opencode-cli");
-        if (existsSync2(candidate2)) return candidate2;
-      }
-    } catch {
-    }
-  }
-  return null;
-}
-function queryInstalledOpencodeCliModelIds(cliPath) {
-  if (!cliPath || !existsSync2(cliPath)) return null;
-  try {
-    const stdout = execFileSync3(cliPath, ["models"], { encoding: "utf8", timeout: 5e3 });
-    const ids = stdout.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.startsWith("opencode/") ? line.slice("opencode/".length) : line);
-    if (ids.length > 0) return ids;
-  } catch {
-  }
-  return null;
-}
-var DEFAULT_OPENCODE_MAX_MESSAGES = 40;
-var OPENCODE_SLIDING_WINDOW_QUANTUM = 10;
-function resolveOpencodeMaxMessages(request = {}) {
-  const envLimit = Number.parseInt(process.env.DOCKYARD_OPENCODE_MAX_MESSAGES ?? "", 10);
-  if (Number.isSafeInteger(envLimit) && envLimit > 0) return envLimit;
-  if (Number.isSafeInteger(request?.maxMessages) && request.maxMessages > 0) return request.maxMessages;
-  const contextWindow = request?.modelContext?.contextWindow ?? request?.contextWindow;
-  if (Number.isSafeInteger(contextWindow) && contextWindow >= 5e5) {
-    return 500;
-  }
-  return DEFAULT_OPENCODE_MAX_MESSAGES;
-}
-function compactMessagesForOpencode(messages, { maxMessages = DEFAULT_OPENCODE_MAX_MESSAGES, quantum = OPENCODE_SLIDING_WINDOW_QUANTUM } = {}) {
-  if (!Array.isArray(messages) || messages.length <= maxMessages) return messages;
-  const initialIndex = messages.findIndex((m) => m?.role === "user" || m?.role === "system");
-  const prefix = initialIndex >= 0 ? [messages[initialIndex]] : [];
-  const rawWindowCount = Math.max(10, maxMessages - prefix.length - 1);
-  const excess = messages.length - maxMessages;
-  const quantOffset = excess > 0 ? Math.floor(excess / quantum) * quantum : 0;
-  const windowCount = Math.max(10, rawWindowCount + (excess - quantOffset));
-  const recent = messages.slice(-windowCount);
-  const startIndex = messages.length - windowCount;
-  if (startIndex > 0) {
-    const firstRecent = recent[0];
-    const isToolResult = firstRecent?.role === "tool" || Array.isArray(firstRecent?.content) && firstRecent.content.some((part) => part?.type === "tool-result" || part?.type === "tool_result");
-    if (isToolResult && messages[startIndex - 1]) {
-      recent.unshift(messages[startIndex - 1]);
-    }
-  }
-  const compactedCount = messages.length - prefix.length - recent.length;
-  if (compactedCount <= 0) return messages;
-  const milestone = {
-    role: "user",
-    content: "[System Note: Context sliding window active. Intermediate messages were compacted to maintain low latency and prevent token exhaustion. Initial requirements and recent active turns are preserved.]"
-  };
-  return [...prefix, milestone, ...recent];
-}
-function contentPartText(part) {
-  if (typeof part === "string") return part;
-  if (!part || typeof part !== "object") return "";
-  if (part.type === "reasoning" || part.type === "thinking") return "";
-  if (part.type === "tool-call" || part.type === "function-call" || part.type === "tooluse") {
-    const name2 = part.name ?? part.function?.name ?? "tool";
-    return `[Tool Call: ${name2}]`;
-  }
-  if (part.type === "tool-result" || part.type === "tool_result") {
-    const text3 = textFromContent(part.content ?? part.output ?? part.result ?? part.text);
-    const trimmed = text3.length > 8192 ? `${text3.slice(0, 8192)}... [truncated]` : text3;
-    return `[Tool Result ${part.toolCallId ?? part.id ?? ""}]:
-${trimmed}`;
-  }
-  return textFromContent(part);
-}
-function promptFromRequest(request) {
-  if (typeof request.prompt === "string" && request.prompt.trim()) {
-    return request.prompt;
-  }
-  const isCompaction = request.purpose === "compaction";
-  const defaultInstruction = isCompaction ? "You are an AI assistant summarizing the conversation. Reply directly with a concise text summary. Do not invoke tools or commands." : "You are an AI assistant. Reply directly to the user in text. Do not invoke tools or commands under any circumstances.";
-  const rawMessages = Array.isArray(request.messages) ? request.messages : [];
-  const messages = isCompaction ? rawMessages : compactMessagesForOpencode(rawMessages, { maxMessages: resolveOpencodeMaxMessages(request) });
-  const parts = [];
-  const systemText = typeof request.system === "string" && request.system.trim() ? `${defaultInstruction}
-
-${request.system.trim()}` : defaultInstruction;
-  parts.push(`[System instructions: ${systemText}]`);
-  for (const msg of messages) {
-    const role = msg?.role === "assistant" ? "Assistant" : msg?.role === "system" ? "System" : "User";
-    const text3 = typeof msg?.content === "string" ? msg.content : Array.isArray(msg?.content) ? msg.content.map(contentPartText).filter(Boolean).join("\n") : contentPartText(msg?.content);
-    if (text3) {
-      parts.push(`${role}: ${text3}`);
-    }
-  }
-  if (parts.length > 0) return parts.join("\n\n");
-  return typeof request.prompt === "string" ? request.prompt : "";
-}
-function firstString9(...values) {
-  return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
-}
-function toolCallPart3(part) {
-  const type = String(part?.type ?? "").toLowerCase().replace(/[_-]/g, "");
-  return type === "toolcall" || type === "functioncall" || type === "tooluse" ? part : null;
-}
-async function openAiContent2(content, attachments) {
-  const values = Array.isArray(content) ? content : [content];
-  const blocks = [];
-  for (const part of values) {
-    if (typeof part === "string") {
-      if (part) blocks.push({ type: "text", text: part });
-      continue;
-    }
-    if (!part || typeof part !== "object") continue;
-    if (part.type === "image") {
-      const image = await resolveImageData(part, attachments);
-      if (!image) throw nativeProviderError(PROVIDER_ID10, "image attachment could not be resolved");
-      blocks.push({ type: "image_url", image_url: { url: `data:${image.mediaType};base64,${image.data}` } });
-      continue;
-    }
-    if (part.type === "tool-result" || part.type === "tool_result") {
-      blocks.push({
-        type: "text",
-        text: `[Tool Result ${part.toolCallId ?? part.id ?? ""}]
-${textFromContent(part.content ?? part.output ?? part.result ?? part.text)}`
-      });
-      continue;
-    }
-    const call = toolCallPart3(part);
-    if (call) {
-      blocks.push({
-        type: "text",
-        text: `[Tool Call ${call.name ?? call.function?.name ?? "tool"}] ${JSON.stringify(parseToolArguments(call.arguments ?? call.input ?? call.function?.arguments))}`
-      });
-      continue;
-    }
-    const text3 = textFromContent(part);
-    if (text3) blocks.push({ type: "text", text: text3 });
-  }
-  return blocks;
-}
-async function buildOpencodeMessages(request, attachments) {
-  const result = [];
-  if (typeof request.system === "string" && request.system.length > 0) {
-    result.push({ role: "system", content: request.system });
-  }
-  const rawMessages = Array.isArray(request.messages) ? request.messages : [];
-  const messages = request.purpose === "compaction" ? rawMessages : compactMessagesForOpencode(rawMessages, { maxMessages: resolveOpencodeMaxMessages(request) });
-  for (const message of messages) {
-    const role = message?.role === "assistant" ? "assistant" : message?.role === "tool" ? "tool" : "user";
-    if (role === "tool") {
-      result.push({
-        role: "tool",
-        tool_call_id: firstString9(message.toolCallId, message.tool_call_id, message.id, "tool-result"),
-        content: textFromContent(message.content ?? message.text ?? message.output ?? message.result)
-      });
-      continue;
-    }
-    const content = await openAiContent2(message?.content ?? message?.text, attachments);
-    result.push({
-      role,
-      content: content.length === 1 && content[0]?.type === "text" ? content[0].text : content
-    });
-  }
-  return result;
-}
-var OPENCODE_SERVER_START_TIMEOUT_MS = 15e3;
-var OPENCODE_SERVER_READY_PATTERN = /server listening on (http:\/\/127\.0\.0\.1:\d+)/i;
-var serverChild = null;
-var serverUrl = null;
-var serverPassword = null;
-var serverStarting = null;
-function opencodeServerAuth(password) {
-  return `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`;
-}
-function abortSignalError(signal) {
-  const reason = signal?.reason;
-  if (reason instanceof Error) return reason;
-  const error = new Error("The operation was aborted");
-  error.name = "AbortError";
-  return error;
-}
-function opencodeDebug(...args) {
-  if (process.env.OPENCODE_TRANSPORT_DEBUG) {
-    console.error("[opencode-transport]", ...args);
-  }
-}
-async function startOpencodeServer(cliPath) {
-  opencodeDebug("starting local server", cliPath);
-  const password = randomBytes4(24).toString("base64url");
-  const child = spawn6(cliPath, ["serve", "--hostname", "127.0.0.1", "--port", "0"], {
-    stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, OPENCODE_PASSWORD: password }
-  });
-  let diagnostics = "";
-  child.stderr?.on("data", (chunk) => {
-    diagnostics = `${diagnostics}${String(chunk)}`.slice(-4e3);
-  });
-  let url;
-  try {
-    url = await new Promise((resolve2, reject) => {
-      let buffer = "";
-      let timer = null;
-      let settled = false;
-      const settle = (error, value) => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        child.stdout?.off?.("data", onStdout);
-        child.off?.("exit", onExit);
-        child.off?.("error", onError);
-        if (error) reject(error);
-        else resolve2(value);
-      };
-      const onStdout = (chunk) => {
-        buffer += String(chunk);
-        const match = buffer.match(OPENCODE_SERVER_READY_PATTERN);
-        if (match) settle(null, match[1]);
-      };
-      const onExit = (code, exitSignal) => {
-        settle(
-          new Error(
-            `OpenCode \u672C\u5730\u670D\u52A1\u63D0\u524D\u9000\u51FA (code ${code ?? "null"}, signal ${exitSignal ?? "null"})${diagnostics ? `: ${diagnostics.trim()}` : ""}`
-          )
-        );
-      };
-      const onError = (error) => settle(error);
-      timer = setTimeout(() => {
-        settle(new Error(`OpenCode \u672C\u5730\u670D\u52A1\u542F\u52A8\u8D85\u65F6${diagnostics ? `: ${diagnostics.trim()}` : ""}`));
-      }, OPENCODE_SERVER_START_TIMEOUT_MS);
-      child.stdout?.on("data", onStdout);
-      child.once("exit", onExit);
-      child.once("error", onError);
-    });
-  } catch (error) {
-    try {
-      child.kill();
-    } catch {
-    }
-    throw error;
-  }
-  child.stdout?.on("data", () => {
-  });
-  child.stderr?.on("data", () => {
-  });
-  child.unref?.();
-  child.stdout?.unref?.();
-  child.stderr?.unref?.();
-  const info = { child, url, password };
-  opencodeDebug("local server ready", url);
-  child.once("exit", () => {
-    if (serverChild === child) {
-      serverChild = null;
-      serverUrl = null;
-      serverPassword = null;
-    }
-  });
-  process.once("exit", () => {
-    try {
-      child.kill();
-    } catch {
-    }
-  });
-  return info;
-}
-async function ensureOpencodeServer(cliPath) {
-  if (serverUrl && serverChild && serverChild.exitCode === null) {
-    return { child: serverChild, url: serverUrl, password: serverPassword };
-  }
-  if (serverStarting) return serverStarting;
-  serverStarting = startOpencodeServer(cliPath).then((info) => {
-    serverChild = info.child;
-    serverUrl = info.url;
-    serverPassword = info.password;
-    serverStarting = null;
-    return info;
-  }).catch((error) => {
-    serverStarting = null;
-    throw error;
-  });
-  return serverStarting;
-}
-async function opencodeServerRequest(server, method, path, body, { signal, fetchImpl = fetch } = {}) {
-  let response;
-  try {
-    response = await fetchImpl(`${server.url}${path}`, {
-      method,
-      headers: {
-        Authorization: opencodeServerAuth(server.password),
-        ...body !== void 0 ? { "Content-Type": "application/json" } : {}
-      },
-      ...body !== void 0 ? { body: JSON.stringify(body) } : {},
-      ...signal ? { signal } : {}
-    });
-  } catch (error) {
-    if (signal?.aborted) throw abortSignalError(signal);
-    throw error;
-  }
-  if (!response.ok) {
-    const details = await response.text().catch(() => "");
-    throw nativeProviderError(
-      PROVIDER_ID10,
-      `OpenCode \u672C\u5730\u670D\u52A1\u8BF7\u6C42\u5931\u8D25 (${method} ${path}): ${response.status}${details ? ` ${details.slice(0, 500)}` : ""}`
-    );
-  }
-  if (response.status === 204) return null;
-  const text3 = await response.text();
-  if (!text3) return null;
-  try {
-    return JSON.parse(text3);
-  } catch {
-    return null;
-  }
-}
-async function openOpencodeEventStream(server, sessionId, { signal, fetchImpl = fetch, idleTimeoutMs = 6e4 } = {}) {
-  let response;
-  try {
-    response = await fetchImpl(`${server.url}/api/event`, {
-      headers: {
-        Authorization: opencodeServerAuth(server.password),
-        Accept: "text/event-stream"
-      },
-      ...signal ? { signal } : {}
-    });
-  } catch (error) {
-    if (signal?.aborted) throw abortSignalError(signal);
-    throw error;
-  }
-  if (!response.ok) {
-    const details = await response.text().catch(() => "");
-    throw nativeProviderError(
-      PROVIDER_ID10,
-      `OpenCode \u4E8B\u4EF6\u6D41\u8FDE\u63A5\u5931\u8D25: ${response.status}${details ? ` ${details.slice(0, 300)}` : ""}`
-    );
-  }
-  if (!response.body?.getReader) {
-    throw nativeProviderError(PROVIDER_ID10, "OpenCode \u4E8B\u4EF6\u6D41\u4E0D\u53EF\u8BFB\u53D6");
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let closed = false;
-  async function readChunkWithTimeout() {
-    if (!idleTimeoutMs || idleTimeoutMs <= 0) return reader.read();
-    let timer = null;
-    try {
-      return await Promise.race([
-        reader.read(),
-        new Promise((_, reject) => {
-          timer = setTimeout(() => {
-            const err = nativeProviderError(PROVIDER_ID10, "OpenCode \u4E8B\u4EF6\u6D41\u54CD\u5E94\u8D85\u65F6", { code: "TIMEOUT" });
-            reject(err);
-          }, idleTimeoutMs);
-        })
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  }
-  return {
-    async next() {
-      while (!closed) {
-        let boundary = buffer.indexOf("\n\n");
-        while (boundary === -1) {
-          const { value, done } = await readChunkWithTimeout();
-          if (done) {
-            closed = true;
-            return { done: true };
-          }
-          buffer = `${buffer}${decoder.decode(value, { stream: true })}`.replace(/\r\n/g, "\n");
-          boundary = buffer.indexOf("\n\n");
-        }
-        const raw = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        let data = "";
-        for (const line of raw.split("\n")) {
-          if (line.startsWith("data:")) data += `${data ? "\n" : ""}${line.slice(5).trim()}`;
-        }
-        if (!data) continue;
-        let event;
-        try {
-          event = JSON.parse(data);
-        } catch {
-          continue;
-        }
-        if (event?.data?.sessionID !== sessionId) continue;
-        return { done: false, value: event };
-      }
-      return { done: true };
-    },
-    async close() {
-      closed = true;
-      try {
-        await reader.cancel();
-      } catch {
-      }
-    }
-  };
-}
-function opencodeServerModel(request) {
-  const raw = typeof request?.model === "string" ? request.model.trim() : "";
-  if (!raw) return null;
-  const [baseRaw, embeddedVariant] = raw.split("#");
-  const base = baseRaw.startsWith("opencode/") ? baseRaw.slice("opencode/".length) : baseRaw;
-  if (!base) return null;
-  if (request?.purpose === "compaction" || request?.thinking === false) {
-    return { providerID: PROVIDER_ID10, id: base };
-  }
-  const effort = request.reasoningEffort ?? request.reasoning_effort ?? embeddedVariant;
-  const variant = typeof effort === "string" && effort && effort !== "medium" ? effort : null;
-  return { providerID: PROVIDER_ID10, id: base, ...variant ? { variant } : {} };
-}
-function opencodeUsageFromTokens(tokens) {
-  const input = Number(tokens?.input ?? 0);
-  const output = Number(tokens?.output ?? 0);
-  return {
-    prompt_tokens: Number.isFinite(input) ? input : 0,
-    completion_tokens: Number.isFinite(output) ? output : 0,
-    total_tokens: (Number.isFinite(input) ? input : 0) + (Number.isFinite(output) ? output : 0)
-  };
-}
-function opencodeEventMessage(data) {
-  const value = data?.error ?? data?.message ?? data?.reason;
-  if (typeof value === "string" && value.trim()) return value.trim();
-  if (value && typeof value === "object") {
-    const nested = value.message ?? value.error ?? value.reason;
-    if (typeof nested === "string" && nested.trim()) return nested.trim();
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-function isPermissionRequestEvent(type, data, sessionId) {
-  if (typeof type !== "string" || !type.includes("permission")) return false;
-  if (data?.sessionID !== sessionId) return false;
-  return type.includes("request") || type.endsWith(".updated") || type.endsWith(".asked");
-}
-async function* runViaOpencodeServer({ server, request, signal, fetchImpl, timeoutMs = 6e4 }) {
-  const prompt = promptFromRequest(request);
-  const model = opencodeServerModel(request);
-  const controller = new AbortController();
-  let sessionId = null;
-  let stream = null;
-  let aborted = false;
-  const pendingReplies = /* @__PURE__ */ new Set();
-  const isCompaction = request.purpose === "compaction";
-  const onAbort = () => {
-    aborted = true;
-    controller.abort();
-    if (sessionId) {
-      void opencodeServerRequest(server, "POST", `/api/session/${sessionId}/interrupt`, void 0, { fetchImpl }).catch(() => {
-      });
-    }
-  };
-  if (signal) {
-    if (signal.aborted) throw abortSignalError(signal);
-    signal.addEventListener("abort", onAbort, { once: true });
-  }
-  let text3 = "";
-  let textIndex = 0;
-  let textOpen = false;
-  let nextIndex = 1;
-  let reasoning = null;
-  let rawUsage = null;
-  let stop = "stop";
-  let stepCount = 0;
-  try {
-    const created = await opencodeServerRequest(
-      server,
-      "POST",
-      "/api/session",
-      {
-        ...model ? { model } : {},
-        location: { directory: process.cwd() }
-      },
-      { signal: controller.signal, fetchImpl }
-    );
-    sessionId = created?.data?.id ?? created?.id ?? null;
-    if (!sessionId) {
-      throw nativeProviderError(PROVIDER_ID10, "OpenCode \u4F1A\u8BDD\u521B\u5EFA\u5931\u8D25\uFF1A\u54CD\u5E94\u4E2D\u6CA1\u6709\u4F1A\u8BDD ID");
-    }
-    opencodeDebug("session created", sessionId);
-    stream = await openOpencodeEventStream(server, sessionId, {
-      signal: controller.signal,
-      fetchImpl,
-      idleTimeoutMs: timeoutMs
-    });
-    opencodeDebug("event stream connected");
-    await opencodeServerRequest(
-      server,
-      "POST",
-      `/api/session/${sessionId}/prompt`,
-      { text: prompt },
-      { signal: controller.signal, fetchImpl }
-    );
-    opencodeDebug("prompt submitted");
-    let finished = false;
-    while (!finished) {
-      let next;
-      try {
-        next = await stream.next();
-      } catch (error) {
-        if (controller.signal.aborted || signal?.aborted) break;
-        throw error;
-      }
-      if (next.done) {
-        if (!finished && !text3 && !reasoning) {
-          throw nativeProviderError(PROVIDER_ID10, "OpenCode \u4E8B\u4EF6\u6D41\u5F02\u5E38\u7ED3\u675F\uFF0C\u672A\u8FD4\u56DE\u6709\u6548\u5185\u5BB9", { code: "EMPTY_RESPONSE" });
-        }
-        break;
-      }
-      const event = next.value;
-      const type = event.type;
-      const data = event.data ?? {};
-      if (type && !type.endsWith(".delta")) opencodeDebug("event", type);
-      if (type === "session.reasoning.delta" && typeof data.delta === "string" && data.delta) {
-        if (!isCompaction) {
-          if (textOpen) {
-            yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
-            textOpen = false;
-          }
-          if (!reasoning) {
-            reasoning = { index: nextIndex++, text: "" };
-            yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
-          }
-          reasoning.text += data.delta;
-          yield { type: "reasoning-delta", index: reasoning.index, text: data.delta };
-        }
-      } else if (type === "session.text.delta" && typeof data.delta === "string" && data.delta) {
-        if (reasoning) {
-          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-          reasoning = null;
-        }
-        if (!textOpen) {
-          textIndex = nextIndex++;
-          text3 = "";
-          textOpen = true;
-          yield { type: "block-start", index: textIndex, blockType: "text" };
-        }
-        text3 += data.delta;
-        yield { type: "text-delta", index: textIndex, text: data.delta };
-      } else if (type === "session.usage.updated" && data.tokens) {
-        rawUsage = opencodeUsageFromTokens(data.tokens);
-      } else if (type === "session.step.ended") {
-        stepCount++;
-        if (typeof data.finish === "string" && data.finish) stop = data.finish;
-        if (data.tokens) rawUsage = opencodeUsageFromTokens(data.tokens);
-        if (isCompaction) {
-          if (text3 || data.finish === "stop") {
-            finished = true;
-          }
-        } else if (data.finish === "stop" && text3) {
-          finished = true;
-        } else if (stepCount >= 5 && text3) {
-          finished = true;
-        }
-      } else if (type === "session.step.failed") {
-        const msg = opencodeEventMessage(data) || "OpenCode \u6B65\u9AA4\u6267\u884C\u5931\u8D25";
-        const status = data.error?.status ?? data.status;
-        const code = data.error?.type ?? data.type;
-        throw nativeProviderError(PROVIDER_ID10, msg, { status, code });
-      } else if (type === "session.execution.succeeded") {
-        finished = true;
-      } else if (type === "session.execution.failed" || type === "session.execution.error" || type === "session.error") {
-        const msg = opencodeEventMessage(data) || "OpenCode \u6267\u884C\u5931\u8D25";
-        const status = data.error?.status ?? data.status;
-        const code = data.error?.type ?? data.type;
-        throw nativeProviderError(PROVIDER_ID10, msg, { status, code });
-      } else if (type === "session.execution.interrupted") {
-        aborted = true;
-        finished = true;
-      } else if (isPermissionRequestEvent(type, data, sessionId)) {
-        const requestId = data.id ?? data.requestID;
-        if (requestId) {
-          pendingReplies.add(
-            opencodeServerRequest(
-              server,
-              "POST",
-              `/api/session/${sessionId}/permission/${requestId}/reply`,
-              { decision: "deny" },
-              { fetchImpl }
-            ).catch(() => {
-            })
-          );
-        }
-      }
-    }
-  } finally {
-    if (stream) await stream.close();
-    if (sessionId) {
-      await opencodeServerRequest(server, "DELETE", `/api/session/${sessionId}`, void 0, { fetchImpl }).catch(() => {
-      });
-    }
-    signal?.removeEventListener?.("abort", onAbort);
-    if (pendingReplies.size > 0) await Promise.allSettled([...pendingReplies]);
-  }
-  if (reasoning) {
-    yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-  }
-  if (textOpen) {
-    yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
-  }
-  if (rawUsage) {
-    yield { type: "usage", usage: normalizeUsage(rawUsage) };
-  }
-  yield {
-    type: "finish",
-    reason: aborted ? { kind: "stop" } : finishReason(stop),
-    ...rawUsage ? { usage: normalizeUsage(rawUsage) } : {}
-  };
-}
-function createOpencodeNativeExecutor({
-  endpoint: endpoint2 = DEFAULT_ENDPOINT5,
-  apiKey = null,
-  fetchImpl = fetch,
-  timeoutMs = 6e4,
-  cliPath = void 0
-} = {}) {
-  const validatedEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID10 });
-  return async function* opencodeNativeExecutor(envelope2 = {}) {
-    const { request, attachments, credential, signal } = envelope2;
-    const token = apiKey ?? (credential?.access && credential.access !== "free-tier" ? credential.access : null) ?? credential?.apiKey ?? credential?.token ?? process.env.OPENCODE_API_KEY ?? null;
-    const resolvedCliPath = !token ? cliPath !== void 0 ? cliPath : findOpencodeCliPath() : null;
-    if (resolvedCliPath) {
-      let server = null;
-      try {
-        server = await ensureOpencodeServer(resolvedCliPath);
-      } catch {
-        server = null;
-      }
-      if (server) {
-        let emitted = false;
-        try {
-          for await (const event of runViaOpencodeServer({ server, request, signal, fetchImpl, timeoutMs })) {
-            emitted = true;
-            yield event;
-          }
-          return;
-        } catch (error) {
-          if (emitted || signal?.aborted) throw error;
-        }
-      }
-    }
-    if (resolvedCliPath) {
-      const baseModel = request.model?.startsWith("opencode/") ? request.model : `opencode/${request.model}`;
-      const isCompaction = request.purpose === "compaction";
-      const thinkingDisabled = isCompaction || request.thinking === false;
-      const effort = thinkingDisabled ? null : request.reasoningEffort ?? request.reasoning_effort;
-      const model = effort && effort !== "medium" ? `${baseModel}#${effort}` : baseModel;
-      const prompt = promptFromRequest(request);
-      const args = ["run", "--model", model];
-      if (!thinkingDisabled) {
-        args.push("--thinking");
-      }
-      args.push("--format", "json", prompt);
-      const child = spawn6(resolvedCliPath, args, {
-        signal,
-        stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env }
-      });
-      let timeoutTimer = null;
-      let timedOut = false;
-      if (timeoutMs > 0) {
-        timeoutTimer = setTimeout(() => {
-          timedOut = true;
-          try {
-            child.kill("SIGTERM");
-          } catch {
-          }
-        }, timeoutMs);
-      }
-      const rl = readline.createInterface({ input: child.stdout });
-      let text4 = "";
-      let textIndex2 = 0;
-      let textOpen2 = false;
-      let nextIndex2 = 1;
-      let reasoning2 = null;
-      let rawUsage2 = null;
-      let stderrOutput = "";
-      child.stderr?.on?.("data", (chunk) => {
-        stderrOutput += String(chunk);
-      });
-      try {
-        for await (const line of rl) {
-          if (!line.trim()) continue;
-          let parsed;
-          try {
-            parsed = JSON.parse(line);
-          } catch {
-            continue;
-          }
-          if (parsed.type === "reasoning" && parsed.part?.text) {
-            if (!isCompaction) {
-              if (textOpen2) {
-                yield { type: "block-end", index: textIndex2, block: { type: "text", text: text4 } };
-                textOpen2 = false;
-              }
-              if (!reasoning2) {
-                reasoning2 = { index: nextIndex2++, text: "" };
-                yield { type: "block-start", index: reasoning2.index, blockType: "reasoning" };
-              }
-              const chunk = parsed.part.text;
-              reasoning2.text += chunk;
-              yield { type: "reasoning-delta", index: reasoning2.index, text: chunk };
-            }
-          } else if (parsed.type === "text" && parsed.part?.text) {
-            if (reasoning2) {
-              yield { type: "block-end", index: reasoning2.index, block: { type: "reasoning", text: reasoning2.text } };
-              reasoning2 = null;
-            }
-            if (!textOpen2) {
-              textIndex2 = nextIndex2++;
-              text4 = "";
-              textOpen2 = true;
-              yield { type: "block-start", index: textIndex2, blockType: "text" };
-            }
-            const chunk = parsed.part.text;
-            text4 += chunk;
-            yield { type: "text-delta", index: textIndex2, text: chunk };
-          } else if (parsed.type === "step_finish" && parsed.part?.tokens) {
-            rawUsage2 = {
-              prompt_tokens: parsed.part.tokens.input ?? 0,
-              completion_tokens: parsed.part.tokens.output ?? 0,
-              total_tokens: (parsed.part.tokens.input ?? 0) + (parsed.part.tokens.output ?? 0)
-            };
-            if (isCompaction) {
-              break;
-            }
-          } else if (parsed.type === "error") {
-            const msg = parsed.error?.message || "OpenCode CLI execution error";
-            const status = parsed.error?.status;
-            const code = parsed.error?.type;
-            throw nativeProviderError(PROVIDER_ID10, msg, { status, code });
-          }
-        }
-      } finally {
-        if (timeoutTimer) clearTimeout(timeoutTimer);
-        try {
-          child.kill();
-        } catch {
-        }
-      }
-      if (timedOut) {
-        throw nativeProviderError(PROVIDER_ID10, `OpenCode CLI \u6267\u884C\u8D85\u65F6 (${timeoutMs}ms)`, { code: "TIMEOUT" });
-      }
-      if (!text4 && !reasoning2) {
-        if (stderrOutput.trim()) {
-          throw nativeProviderError(PROVIDER_ID10, stderrOutput.trim());
-        }
-        throw nativeProviderError(PROVIDER_ID10, "OpenCode CLI \u672A\u8FD4\u56DE\u6709\u6548\u5185\u5BB9", { code: "EMPTY_RESPONSE" });
-      }
-      if (reasoning2) {
-        yield { type: "block-end", index: reasoning2.index, block: { type: "reasoning", text: reasoning2.text } };
-      }
-      if (textOpen2) {
-        yield { type: "block-end", index: textIndex2, block: { type: "text", text: text4 } };
-      }
-      if (rawUsage2) {
-        yield {
-          type: "usage",
-          usage: normalizeUsage(rawUsage2)
-        };
-      }
-      yield {
-        type: "finish",
-        reason: { kind: "stop" },
-        ...rawUsage2 ? { usage: normalizeUsage(rawUsage2) } : {}
-      };
-      return;
-    }
-    const isFreeTier = !token || token === "free-tier";
-    let activeEndpoint = validatedEndpoint;
-    let authHeader = token && token !== "free-tier" ? `Bearer ${token}` : "Bearer public";
-    let extraHeaders = {};
-    let tools = void 0;
-    if (isFreeTier) {
-      activeEndpoint = "https://opencode.ai/inference/v1/chat/completions";
-      const ts = Date.now();
-      const value = ~(BigInt(ts) * 0x1000n + 1n);
-      let hex = "";
-      for (let i = 0; i < 6; i++) hex += Number(value >> BigInt(40 - 8 * i) & 0xffn).toString(16).padStart(2, "0");
-      const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-      let rand = "";
-      for (const b of randomBytes4(14)) rand += BASE62[b % 62];
-      const session = `ses_${hex}${rand}`;
-      extraHeaders = {
-        "user-agent": "opencode/latest/2.0.26/cli",
-        "x-opencode-client": "cli",
-        "x-opencode-session": session,
-        "x-opencode-session-id": session,
-        "x-session-affinity": session,
-        "x-session-id": session,
-        "x-opencode-project": "global"
-      };
-      tools = [
-        {
-          type: "function",
-          function: {
-            name: "read",
-            description: "Read the contents of a file or directory. Supports text files, images, and PDFs. Images and PDFs are presented directly to the model. Each text line is prefixed by its 1-based line number as <line>: <content>. The prefix is for reference and is not part of the file content. Directory entries are returned one per line. Use offset and limit to read large files or directories in sections. Prefer one larger read over many small slices, and use grep to find specific content in large files.",
-            parameters: {
-              type: "object",
-              properties: {
-                path: { type: "string", description: "File or directory to read" },
-                offset: { type: "integer", minimum: 0, description: "The line or directory entry to start reading from (1-based)" },
-                limit: { type: "integer", minimum: 0, description: "The maximum number of lines or directory entries to read (defaults to and capped at 2000)" }
-              },
-              required: ["path"],
-              additionalProperties: false
-            }
-          }
-        },
-        {
-          type: "function",
-          function: {
-            name: "shell",
-            description: "Execute a shell command and return its output. Commands run on Linux using bash. Quote file paths containing spaces or special characters. Prefer dedicated tools over shell commands when possible. When output is large, the full result is saved to a file and a truncated preview is returned. Rely on automatic truncation unless filtering the output is more useful. Commands accept an optional timeout, background commands have no timeout by default. Background commands return immediately, and you will be notified when they complete.",
-            parameters: {
-              type: "object",
-              properties: {
-                command: { type: "string", description: "Shell command string to execute" },
-                workdir: { type: "string", description: "Working directory to execute the command in. Defaults to the current working directory. When possible, avoid changing directories in the command and set the working directory here instead." },
-                timeout: { type: "integer", minimum: 0, description: "Timeout in milliseconds. Set to 0 to disable the timeout. Defaults to 120000 for foreground commands. Background commands have no timeout by default." },
-                background: { type: "boolean", description: "Run the command in the background and return immediately (useful for dev servers and long-running builds). You do not need to use '&' at the end of the command when using this parameter. You will be notified when it completes. DO NOT poll for completion." }
-              },
-              required: ["command"],
-              additionalProperties: false
-            }
-          }
-        }
-      ];
-    }
-    const messages = await buildOpencodeMessages(request, attachments);
-    const body = {
-      model: request.model,
-      messages,
-      stream: true,
-      ...typeof request.temperature === "number" ? { temperature: request.temperature } : {},
-      ...typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {},
-      ...request.reasoningEffort && request.purpose !== "compaction" && request.thinking !== false ? { reasoning_effort: request.reasoningEffort } : {},
-      ...tools ? { tools } : {}
-    };
-    const headers = {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-      Authorization: authHeader,
-      ...extraHeaders
-    };
-    const response = await fetchNativeResponse(
-      activeEndpoint,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal
-      },
-      {
-        providerId: PROVIDER_ID10,
-        timeoutMs,
-        fetchImpl
-      }
-    );
-    let text3 = "";
-    let textIndex = 0;
-    let textOpen = false;
-    let nextIndex = 1;
-    let reasoning = null;
-    let rawUsage = null;
-    let stop = "stop";
-    for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID10 })) {
-      if (event?.done) continue;
-      const parsed = event?.data;
-      if (!parsed || typeof parsed !== "object") continue;
-      if (parsed.usage) rawUsage = parsed.usage;
-      const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : null;
-      if (!choice) continue;
-      const delta = choice.delta ?? {};
-      const reasoningDelta = firstString9(delta.reasoning_content, delta.reasoning, delta.thought);
-      if (reasoningDelta) {
-        if (textOpen) {
-          yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
-          textOpen = false;
-        }
-        if (!reasoning) {
-          reasoning = { index: nextIndex++, text: "" };
-          yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
-        }
-        reasoning.text += reasoningDelta;
-        yield { type: "reasoning-delta", index: reasoning.index, text: reasoningDelta };
-      }
-      const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
-      if (content) {
-        if (reasoning) {
-          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-          reasoning = null;
-        }
-        if (!textOpen) {
-          textIndex = nextIndex++;
-          text3 = "";
-          textOpen = true;
-          yield { type: "block-start", index: textIndex, blockType: "text" };
-        }
-        text3 += content;
-        yield { type: "text-delta", index: textIndex, text: content };
-      }
-      if (choice.finish_reason) {
-        stop = choice.finish_reason;
-      }
-    }
-    if (reasoning) {
-      yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-    }
-    if (textOpen) {
-      yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
-    }
-    if (rawUsage) {
-      yield {
-        type: "usage",
-        usage: normalizeUsage(rawUsage)
-      };
-    }
-    yield {
-      type: "finish",
-      reason: finishReason(stop),
-      ...rawUsage ? { usage: normalizeUsage(rawUsage) } : {}
-    };
-  };
-}
-
 // modules/provider-opencode/src/driver.mjs
-var PROVIDER_ID11 = "opencode";
-var DEFAULT_CATALOG_URL = "https://opencode.ai/zen/v1/models";
-var DEFAULT_ENDPOINT6 = "https://opencode.ai/inference/openai/v1/chat/completions";
 var BUILTIN_OPENCODE_FREE_MODELS = Object.freeze([
   {
     id: "big-pickle",
@@ -12783,337 +11844,63 @@ var BUILTIN_OPENCODE_FREE_MODELS = Object.freeze([
 function summarizeOpencodeCandidate(candidate2) {
   return candidate2?.displayName ?? candidate2?.email ?? candidate2?.accountId ?? "OpenCode Free";
 }
-function findOpencodeRegistryModel(id, registry) {
-  if (!id || !Array.isArray(registry) || registry.length === 0) return null;
-  const exact = registry.find((m) => m.id === id);
-  if (exact) return exact;
-  const cleanId = id.replace(/-free$/, "");
-  const cleanMatch = registry.find((m) => m.id === cleanId);
-  if (cleanMatch) return cleanMatch;
-  if (id.startsWith("deepseek-v4")) {
-    return registry.find((m) => m.id === "deepseek-v4-flash-free" || m.id === "deepseek-v4-flash");
-  }
-  if (id.startsWith("claude-sonnet") || id.startsWith("claude-opus") || id.startsWith("claude-fable") || id.startsWith("claude-haiku")) {
-    const family = id.split("-").slice(0, 2).join("-");
-    return registry.find((m) => m.id.startsWith(family) && m.thinkingLevelMap);
-  }
-  if (id.startsWith("glm-5")) {
-    return registry.find((m) => m.id === "glm-5.2" || m.id.startsWith("glm-5") && m.thinkingLevelMap);
-  }
-  if (id.startsWith("gemini-")) {
-    return registry.find((m) => m.provider === "opencode" && m.id.startsWith("gemini-") && m.thinkingLevelMap);
-  }
-  if (id.startsWith("grok-")) {
-    return registry.find((m) => m.id === "grok-4.5" || m.id.startsWith("grok-") && m.thinkingLevelMap);
-  }
-  if (id.startsWith("gpt-5") || id.startsWith("gpt-6")) {
-    return registry.find((m) => m.provider === "opencode" && m.id.startsWith("gpt-5") && m.thinkingLevelMap);
-  }
-  if (id.startsWith("qwen")) {
-    return registry.find((m) => m.provider === "opencode" && m.id.startsWith("qwen"));
-  }
-  if (id.startsWith("minimax")) {
-    return registry.find((m) => m.provider === "opencode" && m.id.startsWith("minimax"));
-  }
-  return null;
-}
-function parseOpencodeCatalog(data, { registry = [], installedIds = null } = {}) {
-  const models = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
-  if (!models.length) {
-    if (Array.isArray(installedIds) && installedIds.length > 0) {
-      const builtinMap2 = new Map(BUILTIN_OPENCODE_FREE_MODELS.map((m) => [m.id, m]));
-      const installedModels = installedIds.map((id) => {
-        const builtin = builtinMap2.get(id);
-        if (builtin) return builtin;
-        return {
-          id,
-          name: `${id} (Free)`,
-          contextWindow: 131072,
-          maxTokens: 8192
-        };
-      });
-      return { models: installedModels };
-    }
-    return { models: [...BUILTIN_OPENCODE_FREE_MODELS] };
-  }
-  const builtinMap = new Map(BUILTIN_OPENCODE_FREE_MODELS.map((m) => [m.id, m]));
-  const result = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const item of models) {
-    const id = stringValue(item?.id);
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    const regModel = findOpencodeRegistryModel(id, registry);
-    const builtin = builtinMap.get(id);
-    const isFree = id.includes("-free") || id === "big-pickle";
-    const name2 = stringValue(item?.name) ?? regModel?.name ?? builtin?.name ?? (isFree ? `${id} (Free)` : id);
-    const contextWindow = Number.isInteger(item?.contextWindow) ? item.contextWindow : Number.isInteger(regModel?.contextWindow) ? regModel.contextWindow : builtin?.contextWindow ?? 131072;
-    const maxTokens = Number.isInteger(item?.maxTokens) ? Math.min(item.maxTokens, 16384) : Number.isInteger(regModel?.maxTokens) ? Math.min(regModel.maxTokens, 16384) : builtin?.maxTokens ?? 8192;
-    const reasoning = item?.reasoning ? resolveReasoningFromModel(item) : regModel ? resolveReasoningFromModel(regModel) : builtin?.reasoning;
-    result.push({
-      id,
-      name: name2,
-      contextWindow,
-      maxTokens,
-      ...reasoning ? { reasoning } : {}
-    });
-  }
-  return { models: result.length > 0 ? result : [...BUILTIN_OPENCODE_FREE_MODELS] };
-}
-function createOpencodeCatalogLoader({
-  catalogUrl = DEFAULT_CATALOG_URL,
-  fetchImpl = fetch,
-  timeoutMs = 8e3,
-  cacheTtlMs = 6e4,
-  registryLoader = null
-} = {}) {
-  const validatedUrl = assertSecureEndpointUrl(catalogUrl, "OPENCODE_CATALOG_URL");
-  let cached = null;
-  let cachedAt = 0;
-  let pending = null;
-  return async function opencodeCatalogLoader({ force = false } = {}) {
-    const now = Date.now();
-    if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
-    if (pending) return pending;
-    pending = (async () => {
-      const registry = typeof registryLoader === "function" ? await registryLoader().catch(() => []) : [];
-      const cliPath = findOpencodeCliPath();
-      const installedIds = cliPath ? queryInstalledOpencodeCliModelIds(cliPath) : null;
-      if (catalogUrl === DEFAULT_CATALOG_URL && fetchImpl === fetch) {
-        cached = parseOpencodeCatalog(null, { registry, installedIds });
-        cachedAt = Date.now();
-        return cached;
-      }
-      try {
-        const data = await fetchJson(validatedUrl, {
-          headers: { Accept: "application/json" },
-          fetchImpl,
-          timeoutMs
-        });
-        cached = parseOpencodeCatalog(data, { registry, installedIds });
-      } catch {
-        cached = parseOpencodeCatalog(null, { registry, installedIds });
-      }
-      cachedAt = Date.now();
-      return cached;
-    })().finally(() => {
-      pending = null;
-    });
-    return pending;
-  };
-}
-var OpencodeDriver = class {
-  constructor({
-    endpoint: endpoint2 = DEFAULT_ENDPOINT6,
-    catalogUrl = DEFAULT_CATALOG_URL,
-    catalogLoader = null,
-    requestExecutor = null,
-    fetchImpl = fetch,
-    timeoutMs = 3e4,
-    registryLoader = null
-  } = {}) {
-    this.endpoint = endpoint2;
-    this.catalogUrl = catalogUrl;
-    this.fetchImpl = fetchImpl;
-    this.timeoutMs = timeoutMs;
-    this.catalogLoader = catalogLoader ?? createOpencodeCatalogLoader({
-      catalogUrl,
-      fetchImpl,
-      timeoutMs: 8e3,
-      registryLoader
-    });
-    this.requestExecutor = requestExecutor ?? createOpencodeNativeExecutor({
-      endpoint: endpoint2,
-      fetchImpl,
-      timeoutMs
-    });
-  }
-  async discover() {
-    return {
-      candidates: [
-        {
-          candidateId: "opencode-free",
-          accountId: "opencode-free",
-          displayName: "OpenCode Free",
-          email: "zen@opencode.ai",
-          subscription: {
-            plan: "Zen Free Rotation",
-            status: "active"
-          },
-          quota: {
-            remaining: 100,
-            limit: 100,
-            unit: "requests",
-            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-          },
-          source: "opencode_free_tier",
-          health: {
-            status: "healthy"
-          }
-        }
-      ],
-      source: "opencode_free_tier",
-      diagnostics: []
-    };
-  }
-  async importAccount(candidate2, context = {}) {
-    const accountId = candidate2?.accountId || "opencode-free";
-    const ref = createCredentialRef(PROVIDER_ID11, accountId);
-    if (context.secretStore) {
-      await context.secretStore.write(ref, {
-        type: "opencode_free",
-        access: "free-tier"
-      }).catch(() => {
-      });
-    }
-    return createAccountRecord({
-      accountId,
-      providerId: PROVIDER_ID11,
-      displayName: candidate2?.displayName || "OpenCode Free",
-      email: candidate2?.email || "zen@opencode.ai",
-      auth: {
-        kind: "opencode_free",
-        credentialRef: ref
-      },
-      subscription: {
-        plan: candidate2?.subscription?.plan || "Zen Free Rotation",
-        status: "active"
-      },
-      quota: createQuotaSnapshot(candidate2?.quota || {
-        remaining: 100,
-        limit: 100,
-        unit: "requests"
-      }),
-      health: {
-        status: "healthy"
-      }
-    });
-  }
-  async getActiveSession() {
-    return this.discover().then((res) => Array.isArray(res?.candidates) ? res.candidates[0] : Array.isArray(res) ? res[0] : null);
-  }
-  async refreshAccount(account) {
-    return {
-      quota: createQuotaSnapshot({
-        remaining: 100,
-        limit: 100,
-        unit: "requests",
-        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-      }),
-      health: {
-        status: "healthy",
-        lastCheckedAt: (/* @__PURE__ */ new Date()).toISOString()
-      }
-    };
-  }
-  async getQuota() {
-    return createQuotaSnapshot({
-      remaining: 100,
-      limit: 100,
-      unit: "requests",
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-    });
-  }
-  async getCatalog(context = {}) {
-    return this.catalogLoader({ force: Boolean(context.force) });
-  }
-  async invoke(request, invocation, context = {}) {
-    const executor = context.requestExecutor ?? this.requestExecutor;
-    let credential = null;
-    if (context.secretStore && invocation?.auth?.credentialRef) {
-      credential = await context.secretStore.read(invocation.auth.credentialRef).catch(() => null);
-    }
-    if (!credential) {
-      credential = invocation?.auth ?? { access: "free-tier" };
-    }
-    return executor({
-      request,
-      invocation,
-      context,
-      attachments: context.attachments ?? invocation?.attachments,
-      credential,
-      signal: context.signal ?? invocation?.signal
-    });
-  }
-  async stream(request, invocation, context = {}) {
-    return this.invoke(request, invocation, context);
-  }
-};
-function createOpencodeDriver(options = {}) {
-  return new OpencodeDriver(options);
-}
-
-// modules/provider-opencode/src/index.mjs
-function createOpencodeModule({ driver = {} } = {}) {
-  return defineProviderModule({
-    id: "opencode",
-    displayName: "OpenCode",
-    capabilities: [
-      "quota",
-      "catalog",
-      "invoke",
-      "stream"
-    ],
-    driver
-  });
-}
 
 // modules/provider-workbuddy/src/driver.mjs
-import { existsSync as existsSync4, readdirSync as readdirSync2, readFileSync as readFileSync3 } from "node:fs";
-import { join as join12 } from "node:path";
+import { existsSync as existsSync3, readdirSync, readFileSync as readFileSync3 } from "node:fs";
+import { join as join11 } from "node:path";
 
 // modules/provider-workbuddy/src/native-transport.mjs
-import { execFileSync as execFileSync4 } from "node:child_process";
-import { randomBytes as randomBytes5, randomUUID as randomUUID10 } from "node:crypto";
-import { existsSync as existsSync3, readFileSync as readFileSync2 } from "node:fs";
-import { homedir as homedir11 } from "node:os";
-import { join as join11 } from "node:path";
-function firstString10(...values) {
+import { execFileSync as execFileSync3 } from "node:child_process";
+import { randomBytes as randomBytes4, randomUUID as randomUUID10 } from "node:crypto";
+import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
+import { homedir as homedir10 } from "node:os";
+import { join as join10 } from "node:path";
+function firstString9(...values) {
   for (const val of values) {
     if (typeof val === "string" && val.length > 0) return val;
   }
   return null;
 }
-var PROVIDER_ID12 = "workbuddy";
+var PROVIDER_ID10 = "workbuddy";
 var DEFAULT_WORKBUDDY_ENDPOINT = "https://www.workbuddy.ai/v2/chat/completions";
 var cachedSession = null;
 var cachedSessionExpiry = 0;
 function findWorkbuddyElectronPath() {
-  if (process.env.WORKBUDDY_ELECTRON_PATH && existsSync3(process.env.WORKBUDDY_ELECTRON_PATH)) {
+  if (process.env.WORKBUDDY_ELECTRON_PATH && existsSync2(process.env.WORKBUDDY_ELECTRON_PATH)) {
     return process.env.WORKBUDDY_ELECTRON_PATH;
   }
   const candidates = [
     "/Applications/WorkBuddy AI.app/Contents/MacOS/Electron",
     "/Applications/WorkBuddy.app/Contents/MacOS/Electron",
-    join11(homedir11(), "Applications/WorkBuddy AI.app/Contents/MacOS/Electron"),
-    join11(homedir11(), "Applications/WorkBuddy.app/Contents/MacOS/Electron")
+    join10(homedir10(), "Applications/WorkBuddy AI.app/Contents/MacOS/Electron"),
+    join10(homedir10(), "Applications/WorkBuddy.app/Contents/MacOS/Electron")
   ];
   for (const candidate2 of candidates) {
-    if (existsSync3(candidate2)) return candidate2;
+    if (existsSync2(candidate2)) return candidate2;
   }
   return null;
 }
 function findWorkbuddyAuthFilePath() {
-  if (process.env.WORKBUDDY_AUTH_FILE_PATH && existsSync3(process.env.WORKBUDDY_AUTH_FILE_PATH)) {
+  if (process.env.WORKBUDDY_AUTH_FILE_PATH && existsSync2(process.env.WORKBUDDY_AUTH_FILE_PATH)) {
     return process.env.WORKBUDDY_AUTH_FILE_PATH;
   }
-  const candidate2 = join11(
-    homedir11(),
+  const candidate2 = join10(
+    homedir10(),
     "Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop-ai.info"
   );
-  if (existsSync3(candidate2)) return candidate2;
+  if (existsSync2(candidate2)) return candidate2;
   return null;
 }
 function findWorkbuddyConfigDir() {
-  if (process.env.WORKBUDDY_CONFIG_DIR && existsSync3(process.env.WORKBUDDY_CONFIG_DIR)) {
+  if (process.env.WORKBUDDY_CONFIG_DIR && existsSync2(process.env.WORKBUDDY_CONFIG_DIR)) {
     return process.env.WORKBUDDY_CONFIG_DIR;
   }
   const candidates = [
-    join11(homedir11(), ".workbuddy-ai"),
-    join11(homedir11(), ".workbuddy")
+    join10(homedir10(), ".workbuddy-ai"),
+    join10(homedir10(), ".workbuddy")
   ];
   for (const candidate2 of candidates) {
-    if (existsSync3(candidate2)) return candidate2;
+    if (existsSync2(candidate2)) return candidate2;
   }
   return null;
 }
@@ -13186,7 +11973,7 @@ function extractWorkbuddySession({ force = false } = {}) {
     process.stdout.write(JSON.stringify(result));
   `;
   try {
-    const stdout = execFileSync4(
+    const stdout = execFileSync3(
       electronPath,
       ["-e", script],
       {
@@ -13239,7 +12026,7 @@ async function buildWorkbuddyMessages(request, attachments = []) {
       const content = typeof message?.content === "string" ? message.content : textFromContent(message?.content ?? message?.text ?? message?.output ?? message?.result);
       messages.push({
         role: "tool",
-        tool_call_id: firstString10(message.toolCallId, message.tool_call_id, message.id, "tool-result"),
+        tool_call_id: firstString9(message.toolCallId, message.tool_call_id, message.id, "tool-result"),
         content: content || ""
       });
       continue;
@@ -13256,10 +12043,10 @@ async function buildWorkbuddyMessages(request, attachments = []) {
             parts.push(part.text);
           } else if (part?.type === "tool-call" || part?.type === "tool_call") {
             calls.push({
-              id: firstString10(part.id, part.toolCallId, `call_${calls.length}`),
+              id: firstString9(part.id, part.toolCallId, `call_${calls.length}`),
               type: "function",
               function: {
-                name: firstString10(part.name, part.function?.name, "tool"),
+                name: firstString9(part.name, part.function?.name, "tool"),
                 arguments: typeof (part.arguments ?? part.function?.arguments) === "string" ? part.arguments ?? part.function?.arguments : JSON.stringify(part.arguments ?? part.input ?? {})
               }
             });
@@ -13272,10 +12059,10 @@ async function buildWorkbuddyMessages(request, attachments = []) {
       if (Array.isArray(message?.tool_calls)) {
         for (const tc of message.tool_calls) {
           calls.push({
-            id: firstString10(tc.id, tc.toolCallId, `call_${calls.length}`),
+            id: firstString9(tc.id, tc.toolCallId, `call_${calls.length}`),
             type: "function",
             function: {
-              name: firstString10(tc.name, tc.function?.name, "tool"),
+              name: firstString9(tc.name, tc.function?.name, "tool"),
               arguments: typeof (tc.arguments ?? tc.function?.arguments) === "string" ? tc.arguments ?? tc.function?.arguments : JSON.stringify(tc.arguments ?? tc.input ?? {})
             }
           });
@@ -13303,7 +12090,7 @@ function createWorkbuddyNativeExecutor({
   fetchImpl = fetch,
   timeoutMs = 12e4
 } = {}) {
-  const validatedEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID12 });
+  const validatedEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID10 });
   return async function* workbuddyNativeExecutor(envelope2 = {}) {
     const req = envelope2?.request ?? envelope2 ?? {};
     const { attachments, credential, signal } = envelope2;
@@ -13318,7 +12105,7 @@ function createWorkbuddyNativeExecutor({
     }
     if (!token) {
       throw nativeProviderError(
-        PROVIDER_ID12,
+        PROVIDER_ID10,
         "\u672A\u68C0\u6D4B\u5230\u672C\u5730 WorkBuddy \u767B\u5F55\u51ED\u636E\uFF0C\u8BF7\u5148\u5728 WorkBuddy \u684C\u9762\u7AEF\u767B\u5F55\u6216\u8BBE\u7F6E WORKBUDDY_ACCESS_TOKEN"
       );
     }
@@ -13327,9 +12114,9 @@ function createWorkbuddyNativeExecutor({
     const convId = randomUUID10();
     const reqId = randomUUID10();
     const msgId = randomUUID10();
-    const traceId = randomBytes5(16).toString("hex");
-    const spanId = randomBytes5(8).toString("hex");
-    const parentSpanId = randomBytes5(8).toString("hex");
+    const traceId = randomBytes4(16).toString("hex");
+    const spanId = randomBytes4(8).toString("hex");
+    const parentSpanId = randomBytes4(8).toString("hex");
     const headers = {
       Accept: "text/event-stream",
       "Content-Type": "application/json",
@@ -13373,7 +12160,7 @@ function createWorkbuddyNativeExecutor({
         signal
       },
       {
-        providerId: PROVIDER_ID12,
+        providerId: PROVIDER_ID10,
         timeoutMs,
         fetchImpl
       }
@@ -13389,7 +12176,7 @@ function createWorkbuddyNativeExecutor({
       onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
       onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "text", text: text3 } })
     });
-    for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID12 })) {
+    for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID10 })) {
       if (event?.done) continue;
       const parsed = event?.data;
       if (!parsed || typeof parsed !== "object") continue;
@@ -13397,7 +12184,7 @@ function createWorkbuddyNativeExecutor({
       const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : null;
       if (!choice) continue;
       const delta = choice.delta ?? {};
-      const reasoningDelta = firstString10(delta.reasoning_content, delta.reasoning, delta.thought);
+      const reasoningDelta = firstString9(delta.reasoning_content, delta.reasoning, delta.thought);
       if (reasoningDelta) {
         textFilter.closeText();
         while (streamEvents.length > 0) yield streamEvents.shift();
@@ -13419,8 +12206,8 @@ function createWorkbuddyNativeExecutor({
           while (streamEvents.length > 0) yield streamEvents.shift();
           const state2 = {
             index: nextIndex++,
-            id: firstString10(call.id, `call_${key}_${randomUUID10().slice(0, 8)}`),
-            name: firstString10(call.function?.name, call.name, "tool"),
+            id: firstString9(call.id, `call_${key}_${randomUUID10().slice(0, 8)}`),
+            name: firstString9(call.function?.name, call.name, "tool"),
             arguments: ""
           };
           activeTools.set(key, state2);
@@ -13492,7 +12279,7 @@ function createWorkbuddyNativeExecutor({
 }
 
 // modules/provider-workbuddy/src/driver.mjs
-var PROVIDER_ID13 = "workbuddy";
+var PROVIDER_ID11 = "workbuddy";
 var BUILTIN_WORKBUDDY_FREE_MODELS = Object.freeze([
   {
     id: "deepseek-v4.1-flash",
@@ -13531,17 +12318,17 @@ function summarizeWorkbuddyCandidate(candidate2) {
 function findLocalWorkbuddySnapshot() {
   const configDir = findWorkbuddyConfigDir();
   if (configDir) {
-    const storageDir = join12(configDir, "storage");
-    if (existsSync4(storageDir)) {
+    const storageDir = join11(configDir, "storage");
+    if (existsSync3(storageDir)) {
       try {
-        const userDirs = readdirSync2(storageDir).filter((d) => d.startsWith("user-"));
+        const userDirs = readdirSync(storageDir).filter((d) => d.startsWith("user-"));
         for (const userDir of userDirs) {
-          const scopedDir = join12(storageDir, userDir, "scoped");
-          if (existsSync4(scopedDir)) {
-            const scopes = readdirSync2(scopedDir);
+          const scopedDir = join11(storageDir, userDir, "scoped");
+          if (existsSync3(scopedDir)) {
+            const scopes = readdirSync(scopedDir);
             for (const scope of scopes) {
-              const configFile = join12(scopedDir, scope, "wb-product-config.json");
-              if (existsSync4(configFile)) {
+              const configFile = join11(scopedDir, scope, "wb-product-config.json");
+              if (existsSync3(configFile)) {
                 return configFile;
               }
             }
@@ -13552,9 +12339,9 @@ function findLocalWorkbuddySnapshot() {
     }
   }
   const appAsarProductJson = "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar/cli/product.json";
-  if (existsSync4(appAsarProductJson)) return appAsarProductJson;
+  if (existsSync3(appAsarProductJson)) return appAsarProductJson;
   const unpackedProductJson = "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/product.json";
-  if (existsSync4(unpackedProductJson)) return unpackedProductJson;
+  if (existsSync3(unpackedProductJson)) return unpackedProductJson;
   return null;
 }
 function parseWorkbuddyCatalog(data) {
@@ -13688,7 +12475,7 @@ var WorkbuddyDriver = class {
   }
   async importAccount(candidate2, context = {}) {
     const accountId = candidate2?.accountId || "workbuddy-free";
-    const ref = createCredentialRef(PROVIDER_ID13, accountId);
+    const ref = createCredentialRef(PROVIDER_ID11, accountId);
     if (context.secretStore) {
       let session = null;
       try {
@@ -13705,7 +12492,7 @@ var WorkbuddyDriver = class {
     }
     return createAccountRecord({
       accountId,
-      providerId: PROVIDER_ID13,
+      providerId: PROVIDER_ID11,
       displayName: candidate2?.displayName || "WorkBuddy Free",
       email: candidate2?.email || "workbuddy@desktop.ai",
       auth: {
@@ -13799,350 +12586,8 @@ function createWorkbuddyModule({ driver = {} } = {}) {
   });
 }
 
-// modules/provider-kilo/src/native-transport.mjs
-import { randomUUID as randomUUID11 } from "node:crypto";
-function firstString11(...values) {
-  for (const val of values) {
-    if (typeof val === "string" && val.length > 0) return val;
-  }
-  return null;
-}
-var PROVIDER_ID14 = "kilo";
-var DEFAULT_KILO_ENDPOINT = "https://ai-gateway.kilo.ai/api/v1/chat/completions";
-function contentPartText2(part) {
-  if (typeof part === "string") return part;
-  if (!part || typeof part !== "object") return "";
-  if (typeof part.text === "string") return part.text;
-  if (typeof part.content === "string") return part.content;
-  return "";
-}
-async function openAiContent3(content, attachments = null) {
-  if (typeof content === "string") {
-    if (!Array.isArray(attachments) || attachments.length === 0) {
-      return content;
-    }
-    const parts = [{ type: "text", text: content }];
-    for (const attachment of attachments) {
-      const data = await resolveImageData(attachment, attachments);
-      if (data) {
-        parts.push({
-          type: "image_url",
-          image_url: { url: `data:${data.mediaType};base64,${data.data}` }
-        });
-      }
-    }
-    return parts;
-  }
-  if (Array.isArray(content)) {
-    const parts = [];
-    for (const part of content) {
-      if (typeof part === "string") {
-        parts.push({ type: "text", text: part });
-      } else if (part && typeof part === "object") {
-        if (part.type === "text" && typeof part.text === "string") {
-          parts.push(part);
-        } else if (part.type === "image") {
-          const image = await resolveImageData(part, attachments);
-          if (image) {
-            parts.push({
-              type: "image_url",
-              image_url: { url: `data:${image.mediaType};base64,${image.data}` }
-            });
-          }
-        } else if (part.type === "image_url") {
-          parts.push(part);
-        } else {
-          const text3 = contentPartText2(part);
-          if (text3) parts.push({ type: "text", text: text3 });
-        }
-      }
-    }
-    if (Array.isArray(attachments)) {
-      for (const attachment of attachments) {
-        const data = await resolveImageData(attachment, attachments);
-        if (data) {
-          parts.push({
-            type: "image_url",
-            image_url: { url: `data:${data.mediaType};base64,${data.data}` }
-          });
-        }
-      }
-    }
-    return parts;
-  }
-  return "";
-}
-async function buildKiloMessages(request = {}, attachments = null) {
-  const result = [];
-  const rawMessages = Array.isArray(request.messages) ? request.messages : [];
-  for (const message of rawMessages) {
-    if (message?.role === "tool") {
-      result.push({
-        role: "tool",
-        tool_call_id: firstString11(message.toolCallId, message.tool_call_id, message.id, "tool-result"),
-        content: typeof message.content === "string" ? message.content : textFromContent(message.content ?? message.text ?? message.output ?? message.result)
-      });
-      continue;
-    }
-    const role = message?.role === "assistant" ? "assistant" : message?.role === "system" ? "system" : "user";
-    const content = await openAiContent3(message?.content ?? message?.text, attachments);
-    const calls = [];
-    if (Array.isArray(message?.content)) {
-      for (const part of message.content) {
-        if (part?.type === "tool-call" || part?.type === "tool_call") {
-          calls.push({
-            id: firstString11(part.id, part.toolCallId, `call_${calls.length}`),
-            type: "function",
-            function: {
-              name: firstString11(part.name, part.function?.name, "tool"),
-              arguments: typeof (part.arguments ?? part.function?.arguments) === "string" ? part.arguments ?? part.function?.arguments : JSON.stringify(part.arguments ?? part.input ?? {})
-            }
-          });
-        }
-      }
-    }
-    if (Array.isArray(message?.tool_calls)) {
-      for (const tc of message.tool_calls) {
-        calls.push({
-          id: firstString11(tc.id, tc.toolCallId, `call_${calls.length}`),
-          type: "function",
-          function: {
-            name: firstString11(tc.name, tc.function?.name, "tool"),
-            arguments: typeof (tc.arguments ?? tc.function?.arguments) === "string" ? tc.arguments ?? tc.function?.arguments : JSON.stringify(tc.arguments ?? tc.input ?? {})
-          }
-        });
-      }
-    }
-    const msgObj = {
-      role,
-      content: Array.isArray(content) && content.length === 1 && content[0]?.type === "text" ? content[0].text : content
-    };
-    if (role === "assistant" && calls.length > 0) {
-      msgObj.tool_calls = calls;
-    }
-    result.push(msgObj);
-  }
-  if (result.length === 0 && typeof request.prompt === "string" && request.prompt.trim()) {
-    result.push({
-      role: "user",
-      content: request.prompt.trim()
-    });
-  }
-  return result;
-}
-function extractReasoningDelta(delta) {
-  if (!delta || typeof delta !== "object") return null;
-  const direct = firstString11(delta.reasoning_content, delta.reasoning, delta.thought);
-  if (direct) return direct;
-  if (Array.isArray(delta.reasoning_details)) {
-    for (const item of delta.reasoning_details) {
-      if (item && item.type !== "reasoning.encrypted") {
-        const text3 = firstString11(item.text, item.content, item.summary);
-        if (text3) return text3;
-      }
-    }
-  }
-  return null;
-}
-function createKiloNativeExecutor({
-  endpoint: endpoint2 = DEFAULT_KILO_ENDPOINT,
-  apiKey = null,
-  fetchImpl = fetch,
-  timeoutMs = 12e4
-} = {}) {
-  const validatedEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID14 });
-  return async function* kiloNativeExecutor(envelope2 = {}) {
-    const req = envelope2 && typeof envelope2 === "object" && "request" in envelope2 ? envelope2.request ?? {} : envelope2 ?? {};
-    const attachments = envelope2?.attachments ?? req?.attachments;
-    const credential = envelope2?.credential ?? req?.credential;
-    const signal = envelope2?.signal ?? req?.signal;
-    const token = apiKey ?? (credential?.apiKey && credential.apiKey !== "free-tier" ? credential.apiKey : null) ?? (credential?.token && credential.token !== "free-tier" ? credential.token : null) ?? (credential?.accessToken && credential.accessToken !== "free-tier" ? credential.accessToken : null) ?? process.env.KILO_API_KEY ?? null;
-    const messages = await buildKiloMessages(req, attachments);
-    const headers = {
-      Accept: "text/event-stream",
-      "Content-Type": "application/json",
-      ...token ? { Authorization: `Bearer ${token}` } : {}
-    };
-    const rawEffort = req.reasoningEffort ?? req.reasoning_effort;
-    let reasoningEffort = null;
-    if (typeof rawEffort === "string" && rawEffort.length > 0) {
-      const lower = rawEffort.toLowerCase();
-      if (lower === "none" || lower === "off") {
-        reasoningEffort = "none";
-      } else if (lower === "minimal") {
-        reasoningEffort = "low";
-      } else {
-        reasoningEffort = lower;
-      }
-    }
-    const tools = buildOpenAiTools(req.tools);
-    const body = {
-      model: req.model ?? "kilo-auto/free",
-      messages,
-      stream: true,
-      ...typeof req.temperature === "number" ? { temperature: req.temperature } : {},
-      ...typeof req.maxTokens === "number" ? { max_tokens: req.maxTokens } : {},
-      ...reasoningEffort && reasoningEffort !== "none" ? { reasoning_effort: reasoningEffort, reasoning: { effort: reasoningEffort } } : {},
-      ...tools ? { tools } : {}
-    };
-    let response;
-    try {
-      response = await fetchNativeResponse(
-        validatedEndpoint,
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body),
-          signal
-        },
-        {
-          providerId: PROVIDER_ID14,
-          timeoutMs,
-          fetchImpl
-        }
-      );
-    } catch (err) {
-      if (!req.probe && !req.noFallback && body.model !== "kilo-auto/free" && (err?.status === 503 || err?.status === 502 || err?.status === 504 || err?.status === 404)) {
-        const fallbackBody = { ...body, model: "kilo-auto/free" };
-        response = await fetchNativeResponse(
-          validatedEndpoint,
-          {
-            method: "POST",
-            headers,
-            body: JSON.stringify(fallbackBody),
-            signal
-          },
-          {
-            providerId: PROVIDER_ID14,
-            timeoutMs,
-            fetchImpl
-          }
-        );
-      } else {
-        throw err;
-      }
-    }
-    const streamEvents = [];
-    let nextIndex = 1;
-    let reasoning = null;
-    let rawUsage = null;
-    let stop = "stop";
-    let probeYielded = false;
-    const activeTools = /* @__PURE__ */ new Map();
-    const textFilter = new DsmlStreamFilter({
-      onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "text" }),
-      onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
-      onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "text", text: text3 } })
-    });
-    for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID14 })) {
-      if (event?.done) continue;
-      const parsed = event?.data;
-      if (!parsed || typeof parsed !== "object") continue;
-      if (parsed.usage) rawUsage = parsed.usage;
-      const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : null;
-      if (!choice) continue;
-      if (req.probe && !probeYielded) {
-        probeYielded = true;
-        yield { type: "text-delta", index: 0, text: " " };
-      }
-      const delta = choice.delta ?? {};
-      const reasoningDelta = extractReasoningDelta(delta);
-      if (reasoningDelta) {
-        textFilter.closeText();
-        while (streamEvents.length > 0) yield streamEvents.shift();
-        if (!reasoning) {
-          reasoning = { index: nextIndex++, text: "" };
-          yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
-        }
-        reasoning.text += reasoningDelta;
-        yield { type: "reasoning-delta", index: reasoning.index, text: reasoningDelta };
-      }
-      for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
-        const key = Number(call.index ?? activeTools.size);
-        if (!activeTools.has(key)) {
-          if (reasoning) {
-            yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-            reasoning = null;
-          }
-          textFilter.closeText();
-          while (streamEvents.length > 0) yield streamEvents.shift();
-          const state2 = {
-            index: nextIndex++,
-            id: firstString11(call.id, `call_${key}_${randomUUID11().slice(0, 8)}`),
-            name: firstString11(call.function?.name, call.name, "tool"),
-            arguments: ""
-          };
-          activeTools.set(key, state2);
-          yield { type: "block-start", index: state2.index, blockType: "tool-call" };
-        }
-        const state = activeTools.get(key);
-        const argumentDelta = call.function?.arguments ?? call.arguments ?? "";
-        if (call.id) state.id = call.id;
-        if (call.function?.name) state.name = call.function.name;
-        state.arguments += argumentDelta;
-        if (argumentDelta) {
-          yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: argumentDelta };
-        }
-      }
-      const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
-      if (content) {
-        if (reasoning) {
-          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-          reasoning = null;
-        }
-        textFilter.push(content, () => nextIndex++);
-        while (streamEvents.length > 0) yield streamEvents.shift();
-      }
-      if (choice.finish_reason) {
-        stop = choice.finish_reason;
-      }
-    }
-    if (reasoning) {
-      yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-      reasoning = null;
-    }
-    const dsmlResult = textFilter.flush(() => nextIndex++);
-    while (streamEvents.length > 0) yield streamEvents.shift();
-    if (activeTools.size > 0) {
-      for (const state of activeTools.values()) {
-        yield {
-          type: "block-end",
-          index: state.index,
-          block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments || "{}" }
-        };
-      }
-      stop = "tool_calls";
-    } else if (dsmlResult?.toolCalls?.length > 0) {
-      for (const dsml of dsmlResult.toolCalls) {
-        const toolIndex = nextIndex++;
-        const toolId = `call_${randomUUID11().slice(0, 8)}`;
-        yield { type: "block-start", index: toolIndex, blockType: "tool-call" };
-        yield { type: "tool-call-delta", index: toolIndex, id: toolId, name: dsml.name, argumentsDelta: dsml.arguments };
-        yield {
-          type: "block-end",
-          index: toolIndex,
-          block: { type: "tool-call", id: toolId, name: dsml.name, arguments: dsml.arguments }
-        };
-      }
-      stop = "tool_calls";
-    }
-    if (rawUsage) {
-      yield {
-        type: "usage",
-        usage: normalizeUsage(rawUsage)
-      };
-    }
-    yield {
-      type: "finish",
-      reason: finishReason(stop),
-      ...rawUsage ? { usage: normalizeUsage(rawUsage) } : {}
-    };
-  };
-}
-
 // modules/provider-kilo/src/driver.mjs
-var PROVIDER_ID15 = "kilo";
-var DEFAULT_CATALOG_URL2 = "https://api.kilo.ai/api/gateway/models";
+var PROVIDER_ID12 = "kilo";
 var STANDARD_KILO_REASONING_EFFORTS = Object.freeze([
   { id: "low", name: "Low", description: "\u5FEB\u901F\u601D\u8003\uFF0C\u4FDD\u7559\u57FA\u7840\u63A8\u7406" },
   { id: "medium", name: "Medium", description: "\u6807\u51C6\u601D\u8003\uFF0C\u5E73\u8861\u63A8\u7406\u6DF1\u5EA6\u4E0E\u54CD\u5E94\u901F\u5EA6" },
@@ -14247,219 +12692,15 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
     free: true
   }
 ]);
-function parseKiloCatalog(data) {
-  const items = Array.isArray(data?.data) ? data.data : [];
-  if (!items.length) {
-    return { models: [...BUILTIN_KILO_FREE_MODELS] };
-  }
-  const result = [];
-  const seen = /* @__PURE__ */ new Set();
-  const builtinMap = new Map(BUILTIN_KILO_FREE_MODELS.map((m) => [m.id, m]));
-  for (const item of items) {
-    if (!item?.isFree) continue;
-    const id = stringValue(item?.id);
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    const builtin = builtinMap.get(id);
-    const name2 = stringValue(item?.name) ?? builtin?.name ?? id;
-    const contextWindow = resolveContextWindowFromModel(item, builtin?.contextWindow ?? 256e3);
-    const maxTokens = resolveMaxTokensFromModel(item, builtin?.maxTokens ?? 32768);
-    const inputModalities = Array.isArray(item?.architecture?.input_modalities) ? [...item.architecture.input_modalities] : builtin?.inputModalities ? [...builtin.inputModalities] : ["text"];
-    const reasoning = resolveReasoningFromModel(item) ?? builtin?.reasoning;
-    result.push({
-      id,
-      name: name2,
-      contextWindow,
-      maxTokens,
-      inputModalities,
-      ...reasoning ? { reasoning } : {},
-      free: true
-    });
-  }
-  if (result.length === 0) {
-    return { models: [...BUILTIN_KILO_FREE_MODELS] };
-  }
-  return { models: result };
-}
-function createKiloCatalogLoader({
-  url = DEFAULT_CATALOG_URL2,
-  fetchImpl = fetch,
-  cacheTtlMs = 3e5
-} = {}) {
-  let cached = null;
-  let cachedAt = 0;
-  return async function kiloCatalogLoader({ force = false } = {}) {
-    const now = Date.now();
-    if (!force && cached && now - cachedAt < cacheTtlMs) {
-      return cached;
-    }
-    try {
-      assertSecureEndpointUrl(url, { providerId: PROVIDER_ID15 });
-      const data = await fetchJson(url, {
-        headers: { Accept: "application/json" },
-        fetchImpl,
-        timeoutMs: 1e4
-      });
-      const parsed = parseKiloCatalog(data);
-      if (parsed.models.length > 0) {
-        cached = parsed;
-        cachedAt = now;
-        return cached;
-      }
-    } catch {
-    }
-    cached = { models: [...BUILTIN_KILO_FREE_MODELS] };
-    cachedAt = now;
-    return cached;
-  };
-}
 function summarizeKiloCandidate(candidate2) {
-  return candidate2?.displayName ?? candidate2?.email ?? candidate2?.accountId ?? "Kilo Free Tier";
-}
-var KiloDriver = class {
-  #catalogLoader;
-  #requestExecutor;
-  constructor(options = {}) {
-    this.#catalogLoader = options.catalogLoader ?? createKiloCatalogLoader(options);
-    this.#requestExecutor = options.requestExecutor ?? createKiloNativeExecutor(options);
-    this.catalogLoader = this.#catalogLoader;
-    this.requestExecutor = this.#requestExecutor;
-  }
-  async catalog(account, context = {}) {
-    return this.#catalogLoader({ force: Boolean(context.force) });
-  }
-  async getCatalog(context = {}) {
-    return this.#catalogLoader({ force: Boolean(context?.force) });
-  }
-  async getQuota() {
-    return createQuotaSnapshot({
-      remaining: 100,
-      limit: 100,
-      unit: "requests",
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-    });
-  }
-  async discover() {
-    return {
-      candidates: [
-        {
-          candidateId: "kilo-free",
-          accountId: "kilo-free",
-          displayName: "Kilo Free Tier",
-          email: "free@kilo.ai",
-          subscription: {
-            plan: "Free Frontier Router",
-            status: "active"
-          },
-          quota: {
-            remaining: 100,
-            limit: 100,
-            unit: "requests",
-            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-          },
-          source: "kilo_free_tier",
-          health: {
-            status: "healthy"
-          }
-        }
-      ],
-      source: "kilo_free_tier",
-      diagnostics: []
-    };
-  }
-  async importAccount(candidate2, context = {}) {
-    const accountId = candidate2?.accountId || "kilo-free";
-    const ref = createCredentialRef(PROVIDER_ID15, accountId);
-    if (context.secretStore) {
-      await context.secretStore.write(ref, {
-        type: "kilo_free",
-        access: "free-tier"
-      }).catch(() => {
-      });
-    }
-    return createAccountRecord({
-      accountId,
-      providerId: PROVIDER_ID15,
-      displayName: candidate2?.displayName || "Kilo Free Tier",
-      email: candidate2?.email || "free@kilo.ai",
-      auth: {
-        kind: "kilo_free",
-        credentialRef: ref
-      },
-      subscription: {
-        plan: candidate2?.subscription?.plan || "Free Frontier Router",
-        status: "active"
-      },
-      quota: createQuotaSnapshot(candidate2?.quota || {
-        remaining: 100,
-        limit: 100,
-        unit: "requests"
-      }),
-      health: {
-        status: "healthy"
-      }
-    });
-  }
-  async getActiveSession() {
-    return this.discover().then((res) => Array.isArray(res?.candidates) ? res.candidates[0] : null);
-  }
-  async refreshAccount(account) {
-    return {
-      quota: createQuotaSnapshot({
-        remaining: 100,
-        limit: 100,
-        unit: "requests",
-        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-      }),
-      health: {
-        status: "healthy",
-        lastCheckedAt: (/* @__PURE__ */ new Date()).toISOString()
-      }
-    };
-  }
-  async invoke(requestOrEnvelope, invocation, context = {}) {
-    const isEnvelope = requestOrEnvelope && typeof requestOrEnvelope === "object" && "request" in requestOrEnvelope;
-    const request = isEnvelope ? requestOrEnvelope.request : requestOrEnvelope;
-    const inv = isEnvelope ? requestOrEnvelope.invocation : invocation;
-    const ctx = isEnvelope ? requestOrEnvelope.context ?? {} : context;
-    const executor = ctx?.requestExecutor ?? this.#requestExecutor;
-    let credential = null;
-    if (ctx?.secretStore && inv?.auth?.credentialRef) {
-      credential = await ctx.secretStore.read(inv.auth.credentialRef).catch(() => null);
-    }
-    if (!credential) {
-      credential = isEnvelope ? requestOrEnvelope.credential ?? inv?.auth ?? { access: "free-tier" } : inv?.auth ?? { access: "free-tier" };
-    }
-    return executor({
-      request,
-      invocation: inv,
-      context: ctx,
-      attachments: ctx?.attachments ?? inv?.attachments ?? (isEnvelope ? requestOrEnvelope.attachments : void 0),
-      credential,
-      signal: ctx?.signal ?? inv?.signal ?? (isEnvelope ? requestOrEnvelope.signal : void 0)
-    });
-  }
-  async stream(request, invocation, context = {}) {
-    return this.invoke(request, invocation, context);
-  }
-};
-function createKiloDriver(options = {}) {
-  return new KiloDriver(options);
-}
-
-// modules/provider-kilo/src/index.mjs
-function createKiloModule({ driver = {} } = {}) {
-  return defineProviderModule({
-    id: "kilo",
-    displayName: "Kilo Free",
-    capabilities: [
-      "quota",
-      "catalog",
-      "invoke",
-      "stream"
-    ],
-    driver
-  });
+  return {
+    providerId: PROVIDER_ID12,
+    candidateId: candidate2?.candidateId ?? "kilo-free",
+    accountId: candidate2?.accountId ?? "kilo-free",
+    displayName: candidate2?.displayName ?? "Kilo Free Tier",
+    email: candidate2?.email ?? "free@kilo.ai",
+    source: candidate2?.source ?? "kilo_free_tier"
+  };
 }
 
 // packages/runtime/src/dockyard-runtime.mjs
@@ -14630,15 +12871,6 @@ function createDefaultProviderEntries(options = {}) {
       driver: options.cursorDriver
     },
     {
-      module: createOpencodeModule({
-        driver: options.opencodeDriver ?? createOpencodeDriver({
-          ...withRequestExecutor("opencode", options.opencode, requestExecutors),
-          ...catalogLoaders.opencode ? { catalogLoader: catalogLoaders.opencode } : {}
-        })
-      }),
-      driver: options.opencodeDriver
-    },
-    {
       module: createWorkbuddyModule({
         driver: options.workbuddyDriver ?? createWorkbuddyDriver({
           ...withRequestExecutor("workbuddy", options.workbuddy, requestExecutors),
@@ -14646,15 +12878,6 @@ function createDefaultProviderEntries(options = {}) {
         })
       }),
       driver: options.workbuddyDriver
-    },
-    {
-      module: createKiloModule({
-        driver: options.kiloDriver ?? createKiloDriver({
-          ...withRequestExecutor("kilo", options.kilo, requestExecutors),
-          ...catalogLoaders.kilo ? { catalogLoader: catalogLoaders.kilo } : {}
-        })
-      }),
-      driver: options.kiloDriver
     }
   ];
 }
@@ -14736,6 +12959,22 @@ var DockyardRuntime = class {
     if (this.#initPromise) return this.#initPromise;
     this.#initPromise = (async () => {
       const state = await this.stateStore.load();
+      if (state?.pools?.opencode || state?.pools?.kilo || state?.modelSelection?.providers?.opencode || state?.modelSelection?.providers?.kilo) {
+        if (typeof this.stateStore.update === "function") {
+          await this.stateStore.update((latest) => {
+            if (latest?.pools) {
+              delete latest.pools.opencode;
+              delete latest.pools.kilo;
+            }
+            if (latest?.modelSelection?.providers) {
+              delete latest.modelSelection.providers.opencode;
+              delete latest.modelSelection.providers.kilo;
+            }
+            return latest;
+          }).catch(() => {
+          });
+        }
+      }
       await this.contextWindowOverrides.ready();
       await this.modelSelection.ready();
       const autoImported = /* @__PURE__ */ new Set();
@@ -14761,7 +13000,7 @@ var DockyardRuntime = class {
         }
         const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
         const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
-        if ((providerId === "opencode" || providerId === "workbuddy" || providerId === "kilo") && pool.list().length === 0 || hasExpiredOfficialSession && hasNoEligible) {
+        if (providerId === "workbuddy" && pool.list().length === 0 || hasExpiredOfficialSession && hasNoEligible) {
           try {
             const discovery = await (entry.module?.discover?.(providerContext(this)) ?? entry.driver?.discover?.(providerContext(this)));
             const candidate2 = Array.isArray(discovery?.candidates) ? discovery.candidates[0] : Array.isArray(discovery) ? discovery[0] : null;
@@ -14782,14 +13021,8 @@ var DockyardRuntime = class {
         if (!this.runtime.has(providerId)) await this.runtime.register(entry.module);
         await this.bridge.mountProvider(entry.module, pool);
       }
-      if (this.#entries.get("opencode")?.pool?.list()?.length > 0) {
-        autoImported.add("opencode");
-      }
       if (this.#entries.get("workbuddy")?.pool?.list()?.length > 0) {
         autoImported.add("workbuddy");
-      }
-      if (this.#entries.get("kilo")?.pool?.list()?.length > 0) {
-        autoImported.add("kilo");
       }
       if (autoImported.size > 0) {
         await this.#saveState([...autoImported]).catch(() => {
@@ -15293,7 +13526,7 @@ var DockyardRuntime = class {
 // packages/dsh-plugin/src/codex-transport.mjs
 import { access, readFile as readFile7 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname as dirname5, join as join13, resolve } from "node:path";
+import { dirname as dirname5, join as join12, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 var activeCodexModels = /* @__PURE__ */ new Map();
 function recordCodexModels(models) {
@@ -15339,15 +13572,15 @@ async function findPackageRoot(startDirectory, packageName) {
   const packageParts = packageName.split("/");
   let current = resolve(startDirectory);
   while (true) {
-    const candidate2 = join13(current, "node_modules", ...packageParts);
-    if (await isFile(join13(candidate2, "package.json"))) return candidate2;
+    const candidate2 = join12(current, "node_modules", ...packageParts);
+    if (await isFile(join12(candidate2, "package.json"))) return candidate2;
     const parent = dirname5(current);
     if (parent === current) return null;
     current = parent;
   }
 }
 async function packageImportUrl(packageRoot, subpath = null) {
-  const packageJson = JSON.parse(await readFile7(join13(packageRoot, "package.json"), "utf8"));
+  const packageJson = JSON.parse(await readFile7(join12(packageRoot, "package.json"), "utf8"));
   const exports = packageJson.exports;
   let target = null;
   if (!subpath) {
@@ -15369,7 +13602,7 @@ async function packageImportUrl(packageRoot, subpath = null) {
   if (typeof target !== "string") {
     throw new Error(`Cannot resolve ${subpath ?? "."} from ${packageRoot}`);
   }
-  return pathToFileURL(join13(packageRoot, target)).href;
+  return pathToFileURL(join12(packageRoot, target)).href;
 }
 async function importFromDshInstall(moduleAnchor) {
   const anchor = moduleAnchor ?? process.env.DOCKYARD_DSH_CLI_PATH ?? process.argv[1] ?? import.meta.url;
@@ -15451,7 +13684,7 @@ function createCodexDshCatalogLoader({ moduleAnchor = null, ...options } = {}) {
 }
 
 // packages/dsh-plugin/src/dockyard-service.mjs
-import { spawn as spawn7 } from "node:child_process";
+import { spawn as spawn6 } from "node:child_process";
 var DEFAULT_REFRESH_INTERVAL_MS = 5 * 60 * 1e3;
 var AUTH_POLL_INTERVAL_MS = 750;
 var AUTH_URL_WAIT_MS = 2e3;
@@ -15533,7 +13766,7 @@ function commandError(text3) {
 function openDefaultBrowser(url) {
   if (process.platform !== "darwin" || !url) return;
   try {
-    const child = spawn7("open", [url], { detached: true, stdio: "ignore" });
+    const child = spawn6("open", [url], { detached: true, stdio: "ignore" });
     child.unref();
   } catch {
   }
@@ -16087,7 +14320,7 @@ function createDockyardCredentialStore(credentials, fallback = null) {
 // packages/dsh-plugin/src/native-key-pool-host.mjs
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAgentLoopRequest, markAgentLoopRequest } from "@deepseek-ai/dsh-llm";
-import { join as join14 } from "node:path";
+import { join as join13 } from "node:path";
 
 // packages/dsh-plugin/src/native-usage.mjs
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -16367,7 +14600,7 @@ var NativeKeyPoolHost = class {
     this.logger = logger ?? console;
     this.contextWindowOverrides = contextWindowOverrides;
     this.stateStore = stateStore ?? new JsonStateStore({
-      filePath: join14(defaultDockyardHome(), "native-key-pools.json")
+      filePath: join13(defaultDockyardHome(), "native-key-pools.json")
     });
     this.readyPromise = this.loadState();
   }
@@ -16762,9 +14995,7 @@ function apply(ctx, config = {}) {
       claude: runtimeOptions.requestExecutors?.claude ?? createClaudeNativeExecutor(runtimeOptions.claude ?? {}),
       cursor: runtimeOptions.requestExecutors?.cursor ?? createCursorNativeExecutor(runtimeOptions.cursor ?? {}),
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
-      opencode: runtimeOptions.requestExecutors?.opencode ?? createOpencodeNativeExecutor(runtimeOptions.opencode ?? {}),
-      workbuddy: runtimeOptions.requestExecutors?.workbuddy ?? createWorkbuddyNativeExecutor(runtimeOptions.workbuddy ?? {}),
-      kilo: runtimeOptions.requestExecutors?.kilo ?? createKiloNativeExecutor(runtimeOptions.kilo ?? {})
+      workbuddy: runtimeOptions.requestExecutors?.workbuddy ?? createWorkbuddyNativeExecutor(runtimeOptions.workbuddy ?? {})
     };
     runtimeOptions.catalogLoaders = {
       ...runtimeOptions.catalogLoaders ?? {},
@@ -16777,12 +15008,7 @@ function apply(ctx, config = {}) {
       }),
       claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
-      opencode: runtimeOptions.catalogLoaders?.opencode ?? createOpencodeCatalogLoader({
-        ...runtimeOptions.opencode ?? {},
-        registryLoader: modelRegistryLoader
-      }),
-      workbuddy: runtimeOptions.catalogLoaders?.workbuddy ?? createWorkbuddyCatalogLoader(runtimeOptions.workbuddy ?? {}),
-      kilo: runtimeOptions.catalogLoaders?.kilo ?? createKiloCatalogLoader(runtimeOptions.kilo ?? {})
+      workbuddy: runtimeOptions.catalogLoaders?.workbuddy ?? createWorkbuddyCatalogLoader(runtimeOptions.workbuddy ?? {})
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders).filter(([, loader]) => typeof loader === "function");
@@ -16796,7 +15022,7 @@ function apply(ctx, config = {}) {
         providers.filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length > 0).map((provider) => provider.providerId)
       );
       const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
-      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || providerId === "opencode" || providerId === "workbuddy" || providerId === "kilo" || connected.has(providerId)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
+      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || providerId === "workbuddy" || connected.has(providerId)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
     });
@@ -16892,8 +15118,8 @@ function apply(ctx, config = {}) {
                   res.end("Forbidden");
                   return;
                 }
-                const filePath = join15(process.cwd(), "artifacts", cleanPath);
-                if (!existsSync5(filePath)) {
+                const filePath = join14(process.cwd(), "artifacts", cleanPath);
+                if (!existsSync4(filePath)) {
                   res.writeHead(404);
                   res.end("Not Found");
                   return;

@@ -1513,7 +1513,7 @@ test("Grok catalog loader caches a local provider response", async () => {
   });
   const first = await loader();
   const second = await loader();
-  assert.deepEqual(first.models, [{ id: "grok-live", name: "grok-live" }]);
+  assert.ok(first.models.some((m) => m.id === "grok-live"));
   assert.strictEqual(first, second);
   assert.equal(reads, 1);
 });

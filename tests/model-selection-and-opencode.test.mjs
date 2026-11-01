@@ -68,7 +68,7 @@ test("OpenCode provider module manifests and catalog parsing", async () => {
   assert.equal(parsed.models[1].name, "test-free (Free)");
 });
 
-test("DockyardRuntime auto-imports OpenCode free account and LLM adapter filters by modelSelection", async () => {
+test("DockyardRuntime auto-imports WorkBuddy free account and LLM adapter filters by modelSelection", async () => {
   const { DockyardRuntime } = await import("../packages/runtime/src/dockyard-runtime.mjs");
   const { createDockyardLlmAdapter } = await import("../packages/dsh-bridge/src/llm-adapter.mjs");
 
@@ -79,23 +79,23 @@ test("DockyardRuntime auto-imports OpenCode free account and LLM adapter filters
   await runtime.init();
 
   const snapshot = runtime.snapshot();
-  const opencodeEntry = snapshot.providers.find((p) => p.providerId === "opencode");
-  assert.ok(opencodeEntry, "OpenCode provider should be present");
-  assert.equal(opencodeEntry.accounts.length, 1, "OpenCode should auto-provision the free account");
-  assert.equal(opencodeEntry.accounts[0].accountId, "opencode-free");
+  const wbEntry = snapshot.providers.find((p) => p.providerId === "workbuddy");
+  assert.ok(wbEntry, "WorkBuddy provider should be present");
+  assert.equal(wbEntry.accounts.length, 1, "WorkBuddy should auto-provision the free account");
+  assert.equal(wbEntry.accounts[0].accountId, "workbuddy-free");
 
-  const adapter = createDockyardLlmAdapter({ runtime, providerIds: ["opencode"] });
+  const adapter = createDockyardLlmAdapter({ runtime, providerIds: ["workbuddy"] });
 
   // Initially all models returned
-  const allModels = await adapter.listModels("opencode");
-  assert.ok(allModels.length > 5, "OpenCode should list all available models by default");
+  const allModels = await adapter.listModels("workbuddy");
+  assert.ok(allModels.length >= 2, "WorkBuddy should list available models by default");
 
   // Restrict to subset
-  const subset = [allModels[0].id, allModels[1].id];
-  await runtime.setModelSelection("opencode", subset);
+  const subset = [allModels[0].id];
+  await runtime.setModelSelection("workbuddy", subset);
 
-  const filteredModels = await adapter.listModels("opencode");
-  assert.equal(filteredModels.length, 2);
+  const filteredModels = await adapter.listModels("workbuddy");
+  assert.equal(filteredModels.length, 1);
   assert.deepEqual(filteredModels.map((m) => m.id), subset);
 });
 

@@ -215,7 +215,14 @@ export function createKiloCatalogLoader({
 }
 
 export function summarizeKiloCandidate(candidate) {
-  return candidate?.displayName ?? candidate?.email ?? candidate?.accountId ?? "Kilo Free Tier";
+  return {
+    providerId: PROVIDER_ID,
+    candidateId: candidate?.candidateId ?? "kilo-free",
+    accountId: candidate?.accountId ?? "kilo-free",
+    displayName: candidate?.displayName ?? "Kilo Free Tier",
+    email: candidate?.email ?? "free@kilo.ai",
+    source: candidate?.source ?? "kilo_free_tier",
+  };
 }
 
 export class KiloDriver {

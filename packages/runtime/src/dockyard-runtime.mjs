@@ -229,15 +229,6 @@ export function createDefaultProviderEntries(options = {}) {
       driver: options.cursorDriver,
     },
     {
-      module: createOpencodeModule({
-        driver: options.opencodeDriver ?? createOpencodeDriver({
-          ...withRequestExecutor("opencode", options.opencode, requestExecutors),
-          ...(catalogLoaders.opencode ? { catalogLoader: catalogLoaders.opencode } : {}),
-        }),
-      }),
-      driver: options.opencodeDriver,
-    },
-    {
       module: createWorkbuddyModule({
         driver: options.workbuddyDriver ?? createWorkbuddyDriver({
           ...withRequestExecutor("workbuddy", options.workbuddy, requestExecutors),
@@ -245,15 +236,6 @@ export function createDefaultProviderEntries(options = {}) {
         }),
       }),
       driver: options.workbuddyDriver,
-    },
-    {
-      module: createKiloModule({
-        driver: options.kiloDriver ?? createKiloDriver({
-          ...withRequestExecutor("kilo", options.kilo, requestExecutors),
-          ...(catalogLoaders.kilo ? { catalogLoader: catalogLoaders.kilo } : {}),
-        }),
-      }),
-      driver: options.kiloDriver,
     },
   ];
 }
@@ -341,6 +323,21 @@ export class DockyardRuntime {
     if (this.#initPromise) return this.#initPromise;
     this.#initPromise = (async () => {
       const state = await this.stateStore.load();
+      if (state?.pools?.opencode || state?.pools?.kilo || state?.modelSelection?.providers?.opencode || state?.modelSelection?.providers?.kilo) {
+        if (typeof this.stateStore.update === "function") {
+          await this.stateStore.update((latest) => {
+            if (latest?.pools) {
+              delete latest.pools.opencode;
+              delete latest.pools.kilo;
+            }
+            if (latest?.modelSelection?.providers) {
+              delete latest.modelSelection.providers.opencode;
+              delete latest.modelSelection.providers.kilo;
+            }
+            return latest;
+          }).catch(() => {});
+        }
+      }
       await this.contextWindowOverrides.ready();
       await this.modelSelection.ready();
       const autoImported = new Set();
@@ -366,7 +363,7 @@ export class DockyardRuntime {
         }
         const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
         const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
-        if (((providerId === "opencode" || providerId === "workbuddy" || providerId === "kilo") && pool.list().length === 0) || (hasExpiredOfficialSession && hasNoEligible)) {
+        if ((providerId === "workbuddy" && pool.list().length === 0) || (hasExpiredOfficialSession && hasNoEligible)) {
           try {
             const discovery = await (entry.module?.discover?.(providerContext(this)) ?? entry.driver?.discover?.(providerContext(this)));
             const candidate = Array.isArray(discovery?.candidates)
@@ -397,14 +394,8 @@ export class DockyardRuntime {
         if (!this.runtime.has(providerId)) await this.runtime.register(entry.module);
         await this.bridge.mountProvider(entry.module, pool);
       }
-      if (this.#entries.get("opencode")?.pool?.list()?.length > 0) {
-        autoImported.add("opencode");
-      }
       if (this.#entries.get("workbuddy")?.pool?.list()?.length > 0) {
         autoImported.add("workbuddy");
-      }
-      if (this.#entries.get("kilo")?.pool?.list()?.length > 0) {
-        autoImported.add("kilo");
       }
       if (autoImported.size > 0) {
         await this.#saveState([...autoImported]).catch(() => {});

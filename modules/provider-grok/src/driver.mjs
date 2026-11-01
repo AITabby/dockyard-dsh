@@ -560,15 +560,22 @@ export function createGrokCatalogLoader({
       }
 
       if (discoveredModels.length > 0) {
-        let finalModels = discoveredModels;
-        if (source === "official_grok_models_api") {
-          const modelsMap = new Map();
-          for (const m of discoveredModels) modelsMap.set(m.id, { ...m });
-          for (const m of BUILTIN_GROK_MODELS) {
-            if (!modelsMap.has(m.id)) modelsMap.set(m.id, { ...m });
+        const modelsMap = new Map();
+        for (const m of discoveredModels) modelsMap.set(m.id, { ...m });
+        for (const m of BUILTIN_GROK_MODELS) {
+          if (!modelsMap.has(m.id)) {
+            modelsMap.set(m.id, { ...m });
+          } else {
+            const existing = modelsMap.get(m.id);
+            modelsMap.set(m.id, {
+              ...m,
+              ...existing,
+              reasoning: existing.reasoning ?? m.reasoning,
+              inputModalities: existing.inputModalities ?? m.inputModalities,
+            });
           }
-          finalModels = [...modelsMap.values()];
         }
+        const finalModels = [...modelsMap.values()];
         cached = {
           models: finalModels,
           source,

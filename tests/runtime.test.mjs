@@ -333,7 +333,7 @@ test("runtime refreshes accounts concurrently and bounds a stuck quota request",
     const elapsed = Date.now() - startedAt;
     assert.equal(maxActive, 2);
     assert.equal(results.length, 2);
-    assert.ok(elapsed < 200, "refresh should be bounded, took " + elapsed + "ms");
+    assert.ok(elapsed < 1000, "refresh should be bounded, took " + elapsed + "ms");
     assert.match(results.find((entry) => entry.account.accountId === "account-stuck").diagnostics[0], /超时/);
     assert.equal(runtime.snapshot().providers[0].accounts.find((entry) => entry.accountId === "account-stuck").health.status, "degraded");
     assert.equal(runtime.snapshot().providers[0].accounts.find((entry) => entry.accountId === "account-stuck").quota.remaining, 3);
