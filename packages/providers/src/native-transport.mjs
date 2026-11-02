@@ -270,6 +270,13 @@ export async function fetchNativeResponse(url, init = {}, {
     if (error?.name === "AbortError" && timedOut && !error.providerId) {
       throw timeoutError;
     }
+    if (/\bfetch failed\b/i.test(String(error?.message ?? "")) || error?.cause?.code === "ECONNRESET" || error?.cause?.code === "ETIMEDOUT") {
+      const err = nativeProviderError(providerId, `网络连接异常 (${error.message})，可能由于网络抖动或代理断开`, {
+        code: "TRANSPORT",
+      });
+      err.cause = error;
+      throw err;
+    }
     throw error;
   } finally {
     if (!handedOff) cleanup();
@@ -668,6 +675,23 @@ export function parseDsmlCalls(text) {
 export function stripDsmlCalls(text) {
   if (typeof text !== "string") return "";
   return text.replace(/[<＜][ |｜]*DSML[ |｜]*calls[>＞][\s\S]*?(?:[<＜][\/／][ |｜]*DSML[ |｜]*calls[>＞]|$)/gi, "").trim();
+}
+
+export function sanitizeToolCallId(rawId, maxLength = 64) {
+  if (!rawId || typeof rawId !== "string") return "call_tool";
+  if (rawId.includes("|")) {
+    const separatorIndex = rawId.indexOf("|");
+    const callPart = rawId.slice(0, separatorIndex);
+    const itemPart = rawId.slice(separatorIndex + 1);
+    const cleanCall = callPart.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const cleanItem = itemPart.replace(/[^a-zA-Z0-9_-]/g, "_");
+    if (!cleanItem) return cleanCall.slice(0, maxLength) || "call_tool";
+    const itemSuffix = cleanItem.slice(-16);
+    const callPrefix = cleanCall.slice(0, Math.max(1, maxLength - 1 - itemSuffix.length));
+    return `${callPrefix}_${itemSuffix}`;
+  }
+  const clean = rawId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return clean.slice(0, maxLength) || "call_tool";
 }
 
 export class DsmlStreamFilter {

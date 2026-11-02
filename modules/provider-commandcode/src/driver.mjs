@@ -173,6 +173,10 @@ function findLocalCommandCodeCatalogFile() {
   return null;
 }
 
+const KNOWN_RETIRED_COMMANDCODE_MODELS = new Set([
+  "poolside/laguna-s-2.1-free",
+]);
+
 export function parseCommandCodeCatalog(data) {
   let rawModels = [];
   if (Array.isArray(data?.data)) {
@@ -200,7 +204,15 @@ export function parseCommandCodeCatalog(data) {
   for (const item of rawModels) {
     const id = stringValue(item?.id);
     if (!id || seen.has(id)) continue;
+    if (item?.hidden === true || item?.deprecated === true || item?.disabled === true || KNOWN_RETIRED_COMMANDCODE_MODELS.has(id)) {
+      continue;
+    }
     seen.add(id);
+
+    const isFree = Boolean(
+      (item?.display?.badge === "free" || (item?.pricing && item.pricing.inputCost === 0 && item.pricing.outputCost === 0) || id.endsWith(":free"))
+      && !(item?.pricing && (item.pricing.inputCost > 0 || item.pricing.outputCost > 0))
+    );
 
     const baseName = stringValue(item?.display?.label)
       || stringValue(item?.name)
@@ -243,6 +255,7 @@ export function parseCommandCodeCatalog(data) {
       contextWindow,
       maxTokens,
       inputModalities,
+      free: isFree,
       ...(item?.display?.description ? { description: item.display.description } : {}),
       ...(reasoning ? { reasoning } : {}),
     });

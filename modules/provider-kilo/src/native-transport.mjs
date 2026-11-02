@@ -9,6 +9,7 @@ import {
   parseDsmlCalls,
   readSseEvents,
   resolveImageData,
+  sanitizeToolCallId,
   stripDsmlCalls,
   textFromContent,
   validateNativeEndpoint,
@@ -99,7 +100,7 @@ export async function buildKiloMessages(request = {}, attachments = null) {
     if (message?.role === "tool") {
       result.push({
         role: "tool",
-        tool_call_id: firstString(message.toolCallId, message.tool_call_id, message.id, "tool-result"),
+        tool_call_id: sanitizeToolCallId(firstString(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
         content: typeof message.content === "string" ? message.content : textFromContent(message.content ?? message.text ?? message.output ?? message.result),
       });
       continue;
@@ -113,7 +114,7 @@ export async function buildKiloMessages(request = {}, attachments = null) {
       for (const part of message.content) {
         if (part?.type === "tool-call" || part?.type === "tool_call") {
           calls.push({
-            id: firstString(part.id, part.toolCallId, `call_${calls.length}`),
+            id: sanitizeToolCallId(firstString(part.id, part.toolCallId, `call_${calls.length}`)),
             type: "function",
             function: {
               name: firstString(part.name, part.function?.name, "tool"),
@@ -128,7 +129,7 @@ export async function buildKiloMessages(request = {}, attachments = null) {
     if (Array.isArray(message?.tool_calls)) {
       for (const tc of message.tool_calls) {
         calls.push({
-          id: firstString(tc.id, tc.toolCallId, `call_${calls.length}`),
+          id: sanitizeToolCallId(firstString(tc.id, tc.toolCallId, `call_${calls.length}`)),
           type: "function",
           function: {
             name: firstString(tc.name, tc.function?.name, "tool"),

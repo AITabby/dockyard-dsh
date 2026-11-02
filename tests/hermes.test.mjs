@@ -1,0 +1,293 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  createHermesModule,
+  createHermesDriver,
+  createHermesCatalogLoader,
+  parseHermesCatalog,
+  summarizeHermesCandidate,
+  BUILTIN_HERMES_MODELS,
+  buildHermesMessages,
+  createHermesNativeExecutor,
+} from "../modules/provider-hermes/src/index.mjs";
+import { DockyardRuntime, createDefaultProviderEntries } from "../packages/runtime/src/dockyard-runtime.mjs";
+import { createDockyardLlmAdapter } from "../packages/dsh-bridge/src/llm-adapter.mjs";
+
+function memoryStateStore(initial = {}) {
+  let state = structuredClone(initial);
+  return {
+    async load() {
+      return structuredClone(state);
+    },
+    async update(mutator) {
+      state = await mutator(structuredClone(state));
+      return structuredClone(state);
+    },
+    async save(next) {
+      state = structuredClone(next);
+      return structuredClone(state);
+    },
+    snapshot() {
+      return structuredClone(state);
+    },
+  };
+}
+
+test("Hermes provider module manifest and builtin models", async () => {
+  const mod = createHermesModule();
+  assert.equal(mod.manifest.id, "hermes");
+  assert.equal(mod.manifest.displayName, "Hermes (Nous Research)");
+  assert.ok(mod.manifest.capabilities.includes("catalog"));
+  assert.ok(mod.manifest.capabilities.includes("quota"));
+  assert.ok(mod.manifest.capabilities.includes("stream"));
+
+  assert.ok(BUILTIN_HERMES_MODELS.length >= 6);
+  const deepseekFlash = BUILTIN_HERMES_MODELS.find((m) => m.id === "deepseek/deepseek-v4.1-flash");
+  assert.ok(deepseekFlash);
+  assert.equal(deepseekFlash.name, "DeepSeek: DeepSeek V4.1 Flash");
+  assert.equal(deepseekFlash.contextWindow, 1048576);
+
+  const beamFree = BUILTIN_HERMES_MODELS.find((m) => m.id === "reflection/beam-1.0-501b-a23b:free");
+  assert.ok(beamFree);
+  assert.equal(beamFree.free, true);
+});
+
+test("parseHermesCatalog parses live Nous Portal catalog format and filters embeddings", async () => {
+  const mockApiData = {
+    data: [
+      {
+        id: "deepseek/deepseek-v4.1-flash",
+        name: "DeepSeek: DeepSeek V4.1 Flash",
+        context_length: 1048576,
+        top_provider: { max_completion_tokens: 131072 },
+        architecture: { input_modalities: ["text", "image"] },
+        pricing: { prompt: "0.0000001060", completion: "0.0000005130" },
+        reasoning: {
+          supported_efforts: ["max", "high", "low"],
+          default_effort: "high",
+        },
+        endpoints: ["/api/v1/chat/completions"],
+      },
+      {
+        id: "reflection/beam-1.0-501b-a23b:free",
+        name: "Reflection: Beam 1.0 501B A23B (free)",
+        context_length: 262144,
+        top_provider: { max_completion_tokens: 131072 },
+        architecture: { input_modalities: ["text"] },
+        pricing: { prompt: "0.0000000000", completion: "0.0000000000" },
+        endpoints: ["/api/v1/chat/completions"],
+      },
+      {
+        id: "amazon/titan-embed-text-v2",
+        name: "Amazon Titan Text Embeddings V2",
+        architecture: { modality: "text->embeddings", output_modalities: ["embeddings"] },
+        endpoints: ["/api/v1/embeddings"],
+      },
+    ],
+  };
+
+  const parsed = parseHermesCatalog(mockApiData);
+  assert.equal(parsed.models.length, 2);
+  assert.equal(parsed.models[0].id, "deepseek/deepseek-v4.1-flash");
+  assert.equal(parsed.models[0].contextWindow, 1048576);
+  assert.equal(parsed.models[0].reasoning.defaultEffort, "high");
+
+  assert.equal(parsed.models[1].id, "reflection/beam-1.0-501b-a23b:free");
+  assert.equal(parsed.models[1].free, true);
+});
+
+test("buildHermesMessages formats user, assistant, system, and tool messages", async () => {
+  const request = {
+    messages: [
+      { role: "system", content: "You are a coding assistant" },
+      { role: "user", content: "What is 1+1?" },
+      {
+        role: "assistant",
+        content: "Let me calculate",
+        tool_calls: [
+          {
+            id: "call_calc_1",
+            type: "function",
+            function: { name: "calc", arguments: '{"expr":"1+1"}' },
+          },
+        ],
+      },
+      { role: "tool", toolCallId: "call_calc_1", content: "2" },
+    ],
+  };
+
+  const messages = await buildHermesMessages(request);
+  assert.equal(messages.length, 4);
+  assert.equal(messages[0].role, "system");
+  assert.equal(messages[1].role, "user");
+  assert.equal(messages[1].content, "What is 1+1?");
+  assert.equal(messages[2].role, "assistant");
+  assert.ok(Array.isArray(messages[2].tool_calls));
+  assert.equal(messages[2].tool_calls[0].id, "call_calc_1");
+  assert.equal(messages[3].role, "tool");
+  assert.equal(messages[3].content, "2");
+});
+
+test("buildHermesMessages sanitizes composite Codex tool IDs (length > 64) to valid length <= 64", async () => {
+  const codexCompositeId = "call_0194ff7b2b647bc58a184bf418431050|item_0194ff7b2b647bc58a184bf418431051";
+  assert.equal(codexCompositeId.length, 75);
+
+  const request = {
+    messages: [
+      {
+        role: "assistant",
+        content: "calling tool",
+        tool_calls: [
+          {
+            id: codexCompositeId,
+            type: "function",
+            function: { name: "search", arguments: "{}" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        toolCallId: codexCompositeId,
+        content: "results",
+      },
+    ],
+  };
+
+  const messages = await buildHermesMessages(request);
+  assert.equal(messages.length, 2);
+  const assistantToolId = messages[0].tool_calls[0].id;
+  const toolResultId = messages[1].tool_call_id;
+
+  assert.ok(assistantToolId.length <= 64);
+  assert.ok(toolResultId.length <= 64);
+  assert.equal(assistantToolId, toolResultId);
+  assert.ok(!assistantToolId.includes("|"));
+});
+
+test("createHermesNativeExecutor streams reasoning deltas, text deltas, and usage", async () => {
+  const sseLines = [
+    `data: ${JSON.stringify({
+      id: "gen_1",
+      choices: [{ delta: { reasoning_content: "Thinking step..." } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      id: "gen_1",
+      choices: [{ delta: { content: "Hello from Hermes!" } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      id: "gen_1",
+      choices: [{ delta: {}, finish_reason: "stop" }],
+      usage: { prompt_tokens: 15, completion_tokens: 25, total_tokens: 40 },
+    })}\n\n`,
+  ];
+
+  const mockFetch = async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        for (const line of sseLines) {
+          controller.enqueue(new TextEncoder().encode(line));
+        }
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  };
+
+  const executor = createHermesNativeExecutor({
+    fetchImpl: mockFetch,
+    apiKey: "sk-test-key",
+  });
+
+  const events = [];
+  for await (const event of executor({
+    request: {
+      model: "deepseek/deepseek-v4.1-flash",
+      messages: [{ role: "user", content: "Hi" }],
+    },
+  })) {
+    events.push(event);
+  }
+
+  const reasoningEvents = events.filter((e) => e.type === "reasoning-delta");
+  assert.equal(reasoningEvents.length, 1);
+  assert.equal(reasoningEvents[0].text, "Thinking step...");
+
+  const textEvents = events.filter((e) => e.type === "text-delta");
+  assert.equal(textEvents.length, 1);
+  assert.equal(textEvents[0].text, "Hello from Hermes!");
+
+  const finish = events.find((e) => e.type === "finish");
+  assert.ok(finish);
+  assert.equal(finish.reason.kind, "stop");
+  assert.equal(finish.usage.totalTokens, 40);
+});
+
+test("HermesDriver discovers both configured accounts and imports into account pool", async () => {
+  const driver = createHermesDriver();
+  const discovery = await driver.discover();
+  assert.ok(discovery.candidates.length >= 2, "Should discover both configured keys from ~/.hermes/auth.json");
+
+  const cand1 = discovery.candidates[0];
+  const cand2 = discovery.candidates[1];
+  assert.equal(cand1.candidateId, "hermes-acc-1");
+  assert.equal(cand1.quota.remaining, 50);
+  assert.equal(cand1.quota.windows[0].remaining, 50);
+  assert.ok(cand1.resources?.quotaDiagnostic);
+  assert.equal(cand2.candidateId, "hermes-acc-2");
+  assert.equal(cand2.quota.remaining, 10);
+  assert.equal(cand2.quota.windows[0].remaining, 10);
+
+  const mockSecretStore = {
+    data: new Map(),
+    async write(ref, val) { this.data.set(ref, val); },
+    async read(ref) { return this.data.get(ref); },
+  };
+
+  const acc1 = await driver.importAccount(cand1, { secretStore: mockSecretStore });
+  const acc2 = await driver.importAccount(cand2, { secretStore: mockSecretStore });
+
+  assert.equal(acc1.providerId, "hermes");
+  assert.equal(acc1.accountId, "hermes-acc-1");
+  assert.equal(acc1.quota.remaining, 50);
+  assert.ok(acc1.resources?.quotaDiagnostic);
+
+  assert.equal(acc2.providerId, "hermes");
+  assert.equal(acc2.accountId, "hermes-acc-2");
+  assert.equal(acc2.quota.remaining, 10);
+});
+
+test("DockyardRuntime auto-provisions Hermes accounts and exposes model catalog in adapter", async () => {
+  const runtime = new DockyardRuntime({
+    stateStore: memoryStateStore(),
+    secretStore: {
+      data: new Map(),
+      async write(ref, val) { this.data.set(ref, val); },
+      async read(ref) { return this.data.get(ref); },
+    },
+    hermes: {
+      apiKey: "sk-mock-key",
+    },
+  });
+
+  await runtime.init();
+  const snapshot = runtime.snapshot();
+  const hermesEntry = snapshot.providers.find((p) => p.providerId === "hermes");
+  assert.ok(hermesEntry, "Hermes provider should be registered");
+  assert.ok(hermesEntry.accounts.length >= 2, "Both accounts should be auto-provisioned into the pool");
+  assert.ok(hermesEntry.accounts.some((a) => a.accountId === "hermes-acc-1"));
+  assert.ok(hermesEntry.accounts.some((a) => a.accountId === "hermes-acc-2"));
+
+  const adapter = createDockyardLlmAdapter({
+    runtime,
+    providerIds: ["hermes"],
+  });
+
+  const models = await adapter.listModels("hermes");
+  assert.ok(models.length >= 5);
+  assert.ok(models.some((m) => m.id === "deepseek/deepseek-v4.1-flash"));
+  assert.ok(models.some((m) => m.id === "reflection/beam-1.0-501b-a23b:free"));
+});

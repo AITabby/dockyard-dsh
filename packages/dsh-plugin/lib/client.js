@@ -15705,7 +15705,13 @@ var DOCKYARD_LOCALES = Object.freeze({
     "modelSelection.loading": "\u6B63\u5728\u8BFB\u53D6\u6A21\u578B\u5217\u8868\u2026",
     "modelSelection.noModels": "\u6682\u65E0\u53EF\u7528\u6A21\u578B",
     "modelSelection.searchPlaceholder": "\u641C\u7D22\u6A21\u578B\u540D\u79F0\u6216 ID\u2026",
+    "modelSelection.tabAll": "\u5168\u90E8",
+    "modelSelection.tabFree": "\u514D\u8D39\u4E13\u533A",
+    "modelSelection.tabSelected": "\u5DF2\u9009",
+    "modelSelection.groupFree": "\u514D\u8D39\u989D\u5EA6\u6A21\u578B",
+    "modelSelection.groupOther": "\u5176\u4ED6\u6A21\u578B",
     "modelSelection.selectAll": "\u5168\u9009",
+    "modelSelection.selectFree": "\u4EC5\u9009\u514D\u8D39",
     "modelSelection.deselectAll": "\u5168\u4E0D\u9009",
     "modelSelection.enabledCount": "\u5DF2\u542F\u7528 {enabled}/{total} \u4E2A\u6A21\u578B",
     "modelSelection.save": "\u4FDD\u5B58\u6A21\u578B\u8BBE\u7F6E",
@@ -15920,7 +15926,13 @@ var DOCKYARD_LOCALES = Object.freeze({
     "modelSelection.loading": "Loading model list\u2026",
     "modelSelection.noModels": "No models available",
     "modelSelection.searchPlaceholder": "Filter models by name or ID\u2026",
+    "modelSelection.tabAll": "All",
+    "modelSelection.tabFree": "Free Tier",
+    "modelSelection.tabSelected": "Selected",
+    "modelSelection.groupFree": "Free Tier Models",
+    "modelSelection.groupOther": "Other Models",
     "modelSelection.selectAll": "Select All",
+    "modelSelection.selectFree": "Free Only",
     "modelSelection.deselectAll": "Deselect All",
     "modelSelection.enabledCount": "{enabled} of {total} models enabled",
     "modelSelection.save": "Save Selection",
@@ -16527,10 +16539,10 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-chevron{display:inline-flex;width:14px;height:14px;flex:none;align-items:center;justify-content:center;color:var(--dsw-alias-label-caption,#8b93a1);transition:transform 140ms ease;transform-origin:center}
 .dockyard-dsh-chevron[data-open=true]{transform:rotate(180deg)}
 .dockyard-dsh-chevron svg{display:block;width:14px;height:14px}
-.dockyard-dsh-popup{position:fixed;z-index:1000;left:var(--dockyard-dsh-popup-left,auto);top:var(--dockyard-dsh-popup-top,auto);right:var(--dockyard-dsh-popup-right,auto);bottom:var(--dockyard-dsh-popup-bottom,auto);box-sizing:border-box;width:min(480px,calc(100vw - 28px));max-width:calc(100vw - 28px);min-width:0;max-height:var(--dockyard-dsh-popup-max-height,min(560px,calc(100vh - 28px)));overflow:hidden;display:flex;flex-direction:column;gap:12px;padding:16px;border:.5px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));border-radius:var(--dsw-radius-panel,20px);background:var(--dsw-specific-menu,#26262a);box-shadow:var(--dsw-shadow-lv3,0 16px 50px rgba(0,0,0,.4));color:var(--dsw-alias-label-primary,#f5f7fb);font:400 13px/20px Inter,var(--dsw-font-family,sans-serif);text-align:left}
+.dockyard-dsh-popup{position:fixed;z-index:1000;left:var(--dockyard-dsh-popup-left,auto);top:var(--dockyard-dsh-popup-top,auto);right:var(--dockyard-dsh-popup-right,auto);bottom:var(--dockyard-dsh-popup-bottom,auto);box-sizing:border-box;width:min(480px,calc(100vw - 28px));max-width:calc(100vw - 28px);min-width:0;max-height:var(--dockyard-dsh-popup-max-height,min(560px,calc(100vh - 28px)));overflow:hidden;display:flex;flex-direction:column;gap:12px;padding:16px;border:.5px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));border-radius:var(--dsw-radius-panel,20px);background:#26262a !important;backdrop-filter:none !important;-webkit-backdrop-filter:none !important;box-shadow:var(--dsw-shadow-lv3,0 16px 50px rgba(0,0,0,.6));color:var(--dsw-alias-label-primary,#f5f7fb);font:400 13px/20px Inter,var(--dsw-font-family,sans-serif);text-align:left}
 .dockyard-dsh-popup-scroll{min-height:0;overflow:auto;display:flex;flex-direction:column;gap:12px;padding-right:4px}
 .dockyard-dsh-settings-section{box-sizing:border-box;width:100%;min-width:0;color:var(--dsw-alias-label-primary,#f5f7fb)}
-.dockyard-dsh-settings-section>.dockyard-dsh-popup{position:static;width:100%;max-width:none;max-height:none;overflow:visible;gap:16px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}
+.dockyard-dsh-settings-section>.dockyard-dsh-popup{position:static;width:100%;max-width:none;max-height:none;overflow:visible;gap:16px;padding:0;border:0;border-radius:0;background:transparent !important;box-shadow:none}
 .dockyard-dsh-settings-section .dockyard-dsh-popup-scroll{max-height:none;overflow:visible;gap:16px;padding-right:0}
 .dockyard-dsh-settings-section .dockyard-dsh-section{gap:10px}
 .dockyard-dsh-native-key-popup{min-width:0;max-width:calc(100vw - 28px)}
@@ -16623,13 +16635,22 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-model-search{box-sizing:border-box;width:100%;height:36px;padding:0 12px;border:.5px solid var(--dsw-alias-border-l4,rgba(255,255,255,.14));border-radius:var(--dsw-radius-md,12px);background:var(--dsw-alias-bg-layer-1,rgba(0,0,0,.2));color:var(--dsw-alias-label-primary,#f5f7fb);font:400 13px/22px Inter,var(--dsw-font-family,sans-serif)}
 .dockyard-dsh-model-search:focus{border-color:rgba(121,214,200,.7);outline:0;box-shadow:0 0 0 2px rgba(121,214,200,.12)}
 .dockyard-dsh-model-search::placeholder{color:var(--dsw-alias-label-caption,#8b93a1)}
-.dockyard-dsh-model-list-box{display:flex;flex-direction:column;gap:3px;max-height:220px;overflow-y:auto;padding:6px;border-radius:var(--dsw-radius-md,12px);border:.5px solid var(--dsw-alias-border-l4,rgba(255,255,255,.08));background:rgba(0,0,0,.15);box-sizing:border-box}
+.dockyard-dsh-model-tabs{display:flex;align-items:center;gap:4px;margin-bottom:4px}
+.dockyard-dsh-model-tab{appearance:none;border:none;background:transparent;padding:3px 9px;border-radius:999px;font:500 11px/16px Inter,var(--dsw-font-family,sans-serif);color:var(--dsw-alias-label-tertiary,#8b93a1);cursor:pointer;transition:all 120ms ease}
+.dockyard-dsh-model-tab:hover{color:var(--dsw-alias-label-primary,#f5f7fb);background:rgba(255,255,255,.06)}
+.dockyard-dsh-model-tab[data-active=true]{color:#79d6c8;background:rgba(121,214,200,.14);font-weight:600}
+.dockyard-dsh-model-list-box{display:flex;flex-direction:column;gap:3px;max-height:240px;overflow-y:auto;padding:6px;border-radius:var(--dsw-radius-md,12px);border:.5px solid var(--dsw-alias-border-l4,rgba(255,255,255,.08));background:rgba(0,0,0,.15);box-sizing:border-box}
+.dockyard-dsh-model-group-header{display:flex;align-items:center;justify-content:space-between;padding:6px 8px 3px;font-size:11px;font-weight:600;letter-spacing:0.5px;color:var(--dsw-alias-label-caption,#8b93a1);border-top:.5px solid rgba(255,255,255,.06);margin-top:4px}
+.dockyard-dsh-model-group-header:first-child{border-top:none;margin-top:0}
+.dockyard-dsh-model-group-header[data-free=true]{color:#4ade80}
 .dockyard-dsh-model-item{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 10px;border-radius:var(--dsw-radius-sm,8px);transition:background 120ms ease}
 .dockyard-dsh-model-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.06))}
 .dockyard-dsh-model-item-main{display:flex;align-items:center;gap:10px;min-width:0;flex:1;cursor:pointer;user-select:none}
 .dockyard-dsh-model-checkbox{width:16px;height:16px;margin:0;cursor:pointer;accent-color:#79d6c8;flex-shrink:0}
 .dockyard-dsh-model-item-info{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
-.dockyard-dsh-model-item-title{color:var(--dsw-alias-label-primary,#f5f7fb);font-size:13px;font-weight:500;line-height:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dockyard-dsh-model-item-title{display:flex;align-items:center;min-width:0;width:100%;color:var(--dsw-alias-label-primary,#f5f7fb);font-size:13px;font-weight:500;line-height:18px}
+.dockyard-dsh-model-item-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 1 auto}
+.dockyard-dsh-free-badge{display:inline-flex;align-items:center;flex:none;margin-left:6px;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:600;line-height:14px;background:rgba(34,197,94,.15);color:#4ade80;border:.5px solid rgba(34,197,94,.35);white-space:nowrap}
 .dockyard-dsh-model-item-id{color:var(--dsw-alias-label-caption,#8b93a1);font:400 11px/15px ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dockyard-dsh-model-item-extra{display:flex;align-items:center;gap:6px;flex-shrink:0}
 .dockyard-dsh-model-test-btn{appearance:none;box-sizing:border-box;height:24px;padding:0 8px;border:.5px solid var(--dsw-alias-border-l3,rgba(255,255,255,.14));border-radius:var(--dsw-radius-xs,6px);background:rgba(255,255,255,.05);color:var(--dsw-alias-label-secondary,#a0a6b5);cursor:pointer;font:500 11px/22px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap;transition:all 120ms ease}
@@ -17423,6 +17444,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
   const [selectedIds, setSelectedIds] = useState(() => /* @__PURE__ */ new Set());
   const [testStates, setTestStates] = useState(() => ({}));
   const [search, setSearch] = useState("");
+  const [filterTab, setFilterTab] = useState("all");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
   useEffect(() => {
@@ -17486,8 +17508,13 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
       return next;
     });
   };
+  const isFreeModel = (m) => m.free === true || m.free === void 0 && Boolean(m.id?.includes(":free") || m.name?.toLowerCase().includes("free"));
   const selectAll = () => {
     setSelectedIds(new Set(models.map((m) => m.id)));
+  };
+  const selectFree = () => {
+    const freeIds = models.filter(isFreeModel).map((m) => m.id);
+    setSelectedIds(new Set(freeIds));
   };
   const deselectAll = () => {
     setSelectedIds(/* @__PURE__ */ new Set());
@@ -17642,6 +17669,45 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
       onClick: (e) => testConnection(modelId, e)
     }, `\u2715 ${errorLabel}`);
   };
+  const renderModelItem = (item) => {
+    const checked = selectedIds.has(item.id);
+    const meta3 = item.contextWindow ? ` \xB7 ${Math.round(item.contextWindow / 1024)}k context` : "";
+    return h(
+      "div",
+      {
+        key: item.id,
+        className: "dockyard-dsh-model-item"
+      },
+      h(
+        "label",
+        {
+          className: "dockyard-dsh-model-item-main"
+        },
+        h("input", {
+          type: "checkbox",
+          className: "dockyard-dsh-model-checkbox",
+          checked,
+          onChange: () => toggleModel(item.id)
+        }),
+        h(
+          "div",
+          { className: "dockyard-dsh-model-item-info" },
+          h(
+            "div",
+            { className: "dockyard-dsh-model-item-title" },
+            h("span", { className: "dockyard-dsh-model-item-name" }, item.name || item.id),
+            isFreeModel(item) ? h("span", { className: "dockyard-dsh-free-badge" }, "FREE") : null
+          ),
+          h("div", { className: "dockyard-dsh-model-item-id" }, `${item.id}${meta3}`)
+        )
+      ),
+      h(
+        "div",
+        { className: "dockyard-dsh-model-item-extra" },
+        renderTestBadge(item.id)
+      )
+    );
+  };
   return h(
     "div",
     { className: "dockyard-dsh-section dockyard-dsh-model-selection" },
@@ -17668,41 +17734,58 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
     ),
     h(
       "div",
+      { className: "dockyard-dsh-model-tabs" },
+      h("button", {
+        type: "button",
+        className: "dockyard-dsh-model-tab",
+        "data-active": filterTab === "all",
+        onClick: () => setFilterTab("all")
+      }, `${text(t, "modelSelection.tabAll")} (${models.length})`),
+      models.some(isFreeModel) ? h("button", {
+        type: "button",
+        className: "dockyard-dsh-model-tab",
+        "data-active": filterTab === "free",
+        onClick: () => setFilterTab("free")
+      }, `${text(t, "modelSelection.tabFree")} (${models.filter(isFreeModel).length})`) : null,
+      h("button", {
+        type: "button",
+        className: "dockyard-dsh-model-tab",
+        "data-active": filterTab === "selected",
+        onClick: () => setFilterTab("selected")
+      }, `${text(t, "modelSelection.tabSelected")} (${selectedIds.size})`)
+    ),
+    h(
+      "div",
       { className: "dockyard-dsh-model-list-box" },
-      filtered.map((item) => {
-        const checked = selectedIds.has(item.id);
-        const meta3 = item.contextWindow ? ` \xB7 ${Math.round(item.contextWindow / 1024)}k context` : "";
-        return h(
-          "div",
-          {
-            key: item.id,
-            className: "dockyard-dsh-model-item"
-          },
-          h(
-            "label",
-            {
-              className: "dockyard-dsh-model-item-main"
-            },
-            h("input", {
-              type: "checkbox",
-              className: "dockyard-dsh-model-checkbox",
-              checked,
-              onChange: () => toggleModel(item.id)
-            }),
+      (() => {
+        if (filterTab === "free") {
+          const list = filtered.filter(isFreeModel);
+          return list.length > 0 ? list.map(renderModelItem) : h("div", { className: "dockyard-dsh-muted" }, text(t, "modelSelection.noModels"));
+        }
+        if (filterTab === "selected") {
+          const list = filtered.filter((m) => selectedIds.has(m.id));
+          return list.length > 0 ? list.map(renderModelItem) : h("div", { className: "dockyard-dsh-muted" }, text(t, "modelSelection.noModels"));
+        }
+        const freeList = filtered.filter(isFreeModel);
+        const otherList = filtered.filter((m) => !isFreeModel(m));
+        if (freeList.length > 0 && otherList.length > 0) {
+          return [
             h(
               "div",
-              { className: "dockyard-dsh-model-item-info" },
-              h("div", { className: "dockyard-dsh-model-item-title" }, item.name || item.id),
-              h("div", { className: "dockyard-dsh-model-item-id" }, `${item.id}${meta3}`)
-            )
-          ),
-          h(
-            "div",
-            { className: "dockyard-dsh-model-item-extra" },
-            renderTestBadge(item.id)
-          )
-        );
-      })
+              { key: "header-free", className: "dockyard-dsh-model-group-header", "data-free": true },
+              h("span", null, `${text(t, "modelSelection.groupFree")} (${freeList.length})`)
+            ),
+            ...freeList.map(renderModelItem),
+            h(
+              "div",
+              { key: "header-other", className: "dockyard-dsh-model-group-header" },
+              h("span", null, `${text(t, "modelSelection.groupOther")} (${otherList.length})`)
+            ),
+            ...otherList.map(renderModelItem)
+          ];
+        }
+        return filtered.length > 0 ? filtered.map(renderModelItem) : h("div", { className: "dockyard-dsh-muted" }, text(t, "modelSelection.noModels"));
+      })()
     ),
     h(
       "div",
@@ -17716,6 +17799,12 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
           onClick: selectAll,
           disabled: saving
         }, text(t, "modelSelection.selectAll")),
+        models.some(isFreeModel) ? h("button", {
+          type: "button",
+          className: "dockyard-dsh-action",
+          onClick: selectFree,
+          disabled: saving
+        }, text(t, "modelSelection.selectFree")) : null,
         h("button", {
           type: "button",
           className: "dockyard-dsh-action",

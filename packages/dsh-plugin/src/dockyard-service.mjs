@@ -230,7 +230,19 @@ export class DockyardDshService {
     const refreshKey = providerId ?? "*";
     const existing = this.#refreshPromises.get(refreshKey);
     if (existing) return existing;
-    const promise = this.runtime.refreshAll(providerId).finally(() => {
+    const promise = (async () => {
+      const results = await this.runtime.refreshAll(providerId);
+      if (providerId) {
+        await this.runtime.getCatalog(providerId, { force: true }).catch(() => null);
+      } else {
+        const manifests = this.runtime.listProviderManifests?.() ?? [];
+        await Promise.all(manifests.map((m) => this.runtime.getCatalog(m.id, { force: true }).catch(() => null)));
+      }
+      try {
+        this.notifyAdaptersUpdated?.();
+      } catch {}
+      return results;
+    })().finally(() => {
       if (this.#refreshPromises.get(refreshKey) === promise) this.#refreshPromises.delete(refreshKey);
     });
     this.#refreshPromises.set(refreshKey, promise);
@@ -320,7 +332,7 @@ export class DockyardDshService {
         {
           model: modelId,
           messages: [{ role: "user", content: "hi" }],
-          maxTokens: 16,
+          maxTokens: 512,
           probe: true,
           noFallback: true,
         },

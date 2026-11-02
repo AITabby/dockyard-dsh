@@ -12,6 +12,7 @@ import {
   parseToolArguments,
   readSseEvents,
   resolveImageData,
+  sanitizeToolCallId,
   textFromContent,
   validateNativeEndpoint,
 } from "../../../packages/providers/src/native-transport.mjs";
@@ -201,7 +202,7 @@ export async function buildOpencodeMessages(request, attachments) {
     if (role === "tool") {
       result.push({
         role: "tool",
-        tool_call_id: firstString(message.toolCallId, message.tool_call_id, message.id, "tool-result"),
+        tool_call_id: sanitizeToolCallId(firstString(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
         content: textFromContent(message.content ?? message.text ?? message.output ?? message.result),
       });
       continue;

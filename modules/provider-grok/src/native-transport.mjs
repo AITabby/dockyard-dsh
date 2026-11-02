@@ -8,6 +8,7 @@ import {
   parseToolArguments,
   readSseEvents,
   resolveImageData,
+  sanitizeToolCallId,
   textFromContent,
   validateNativeEndpoint,
 } from "../../../packages/providers/src/native-transport.mjs";
@@ -64,7 +65,7 @@ async function buildGrokMessages(request, attachments) {
     if (role === "tool") {
       result.push({
         role: "tool",
-        tool_call_id: firstString(message.toolCallId, message.tool_call_id, message.id, "tool-result"),
+        tool_call_id: sanitizeToolCallId(firstString(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
         content: textFromContent(message.content ?? message.text ?? message.output ?? message.result),
       });
       continue;
@@ -74,7 +75,7 @@ async function buildGrokMessages(request, attachments) {
       .map(toolCallPart)
       .filter(Boolean)
       .map((call, index) => ({
-        id: firstString(call.id, call.toolCallId, call.tool_call_id, `tool-${index}`),
+        id: sanitizeToolCallId(firstString(call.id, call.toolCallId, call.tool_call_id, `tool-${index}`)),
         type: "function",
         function: {
           name: firstString(call.name, call.function?.name, "tool"),

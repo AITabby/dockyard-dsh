@@ -10,6 +10,7 @@ import {
   nativeProviderError,
   normalizeUsage,
   readSseEvents,
+  sanitizeToolCallId,
   textFromContent,
   validateNativeEndpoint,
 } from "../../../packages/providers/src/native-transport.mjs";
@@ -87,11 +88,26 @@ export function toWireTools(tools = []) {
   });
 }
 
+export function isLikelyReasoningModel(modelId = "") {
+  const m = String(modelId || "").toLowerCase();
+  return (
+    m.includes("beam") ||
+    m.includes("r1") ||
+    m.includes("reason") ||
+    m.includes("reflection") ||
+    m.includes("deepseek-r") ||
+    m.includes("qwq") ||
+    m.includes("qvq") ||
+    m.includes("deepseek-reasoner")
+  );
+}
+
 export function buildCommandCodeMessages(request = {}) {
   const rawMessages = Array.isArray(request.messages) ? request.messages : [];
   let systemPrompt = "";
   const wireMessages = [];
   const toolNameById = new Map();
+  const needsReasoningPadding = isLikelyReasoningModel(request.model) || Boolean(request.reasoning?.effort);
 
   for (const msg of rawMessages) {
     if (!msg) continue;
@@ -105,6 +121,12 @@ export function buildCommandCodeMessages(request = {}) {
     }
 
     if (role === "assistant") {
+      let reasoningContent = firstString(
+        msg.reasoning_content,
+        msg.reasoning,
+        msg.thought,
+        msg.thinking,
+      );
       if (Array.isArray(msg.content)) {
         const content = [];
         for (const block of msg.content) {
@@ -112,9 +134,13 @@ export function buildCommandCodeMessages(request = {}) {
             content.push({ type: "text", text: block.text });
           } else if (block.type === "reasoning" || block.type === "thinking") {
             const rText = block.text || block.thinking || "";
-            if (rText) content.push({ type: "reasoning", text: rText });
+            if (rText) {
+              content.push({ type: "reasoning", text: rText });
+              if (!reasoningContent) reasoningContent = rText;
+            }
           } else if (block.type === "tool_use" || block.type === "tool-call") {
-            const toolCallId = block.id || block.toolCallId || `call_${randomUUID().slice(0, 8)}`;
+            const rawId = block.id || block.toolCallId || `call_${randomUUID().slice(0, 8)}`;
+            const toolCallId = sanitizeToolCallId(rawId);
             const toolName = block.name || block.toolName || "tool";
             toolNameById.set(toolCallId, toolName);
 
@@ -136,16 +162,32 @@ export function buildCommandCodeMessages(request = {}) {
             });
           }
         }
-        wireMessages.push({ role: "assistant", content: content.length > 0 ? content : [{ type: "text", text: "" }] });
+        const asstMsg = {
+          role: "assistant",
+          content: content.length > 0 ? content : [{ type: "text", text: "" }],
+        };
+        if (reasoningContent) {
+          asstMsg.reasoning_content = reasoningContent;
+        } else if (needsReasoningPadding) {
+          asstMsg.reasoning_content = "";
+        }
+        wireMessages.push(asstMsg);
       } else {
         const text = typeof msg.content === "string" ? msg.content : textFromContent(msg.content);
-        wireMessages.push({ role: "assistant", content: text || "" });
+        const asstMsg = { role: "assistant", content: text || "" };
+        if (reasoningContent) {
+          asstMsg.reasoning_content = reasoningContent;
+        } else if (needsReasoningPadding) {
+          asstMsg.reasoning_content = "";
+        }
+        wireMessages.push(asstMsg);
       }
       continue;
     }
 
     if (role === "tool") {
-      const toolCallId = msg.tool_call_id || msg.toolCallId;
+      const rawId = msg.tool_call_id || msg.toolCallId;
+      const toolCallId = sanitizeToolCallId(rawId || "unknown");
       const toolName = msg.name || msg.toolName || (toolCallId ? toolNameById.get(toolCallId) : null) || "unknown";
       const text = typeof msg.content === "string" ? msg.content : textFromContent(msg.content);
       wireMessages.push({
@@ -286,6 +328,7 @@ export function createCommandCodeNativeExecutor({
       "x-command-code-version": "1.88.1",
       "x-cli-environment": "production",
       "x-session-id": sessionId,
+      "x-api-key": apiKey,
       Authorization: `Bearer ${apiKey}`,
     };
 
@@ -294,56 +337,85 @@ export function createCommandCodeNativeExecutor({
 
     const today = new Date().toISOString().split("T")[0];
     const threadId = toWireUuid(sessionId);
-    const body = {
-      config: {
-        workingDir: process.cwd(),
-        date: today,
-        environment: process.platform,
-        structure: [],
-        isGitRepo: false,
-        currentBranch: "main",
-        mainBranch: "main",
-        gitStatus: "",
-        recentCommits: [],
-      },
-      memory: null,
-      taste: null,
-      skills: null,
-      permissionMode: "standard",
-      ...(threadId ? { threadId } : {}),
-      params: {
-        model: request.model || "deepseek/deepseek-v4.1-flash",
-        messages: wireMessages,
-        ...(wireTools ? { tools: wireTools } : {}),
-        ...(systemPrompt ? { system: systemPrompt } : {}),
-        stream: true,
-        ...(typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {}),
-        ...(typeof request.temperature === "number" ? { temperature: request.temperature } : {}),
-        ...(request.reasoning?.effort ? { reasoning_effort: request.reasoning.effort } : {}),
-      },
-    };
+    let attemptMessages = wireMessages;
+    let retriedReasoning = false;
 
-    const response = await fetchNativeResponse(
-      validatedEndpoint,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal,
-      },
-      {
-        providerId: PROVIDER_ID,
-        timeoutMs,
-        fetchImpl,
-      },
-    );
+    while (true) {
+      const body = {
+        config: {
+          workingDir: process.cwd(),
+          date: today,
+          environment: process.platform,
+          structure: [],
+          isGitRepo: false,
+          currentBranch: "main",
+          mainBranch: "main",
+          gitStatus: "",
+          recentCommits: [],
+        },
+        memory: null,
+        taste: null,
+        skills: null,
+        permissionMode: "standard",
+        ...(threadId ? { threadId } : {}),
+        params: {
+          model: request.model || "deepseek/deepseek-v4.1-flash",
+          messages: attemptMessages,
+          ...(wireTools ? { tools: wireTools } : {}),
+          ...(systemPrompt ? { system: systemPrompt } : {}),
+          stream: true,
+          ...(typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {}),
+          ...(typeof request.temperature === "number" ? { temperature: request.temperature } : {}),
+          ...(request.reasoning?.effort ? { reasoning_effort: request.reasoning.effort } : {}),
+        },
+      };
 
-    const streamEvents = [];
-    let nextIndex = 1;
-    let reasoning = null;
-    let rawUsage = null;
-    let stop = "stop";
-    const activeTools = new Map();
+      let response;
+      try {
+        response = await fetchNativeResponse(
+          validatedEndpoint,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify(body),
+            signal,
+          },
+          {
+            providerId: PROVIDER_ID,
+            timeoutMs,
+            fetchImpl,
+          },
+        );
+      } catch (fetchErr) {
+        if (/fetch failed/i.test(fetchErr?.message) && !signal?.aborted) {
+          await new Promise((r) => setTimeout(r, 600));
+          response = await fetchNativeResponse(
+            validatedEndpoint,
+            {
+              method: "POST",
+              headers,
+              body: JSON.stringify(body),
+              signal,
+            },
+            {
+              providerId: PROVIDER_ID,
+              timeoutMs,
+              fetchImpl,
+            },
+          );
+        } else {
+          throw fetchErr;
+        }
+      }
+
+      const streamEvents = [];
+      let nextIndex = 1;
+      let reasoning = null;
+      let rawUsage = null;
+      let stop = "stop";
+      let yieldedAny = false;
+      let shouldRetryReasoning = false;
+      const activeTools = new Map();
 
     const textFilter = new DsmlStreamFilter({
       onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "text" }),
@@ -353,6 +425,20 @@ export function createCommandCodeNativeExecutor({
 
     for await (const event of readNdjsonLines(response, { signal, timeoutMs, providerId: PROVIDER_ID })) {
       if (!event || typeof event !== "object") continue;
+
+      if (event.type === "error") {
+        const errObj = event.error || {};
+        const msg = errObj.message || "Command Code upstream stream error";
+        const status = errObj.statusCode || 500;
+        if (!yieldedAny && !retriedReasoning && /reasoning_content/i.test(msg)) {
+          shouldRetryReasoning = true;
+          break;
+        }
+        throw nativeProviderError(PROVIDER_ID, msg, {
+          status,
+          code: errObj.type || "server_error",
+        });
+      }
 
       if (event.type === "reasoning-start") {
         textFilter.closeText();
@@ -485,38 +571,51 @@ export function createCommandCodeNativeExecutor({
       }
     }
 
-    if (reasoning) {
-      yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-      reasoning = null;
-    }
+      if (shouldRetryReasoning) {
+        retriedReasoning = true;
+        attemptMessages = attemptMessages.map((m) => {
+          if (m.role === "assistant" && typeof m.reasoning_content !== "string") {
+            return { ...m, reasoning_content: "" };
+          }
+          return m;
+        });
+        continue;
+      }
 
-    textFilter.closeText();
-    while (streamEvents.length > 0) yield streamEvents.shift();
+      if (reasoning) {
+        yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+        reasoning = null;
+      }
 
-    for (const [, state] of activeTools) {
+      textFilter.closeText();
+      while (streamEvents.length > 0) yield streamEvents.shift();
+
+      for (const [, state] of activeTools) {
+        yield {
+          type: "block-end",
+          index: state.index,
+          block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments },
+        };
+      }
+
+      if (activeTools.size > 0 && (!stop || stop === "stop")) {
+        stop = "tool_calls";
+      }
+
+      const finalUsage = normalizeUsage(rawUsage);
+      if (finalUsage) {
+        yield {
+          type: "usage",
+          usage: finalUsage,
+        };
+      }
+
       yield {
-        type: "block-end",
-        index: state.index,
-        block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments },
+        type: "finish",
+        reason: finishReason(stop),
+        ...(finalUsage ? { usage: finalUsage } : {}),
       };
+      break;
     }
-
-    if (activeTools.size > 0 && (!stop || stop === "stop")) {
-      stop = "tool_calls";
-    }
-
-    const finalUsage = normalizeUsage(rawUsage);
-    if (finalUsage) {
-      yield {
-        type: "usage",
-        usage: finalUsage,
-      };
-    }
-
-    yield {
-      type: "finish",
-      reason: finishReason(stop),
-      ...(finalUsage ? { usage: finalUsage } : {}),
-    };
   };
 }

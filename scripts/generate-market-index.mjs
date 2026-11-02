@@ -169,18 +169,32 @@ const indexDocument = {
           "workbuddy",
           "commandcode",
           "command-code",
+          "hermes",
+          "nous",
           "free-tier",
         ],
         sortKeys: {},
       },
       versions: [
         {
-          version: "0.1.15",
+          version: "0.1.16",
           publishTimestamp: Math.floor(Date.now() / 1000),
           source: {
             type: "git",
             url: "https://github.com/AITabby/dockyard-dsh",
             commit: currentCommit,
+          },
+          engines: {
+            dsh: ">=0.1.0",
+          },
+        },
+        {
+          version: "0.1.15",
+          publishTimestamp: 1793629755,
+          source: {
+            type: "git",
+            url: "https://github.com/AITabby/dockyard-dsh",
+            commit: "c4a6d34ce823d6f93b0539e1b58b2b73114330d5",
           },
           engines: {
             dsh: ">=0.1.0",

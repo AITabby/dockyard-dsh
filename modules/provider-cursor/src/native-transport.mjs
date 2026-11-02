@@ -255,9 +255,13 @@ function streamCursor({
           if ((frame.flags & 0x02) !== 0) {
             const trailer = decodeCursorConnectTrailer(frame.payload);
             if (trailer) {
-              const error = nativeProviderError(PROVIDER_ID, trailer.message, {
+              let displayMessage = trailer.message;
+              if (displayMessage.includes("Grok Build isn't available for this account yet")) {
+                displayMessage = `${trailer.message} (当前 Cursor 账号为免费版 Free，Cursor 官方 Agent 运行接口需要 Pro 或订阅权限)`;
+              }
+              const error = nativeProviderError(PROVIDER_ID, displayMessage, {
                 code: trailer.code,
-                body: { code: trailer.code, message: trailer.message },
+                body: { code: trailer.code, message: displayMessage },
               });
               // Binary google.rpc.Status trailers carry the real gRPC code
               // (UNAUTHENTICATED/PERMISSION_DENIED/RESOURCE_EXHAUSTED…);

@@ -342,6 +342,47 @@ export function summarizeCursorCandidate(candidate) {
   };
 }
 
+function effortName(id) {
+  return String(id)
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function extractCursorReasoning(value) {
+  if (value.reasoning && Array.isArray(value.reasoning.efforts) && value.reasoning.efforts.length > 0) {
+    return value.reasoning;
+  }
+  const paramDefs = Array.isArray(value.parameterDefinitions) ? value.parameterDefinitions : [];
+  const effortParam = paramDefs.find((param) => (
+    param?.id === "reasoning_effort" || param?.id === "effort" || param?.id === "reasoning"
+  ));
+  const enumValues = effortParam?.parameterType?.enumParameter?.values;
+  if (Array.isArray(enumValues) && enumValues.length > 0) {
+    const validValues = enumValues.filter((entry) => entry?.value && entry.value !== "none" && entry.value !== "off");
+    if (validValues.length > 0) {
+      const efforts = validValues.map((entry) => ({
+        id: entry.value,
+        name: firstString(entry.displayName, effortName(entry.value)),
+      }));
+      const defaultEffort = efforts.some((e) => e.id === "medium")
+        ? "medium"
+        : (efforts.some((e) => e.id === "low") ? "low" : efforts[0]?.id);
+      return { efforts, ...(defaultEffort ? { defaultEffort } : {}) };
+    }
+  }
+  if (value.supportsThinking || value.supports_thinking) {
+    return {
+      efforts: [
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" },
+      ],
+      defaultEffort: "medium",
+    };
+  }
+  return null;
+}
+
 function normalizeModel(value) {
   if (typeof value === "string") return { id: value, name: value };
   if (!value || typeof value !== "object") return null;
@@ -359,6 +400,7 @@ function normalizeModel(value) {
     ?? value.inputModalities
     ?? value.input_modalities
     ?? (value.supportsImages || value.supports_images ? ["text", "image"] : null);
+  const reasoning = extractCursorReasoning(value);
   return {
     id,
     name: firstString(
@@ -373,8 +415,7 @@ function normalizeModel(value) {
     ...(Number.isInteger(contextWindow) ? { contextWindow } : {}),
     ...(Number.isInteger(maxTokens) ? { maxTokens } : {}),
     ...(Array.isArray(inputModalities) ? { inputModalities: [...inputModalities] } : {}),
-    ...(value.reasoning ? { reasoning: value.reasoning } : {}),
-    ...(value.supportsThinking || value.supports_thinking ? { reasoning: { supported: true } } : {}),
+    ...(reasoning ? { reasoning } : {}),
   };
 }
 
@@ -407,7 +448,9 @@ export function createCursorCatalogLoader({
 
   async function loadBrowserCatalog({ accounts, secretStore, signal }) {
     const account = browserCatalogAccount(accounts);
-    const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
+    const credentialRef = account?.auth?.credentialRef
+      ?? account?.credentialRef
+      ?? (account?.accountId ? createCredentialRef(PROVIDER_ID, account.accountId) : null);
     if (!account || !credentialRef || typeof secretStore?.read !== "function") return null;
     const credential = await secretStore.read(credentialRef);
     if (!credential?.access) return null;

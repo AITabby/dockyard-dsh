@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createDefaultProviderEntries, DockyardRuntime } from "../../runtime/src/dockyard-runtime.mjs";
-import { createDockyardLlmAdapter } from "../../dsh-bridge/src/index.mjs";
+import { createDockyardLlmAdapter, defaultCatalogCachePath } from "../../dsh-bridge/src/index.mjs";
 import {
   createAntigravityCatalogLoader,
   createAntigravityNativeExecutor,
@@ -13,6 +13,7 @@ import { createClaudeCatalogLoader, createClaudeNativeExecutor } from "../../../
 import { createCursorCatalogLoader, createCursorNativeExecutor } from "../../../modules/provider-cursor/src/index.mjs";
 import { createWorkbuddyCatalogLoader, createWorkbuddyNativeExecutor } from "../../../modules/provider-workbuddy/src/index.mjs";
 import { createCommandCodeCatalogLoader, createCommandCodeNativeExecutor } from "../../../modules/provider-commandcode/src/index.mjs";
+import { createHermesCatalogLoader, createHermesNativeExecutor } from "../../../modules/provider-hermes/src/index.mjs";
 import { runCliCommand } from "../../providers/src/cli-agent-transport.mjs";
 import {
   createCodexDshCatalogLoader,
@@ -79,6 +80,7 @@ export function apply(ctx, config = {}) {
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
       workbuddy: runtimeOptions.requestExecutors?.workbuddy ?? createWorkbuddyNativeExecutor(runtimeOptions.workbuddy ?? {}),
       commandcode: runtimeOptions.requestExecutors?.commandcode ?? createCommandCodeNativeExecutor(runtimeOptions.commandcode ?? {}),
+      hermes: runtimeOptions.requestExecutors?.hermes ?? createHermesNativeExecutor(runtimeOptions.hermes ?? {}),
     };
     runtimeOptions.catalogLoaders = {
       ...(runtimeOptions.catalogLoaders ?? {}),
@@ -93,6 +95,7 @@ export function apply(ctx, config = {}) {
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
       workbuddy: runtimeOptions.catalogLoaders?.workbuddy ?? createWorkbuddyCatalogLoader(runtimeOptions.workbuddy ?? {}),
       commandcode: runtimeOptions.catalogLoaders?.commandcode ?? createCommandCodeCatalogLoader(runtimeOptions.commandcode ?? {}),
+      hermes: runtimeOptions.catalogLoaders?.hermes ?? createHermesCatalogLoader(runtimeOptions.hermes ?? {}),
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders)
@@ -114,8 +117,8 @@ export function apply(ctx, config = {}) {
       );
       const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
       await Promise.all(catalogWarmers
-        .filter(([providerId]) => providerId === "openai-codex" || providerId === "workbuddy" || providerId === "commandcode" || connected.has(providerId))
-        .map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
+        .filter(([providerId]) => providerId === "openai-codex" || providerId === "workbuddy" || providerId === "commandcode" || providerId === "hermes" || connected.has(providerId))
+        .map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [], secretStore: runtime.secretStore }).catch(() => null)));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
     });
@@ -124,6 +127,7 @@ export function apply(ctx, config = {}) {
   const adapter = createDockyardLlmAdapter({
     runtime,
     providerIds: config.providers ?? runtime.listProviderIds(),
+    catalogCachePath: config.catalogCachePath ?? defaultCatalogCachePath(),
     // Resolve this only when a request is actually streamed. The attachment
     // service is installed by DSH's base profile after plugin composition;
     // reading it while the plugin graph is being composed breaks boot.

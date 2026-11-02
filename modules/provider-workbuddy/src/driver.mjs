@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createCredentialRef } from "../../../packages/vault/src/index.mjs";
@@ -62,6 +62,9 @@ export function summarizeWorkbuddyCandidate(candidate) {
 
 function findLocalWorkbuddySnapshot() {
   const configDir = findWorkbuddyConfigDir();
+  let latestFile = null;
+  let latestMtime = 0;
+
   if (configDir) {
     const storageDir = join(configDir, "storage");
     if (existsSync(storageDir)) {
@@ -74,7 +77,13 @@ function findLocalWorkbuddySnapshot() {
             for (const scope of scopes) {
               const configFile = join(scopedDir, scope, "wb-product-config.json");
               if (existsSync(configFile)) {
-                return configFile;
+                try {
+                  const mtime = statSync(configFile).mtimeMs;
+                  if (mtime > latestMtime) {
+                    latestMtime = mtime;
+                    latestFile = configFile;
+                  }
+                } catch {}
               }
             }
           }
@@ -82,6 +91,8 @@ function findLocalWorkbuddySnapshot() {
       } catch {}
     }
   }
+
+  if (latestFile) return latestFile;
 
   const appAsarProductJson = "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar/cli/product.json";
   if (existsSync(appAsarProductJson)) return appAsarProductJson;
@@ -116,10 +127,12 @@ export function parseWorkbuddyCatalog(data) {
     seen.add(id);
 
     const credits = stringValue(item?.credits) ?? "";
-    const isFree = credits === "x0.00" || credits === "x0.00 credits" || credits === "0" || item?.free === true || item?.isFree === true;
+    const isFree = credits === "x0.00" || credits === "x0.00 credits" || credits === "0.00x" || credits === "0" || item?.free === true || item?.isFree === true;
 
     const baseName = stringValue(item?.name) || stringValue(item?.title) || id;
-    const name = isFree && !baseName.toLowerCase().includes("free") ? `${baseName} (WorkBuddy Free)` : baseName;
+    const name = isFree && !baseName.toLowerCase().includes("free")
+      ? `${baseName} (WorkBuddy Free)`
+      : (credits && !isFree ? `${baseName} (${credits})` : baseName);
     const builtin = BUILTIN_WORKBUDDY_FREE_MODELS.find((m) => m.id === id);
 
     const contextWindow = resolveContextWindowFromModel(item, builtin?.contextWindow ?? 131072);
@@ -140,14 +153,6 @@ export function parseWorkbuddyCatalog(data) {
       freeModels.push(modelRecord);
     } else {
       paidModels.push(modelRecord);
-    }
-  }
-
-  // Ensure builtin free models are included if missing
-  for (const builtin of BUILTIN_WORKBUDDY_FREE_MODELS) {
-    if (!seen.has(builtin.id)) {
-      freeModels.unshift(builtin);
-      seen.add(builtin.id);
     }
   }
 

@@ -84,18 +84,32 @@
           "workbuddy",
           "commandcode",
           "command-code",
+          "hermes",
+          "nous",
           "free-tier"
         ],
         "sortKeys": {}
       },
       "versions": [
         {
-          "version": "0.1.15",
-          "publishTimestamp": 1793555667,
+          "version": "0.1.16",
+          "publishTimestamp": 1793629838,
           "source": {
             "type": "git",
             "url": "https://github.com/AITabby/dockyard-dsh",
-            "commit": "eeb89b0d48ec82ac4d721387d1f97b9f1722c8d3"
+            "commit": "fc1b095ec6b37176fe6d58c3288267b070719869"
+          },
+          "engines": {
+            "dsh": ">=0.1.0"
+          }
+        },
+        {
+          "version": "0.1.15",
+          "publishTimestamp": 1793629755,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/AITabby/dockyard-dsh",
+            "commit": "c4a6d34ce823d6f93b0539e1b58b2b73114330d5"
           },
           "engines": {
             "dsh": ">=0.1.0"

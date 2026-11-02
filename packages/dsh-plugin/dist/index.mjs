@@ -1007,8 +1007,8 @@ var init_dockyard_remote_host = __esm({
 });
 
 // packages/dsh-plugin/src/index.mjs
-import { existsSync as existsSync6, readFileSync as readFileSync6 } from "node:fs";
-import { join as join17 } from "node:path";
+import { existsSync as existsSync8, readFileSync as readFileSync8 } from "node:fs";
+import { join as join19 } from "node:path";
 
 // packages/core/src/errors.mjs
 var DockyardError = class extends Error {
@@ -2131,6 +2131,51 @@ var AccountPool = class {
 };
 
 // packages/dsh-bridge/src/llm-adapter.mjs
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+function defaultCatalogCachePath() {
+  const home = process.env.DOCKYARD_DSH_HOME || join(homedir(), ".dockyard-dsh");
+  return join(home, "catalog-cache.json");
+}
+function loadDiskCatalogCache(filePath) {
+  try {
+    if (!filePath || !existsSync(filePath)) return /* @__PURE__ */ new Map();
+    const raw = readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    const map = /* @__PURE__ */ new Map();
+    if (parsed && typeof parsed === "object") {
+      for (const [providerId, entry] of Object.entries(parsed)) {
+        if (entry && Array.isArray(entry.value?.models) && entry.value.models.length > 0) {
+          map.set(providerId, {
+            value: entry.value,
+            fetchedAt: Number(entry.fetchedAt) || Date.now()
+          });
+        }
+      }
+    }
+    return map;
+  } catch {
+    return /* @__PURE__ */ new Map();
+  }
+}
+function saveDiskCatalogCache(filePath, map) {
+  try {
+    if (!filePath) return;
+    const obj = {};
+    for (const [providerId, entry] of map) {
+      if (entry && Array.isArray(entry.value?.models) && entry.value.models.length > 0) {
+        obj[providerId] = {
+          value: entry.value,
+          fetchedAt: entry.fetchedAt
+        };
+      }
+    }
+    mkdirSync(dirname(filePath), { recursive: true, mode: 448 });
+    writeFileSync(filePath, JSON.stringify(obj, null, 2), "utf8");
+  } catch {
+  }
+}
 function effortName(id) {
   return String(id).replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
@@ -2292,6 +2337,8 @@ function retryFinishFromThrownError(error) {
     code = "TRANSPORT";
   } else if (isContextOverflowError(error)) {
     code = "CONTEXT_WINDOW_EXCEEDED";
+  } else if (code === "TRANSPORT" || /\bfetch failed\b/i.test(String(error?.message ?? "")) || error?.cause?.code === "ECONNRESET" || error?.cause?.code === "ETIMEDOUT") {
+    code = "TRANSPORT";
   }
   if (!RETRYABLE_THROWN_FAILURE_CODES.has(code)) return null;
   return {
@@ -2335,7 +2382,7 @@ function resolveFallbackModelMetadata(provider, model) {
   } else if (id.includes("gpt-") || id.includes("codex-") || provider === "openai-codex") {
     contextWindow = 2e5;
     maxTokens = 8192;
-  } else if (provider === "commandcode") {
+  } else if (provider === "commandcode" || provider === "hermes") {
     contextWindow = 1e6;
     maxTokens = 16384;
   }
@@ -2347,12 +2394,17 @@ function resolveFallbackModelMetadata(provider, model) {
     defaultMaxTokens: maxTokens
   };
 }
-function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = null } = {}) {
+function createDockyardLlmAdapter({
+  runtime,
+  providerIds,
+  attachmentsResolver = null,
+  catalogCachePath = null
+} = {}) {
   if (!runtime) throw new ValidationError("Dockyard runtime is required");
   const owned = [...providerIds ?? runtime.listProviderIds?.() ?? []];
   if (owned.length === 0) throw new ValidationError("At least one Dockyard provider is required");
   const catalogPromises = /* @__PURE__ */ new Map();
-  const catalogCache = /* @__PURE__ */ new Map();
+  const catalogCache = catalogCachePath ? loadDiskCatalogCache(catalogCachePath) : /* @__PURE__ */ new Map();
   const STREAM_CATALOG_REFRESH_MS = 6e4;
   async function ensureRuntimeReady() {
     if (typeof runtime.init === "function") await runtime.init();
@@ -2389,7 +2441,10 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
     let promise = catalogPromises.get(provider);
     if (!promise) {
       promise = Promise.resolve().then(() => runtime.getCatalog(provider, { force })).then((catalog) => {
-        catalogCache.set(provider, { value: catalog, fetchedAt: Date.now() });
+        if (Array.isArray(catalog?.models) && catalog.models.length > 0) {
+          catalogCache.set(provider, { value: catalog, fetchedAt: Date.now() });
+          saveDiskCatalogCache(catalogCachePath, catalogCache);
+        }
         return catalog;
       }).finally(() => {
         if (catalogPromises.get(provider) === promise) catalogPromises.delete(provider);
@@ -2402,7 +2457,7 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
     const entry = catalogCache.get(provider);
     if (!entry) return null;
     if (Date.now() - entry.fetchedAt >= STREAM_CATALOG_REFRESH_MS && !catalogPromises.has(provider)) {
-      void providerCatalog(provider).catch(() => {
+      void providerCatalog(provider, void 0, { force: true }).catch(() => {
       });
     }
     return entry.value;
@@ -2443,7 +2498,8 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
     async listModels(provider, signal) {
       await ensureRuntimeReady();
       if (!providerHasConnectedAccount(runtime, provider)) return [];
-      const catalog = await providerCatalog(provider, signal);
+      const cached = cachedProviderCatalog(provider);
+      const catalog = cached ?? await providerCatalog(provider, signal);
       const allModels = providerCatalogModels(provider, catalog);
       const enabled = runtime.getModelSelection?.(provider);
       if (Array.isArray(enabled)) {
@@ -2602,11 +2658,11 @@ var DshInjectionBridge = class {
 // packages/vault/src/index.mjs
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname as dirname2, join as join2 } from "node:path";
 import { fileURLToPath } from "node:url";
 var KEYCHAIN_SERVICE = "com.dockyard-dsh.credentials";
 var SWIFT_BIN = "/usr/bin/swift";
-var KEYCHAIN_HELPER = join(dirname(fileURLToPath(import.meta.url)), "macos-keychain-helper.swift");
+var KEYCHAIN_HELPER = join2(dirname2(fileURLToPath(import.meta.url)), "macos-keychain-helper.swift");
 function stableKey(value) {
   return createHash("sha256").update(String(value)).digest("hex");
 }
@@ -2707,8 +2763,8 @@ var secretStoreConstants = Object.freeze({
 
 // packages/runtime/src/state-store.mjs
 import { mkdir, open, readFile as readFile2, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname as dirname2, join as join2 } from "node:path";
-import { homedir } from "node:os";
+import { dirname as dirname3, join as join3 } from "node:path";
+import { homedir as homedir2 } from "node:os";
 import { randomUUID } from "node:crypto";
 var LOCK_RETRY_MS = 25;
 var LOCK_TIMEOUT_MS = 3e4;
@@ -2747,7 +2803,7 @@ async function removeLockIfOwned(lockPath, token) {
 async function acquireFileLock(filePath) {
   const lockPath = `${filePath}.lock`;
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
-  await mkdir(dirname2(filePath), { recursive: true, mode: 448 });
+  await mkdir(dirname3(filePath), { recursive: true, mode: 448 });
   while (true) {
     try {
       const handle = await open(lockPath, "wx", 384);
@@ -2803,11 +2859,11 @@ async function withFileLock(filePath, operation) {
     await release();
   }
 }
-function defaultDockyardHome({ env = process.env, home = homedir() } = {}) {
-  return env.DOCKYARD_DSH_HOME || join2(home, ".dockyard-dsh");
+function defaultDockyardHome({ env = process.env, home = homedir2() } = {}) {
+  return env.DOCKYARD_DSH_HOME || join3(home, ".dockyard-dsh");
 }
 function defaultDockyardStatePath(options = {}) {
-  return join2(defaultDockyardHome(options), "state.json");
+  return join3(defaultDockyardHome(options), "state.json");
 }
 function emptyState() {
   return {
@@ -2880,7 +2936,7 @@ var JsonStateStore = class {
       ...state,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    await mkdir(dirname2(this.filePath), { recursive: true, mode: 448 });
+    await mkdir(dirname3(this.filePath), { recursive: true, mode: 448 });
     const tempPath = `${this.filePath}.${randomUUID()}.tmp`;
     let committed = false;
     try {
@@ -2895,7 +2951,7 @@ var JsonStateStore = class {
       await rename(tempPath, this.filePath);
       committed = true;
       try {
-        const directory = await open(dirname2(this.filePath), "r");
+        const directory = await open(dirname3(this.filePath), "r");
         try {
           await directory.sync();
         } catch {
@@ -3189,8 +3245,8 @@ var ModelSelectionStore = class {
 
 // modules/provider-codex/src/driver.mjs
 import { createHash as createHash3 } from "node:crypto";
-import { homedir as homedir2 } from "node:os";
-import { dirname as dirname3, join as join4 } from "node:path";
+import { homedir as homedir3 } from "node:os";
+import { dirname as dirname4, join as join5 } from "node:path";
 
 // packages/oauth/src/browser-oauth-authorizer.mjs
 import { createHash as createHash2, randomBytes, randomUUID as randomUUID2 } from "node:crypto";
@@ -3537,7 +3593,7 @@ var browserOAuthAuthorizerConstants = Object.freeze({
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { mkdir as mkdir2, mkdtemp, readFile as readFile3, rm as rm2 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join as join3 } from "node:path";
+import { join as join4 } from "node:path";
 import { spawn as spawn2 } from "node:child_process";
 
 // packages/oauth/src/cli-url-sanitizer.mjs
@@ -3709,7 +3765,7 @@ function createCliOAuthAuthorizer({
         }
         let raw;
         try {
-          raw = JSON.parse(await readFile3(join3(session.profileDir, authFileName), "utf8"));
+          raw = JSON.parse(await readFile3(join4(session.profileDir, authFileName), "utf8"));
         } catch (error) {
           session.status = "failed";
           session.diagnostic = `\u5B98\u65B9\u767B\u5F55\u5B8C\u6210\uFF0C\u4F46\u6CA1\u6709\u627E\u5230\u53EF\u8BFB\u53D6\u7684 OAuth \u72B6\u6001\uFF1A${redactError(error)}`;
@@ -3740,7 +3796,7 @@ function createCliOAuthAuthorizer({
   }
   async function begin() {
     const cleanupProfile = !profileDirectory;
-    const profileDir = profileDirectory ?? await mkdtemp(join3(tmpdir(), profilePrefix));
+    const profileDir = profileDirectory ?? await mkdtemp(join4(tmpdir(), profilePrefix));
     if (!cleanupProfile) await mkdir2(profileDir, { recursive: true });
     const session = {
       sessionId: `${providerId}:${randomUUID3()}`,
@@ -3888,15 +3944,15 @@ var CREDENTIAL_SLOT = Symbol("dockyard-codex-credential");
 function hash(value) {
   return createHash3("sha256").update(String(value)).digest("hex");
 }
-function codexHomePath({ env = process.env, home = homedir2(), codexHome, authFilePath } = {}) {
+function codexHomePath({ env = process.env, home = homedir3(), codexHome, authFilePath } = {}) {
   if (codexHome) return codexHome;
-  if (authFilePath) return dirname3(authFilePath);
-  return env.CODEX_HOME || join4(home, ".codex");
+  if (authFilePath) return dirname4(authFilePath);
+  return env.CODEX_HOME || join5(home, ".codex");
 }
-function codexAuthPath({ env = process.env, home = homedir2(), authFilePath, codexHome } = {}) {
+function codexAuthPath({ env = process.env, home = homedir3(), authFilePath, codexHome } = {}) {
   if (authFilePath) return authFilePath;
   const baseHome = codexHomePath({ env, home, codexHome, authFilePath });
-  return join4(baseHome, "auth.json");
+  return join5(baseHome, "auth.json");
 }
 function profileClaims(payload) {
   return payload?.["https://api.openai.com/profile"] ?? payload?.profile ?? {};
@@ -4069,7 +4125,7 @@ function parseCodexModelCatalog(raw) {
 }
 function createCodexCatalogLoader({
   env = process.env,
-  home = homedir2(),
+  home = homedir3(),
   codexHome,
   authFilePath,
   modelsCachePath,
@@ -4081,7 +4137,7 @@ function createCodexCatalogLoader({
 } = {}) {
   const resolvedHome = codexHomePath({ env, home, codexHome, authFilePath });
   const resolvedAuthPath = codexAuthPath({ env, home, authFilePath, codexHome: resolvedHome });
-  const resolvedCachePath = modelsCachePath || join4(resolvedHome, "models_cache.json");
+  const resolvedCachePath = modelsCachePath || join5(resolvedHome, "models_cache.json");
   let cached = null;
   let cachedAt = 0;
   let pending = null;
@@ -4177,7 +4233,7 @@ var CodexOAuthDriver = class {
     codexHome,
     modelsCachePath,
     env = process.env,
-    home = homedir2(),
+    home = homedir3(),
     tokenUrl = env.DOCKYARD_CODEX_TOKEN_URL || DEFAULT_TOKEN_URL,
     usageUrls = env.DOCKYARD_CODEX_USAGE_URL ? [env.DOCKYARD_CODEX_USAGE_URL] : [...DEFAULT_USAGE_URLS],
     modelsUrl = env.DOCKYARD_CODEX_MODELS_URL || DEFAULT_CODEX_MODELS_URL,
@@ -4644,10 +4700,10 @@ function createCodexModule({ driver = {} } = {}) {
 // modules/provider-antigravity/src/driver.mjs
 import { spawn as spawn4 } from "node:child_process";
 import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync as existsSync2 } from "node:fs";
 import { mkdir as mkdir3, mkdtemp as mkdtemp2, readFile as readFile4, rename as rename2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
-import { homedir as homedir4, tmpdir as tmpdir2 } from "node:os";
-import { dirname as dirname4, join as join6 } from "node:path";
+import { homedir as homedir5, tmpdir as tmpdir2 } from "node:os";
+import { dirname as dirname5, join as join7 } from "node:path";
 
 // packages/providers/src/cli-agent-transport.mjs
 import { spawn as spawn3 } from "node:child_process";
@@ -4811,9 +4867,9 @@ var cliAgentTransportConstants = Object.freeze({
 });
 
 // modules/provider-antigravity/src/native-transport.mjs
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join5 } from "node:path";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join6 } from "node:path";
 import { execFileSync } from "node:child_process";
 
 // packages/providers/src/native-transport.mjs
@@ -5038,6 +5094,13 @@ async function fetchNativeResponse(url, init = {}, {
   } catch (error) {
     if (error?.name === "AbortError" && timedOut && !error.providerId) {
       throw timeoutError;
+    }
+    if (/\bfetch failed\b/i.test(String(error?.message ?? "")) || error?.cause?.code === "ECONNRESET" || error?.cause?.code === "ETIMEDOUT") {
+      const err = nativeProviderError(providerId, `\u7F51\u7EDC\u8FDE\u63A5\u5F02\u5E38 (${error.message})\uFF0C\u53EF\u80FD\u7531\u4E8E\u7F51\u7EDC\u6296\u52A8\u6216\u4EE3\u7406\u65AD\u5F00`, {
+        code: "TRANSPORT"
+      });
+      err.cause = error;
+      throw err;
     }
     throw error;
   } finally {
@@ -5349,6 +5412,22 @@ function parseDsmlCalls(text3) {
   }
   return toolCalls.length > 0 ? toolCalls : null;
 }
+function sanitizeToolCallId(rawId, maxLength = 64) {
+  if (!rawId || typeof rawId !== "string") return "call_tool";
+  if (rawId.includes("|")) {
+    const separatorIndex = rawId.indexOf("|");
+    const callPart = rawId.slice(0, separatorIndex);
+    const itemPart = rawId.slice(separatorIndex + 1);
+    const cleanCall = callPart.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const cleanItem = itemPart.replace(/[^a-zA-Z0-9_-]/g, "_");
+    if (!cleanItem) return cleanCall.slice(0, maxLength) || "call_tool";
+    const itemSuffix = cleanItem.slice(-16);
+    const callPrefix = cleanCall.slice(0, Math.max(1, maxLength - 1 - itemSuffix.length));
+    return `${callPrefix}_${itemSuffix}`;
+  }
+  const clean = rawId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return clean.slice(0, maxLength) || "call_tool";
+}
 var DsmlStreamFilter = class {
   constructor({ onTextDelta, onTextBlockStart, onTextBlockEnd } = {}) {
     this.onTextDelta = onTextDelta;
@@ -5444,7 +5523,7 @@ var AGY_KEYCHAIN_ACCOUNT = "antigravity";
 var AGY_KEYCHAIN_VALUE_PREFIX = "go-keyring-base64:";
 var ANTIGRAVITY_INFO_PATHS = [
   "/Applications/Antigravity.app/Contents/Info.plist",
-  join5(homedir3(), "Applications/Antigravity.app/Contents/Info.plist")
+  join6(homedir4(), "Applications/Antigravity.app/Contents/Info.plist")
 ];
 function normalizeAntigravityClientVersion(value) {
   const version = String(value ?? "").trim();
@@ -5637,7 +5716,7 @@ function oauthRecordFromObject(value, depth = 0) {
 }
 function readOfficialTokenFile(path) {
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    const parsed = JSON.parse(readFileSync2(path, "utf8"));
     const record = oauthRecordFromObject(parsed);
     return record ? {
       ...record,
@@ -5648,9 +5727,9 @@ function readOfficialTokenFile(path) {
     return null;
   }
 }
-function readAntigravityTokenFile({ env = process.env, home = homedir3() } = {}) {
+function readAntigravityTokenFile({ env = process.env, home = homedir4() } = {}) {
   return readOfficialTokenFile(
-    env.DOCKYARD_ANTIGRAVITY_TOKEN_FILE || join5(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+    env.DOCKYARD_ANTIGRAVITY_TOKEN_FILE || join6(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
   );
 }
 function parseAntigravityKeychainValue(value) {
@@ -5674,14 +5753,14 @@ function parseAntigravityKeychainValue(value) {
 var cachedKeychainToken = null;
 var lastKeychainReadTime = 0;
 var KEYCHAIN_CACHE_TTL_MS = 6e4;
-function readAntigravityKeychainToken({ home = homedir3() } = {}) {
+function readAntigravityKeychainToken({ home = homedir4() } = {}) {
   if (process.platform !== "darwin") return null;
   const now = Date.now();
   if (cachedKeychainToken && now - lastKeychainReadTime < KEYCHAIN_CACHE_TTL_MS) {
     return cachedKeychainToken;
   }
   try {
-    const keychainPath = join5(home, "Library", "Keychains", "login.keychain-db");
+    const keychainPath = join6(home, "Library", "Keychains", "login.keychain-db");
     const value = execFileSync(MACOS_SECURITY_BIN, [
       "find-generic-password",
       "-s",
@@ -5706,7 +5785,7 @@ function readAntigravityKeychainToken({ home = homedir3() } = {}) {
     return null;
   }
 }
-function resolveAntigravityAccessToken({ credential, env = process.env, home = homedir3() } = {}) {
+function resolveAntigravityAccessToken({ credential, env = process.env, home = homedir4() } = {}) {
   const stored = firstString(credential?.access, credential?.token);
   if (stored) {
     return { token: stored, kind: "oauth", email: emailFromObject(credential) };
@@ -5742,7 +5821,7 @@ function projectIdFromLoadCodeAssist(value, depth = 0) {
 function createAntigravityProjectResolver({
   endpoint: endpoint2 = process.env.DOCKYARD_ANTIGRAVITY_PROJECT_ENDPOINT || DEFAULT_PROJECT_ENDPOINT,
   env = process.env,
-  home = homedir3(),
+  home = homedir4(),
   timeoutMs = 2e4,
   fetchImpl = fetch,
   tokenResolver = resolveAntigravityAccessToken,
@@ -6129,11 +6208,11 @@ function saveInlineImageToArtifacts(inlineData, workingDir = process.cwd()) {
     const base64Data = inlineData?.data;
     if (!base64Data || typeof base64Data !== "string") return null;
     const ext = extensionFromMimeType(mediaType);
-    const artifactsDir = join5(workingDir, "artifacts");
-    mkdirSync(artifactsDir, { recursive: true });
+    const artifactsDir = join6(workingDir, "artifacts");
+    mkdirSync2(artifactsDir, { recursive: true });
     const filename = `imagen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-    const filePath = join5(artifactsDir, filename);
-    writeFileSync(filePath, Buffer.from(base64Data, "base64"));
+    const filePath = join6(artifactsDir, filename);
+    writeFileSync2(filePath, Buffer.from(base64Data, "base64"));
     return `/artifacts/${filename}`;
   } catch {
     return null;
@@ -6406,7 +6485,7 @@ function createAntigravityNativeExecutor({
       const ref = invocation?.auth?.credentialRef ?? invocation?.account?.auth?.credentialRef ?? invocation?.account?.credentialRef;
       if (ref) credential = await context.secretStore.read(ref);
     }
-    const authPromise = tokenResolver({ credential, env: { ...env, ...context.env ?? {} }, home: homedir3() });
+    const authPromise = tokenResolver({ credential, env: { ...env, ...context.env ?? {} }, home: homedir4() });
     const projectPromise = typeof projectResolver === "function" ? projectResolver({ credential, account: invocation?.account, context }) : Promise.resolve(project);
     const nativeRequestPromise = buildAntigravityRequest(request, context);
     const [auth, resolvedProject, nativeRequest] = await Promise.all([
@@ -6452,7 +6531,7 @@ function createAntigravityNativeExecutor({
 function createAntigravityNativeQuotaReader({
   endpoint: endpoint2 = process.env.DOCKYARD_ANTIGRAVITY_QUOTA_ENDPOINT || DEFAULT_QUOTA_ENDPOINT,
   env = process.env,
-  home = homedir3(),
+  home = homedir4(),
   timeoutMs = 2e4,
   fetchImpl = fetch,
   tokenResolver = resolveAntigravityAccessToken,
@@ -6508,33 +6587,33 @@ var antigravityNativeTransportConstants = Object.freeze({
 // modules/provider-antigravity/src/driver.mjs
 var PROVIDER_ID3 = "antigravity";
 var DEFAULT_CLI = "agy";
-function resolveAgyCliPath(configured, { env = process.env, home = homedir4() } = {}) {
+function resolveAgyCliPath(configured, { env = process.env, home = homedir5() } = {}) {
   const envPath = configured ?? env.DOCKYARD_ANTIGRAVITY_CLI;
   if (envPath && envPath !== "agy" && envPath !== DEFAULT_CLI) {
     return envPath;
   }
   const candidates = [
-    join6(home, ".local", "bin", "agy"),
-    join6(home, ".gemini", "antigravity", "bin", "agy"),
+    join7(home, ".local", "bin", "agy"),
+    join7(home, ".gemini", "antigravity", "bin", "agy"),
     "/usr/local/bin/agy",
     "/opt/homebrew/bin/agy",
     "/usr/bin/agy"
   ];
   for (const candidate2 of candidates) {
-    if (existsSync(candidate2)) return candidate2;
+    if (existsSync2(candidate2)) return candidate2;
   }
   return envPath || DEFAULT_CLI;
 }
-function augmentPathWithUserBins(env = process.env, home = homedir4()) {
+function augmentPathWithUserBins(env = process.env, home = homedir5()) {
   const extraPaths = [
-    join6(home, ".local", "bin"),
-    join6(home, ".gemini", "antigravity", "bin"),
+    join7(home, ".local", "bin"),
+    join7(home, ".gemini", "antigravity", "bin"),
     "/opt/homebrew/bin",
     "/usr/local/bin"
   ];
   const currentPath = env?.PATH || "";
   const parts = currentPath.split(":");
-  const toPrepend = extraPaths.filter((p) => existsSync(p) && !parts.includes(p));
+  const toPrepend = extraPaths.filter((p) => existsSync2(p) && !parts.includes(p));
   if (toPrepend.length === 0) return currentPath;
   return [...toPrepend, currentPath].filter(Boolean).join(":");
 }
@@ -6706,8 +6785,8 @@ function tokenNeedsRefresh(credential, now, leewayMs = 6e4) {
   return !Number.isFinite(expiresAt) || expiresAt <= now.getTime() + leewayMs;
 }
 function officialAntigravityTokenPath(environment) {
-  const home = environment?.HOME || homedir4();
-  return environment?.DOCKYARD_ANTIGRAVITY_TOKEN_FILE || join6(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+  const home = environment?.HOME || homedir5();
+  return environment?.DOCKYARD_ANTIGRAVITY_TOKEN_FILE || join7(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
 }
 function agyRefreshEnvironment(environment, tokenPath) {
   return {
@@ -6740,8 +6819,8 @@ function runCommand(command, args, {
     const childEnv = { ...env };
     if (includeAccountInfo) delete childEnv.AGY_CLI_HIDE_ACCOUNT_INFO;
     else childEnv.AGY_CLI_HIDE_ACCOUNT_INFO ??= "1";
-    childEnv.PATH = augmentPathWithUserBins(childEnv, childEnv.HOME || homedir4());
-    const resolvedCommand = command === DEFAULT_CLI || command === "agy" ? resolveAgyCliPath(command, { env: childEnv, home: childEnv.HOME || homedir4() }) : command;
+    childEnv.PATH = augmentPathWithUserBins(childEnv, childEnv.HOME || homedir5());
+    const resolvedCommand = command === DEFAULT_CLI || command === "agy" ? resolveAgyCliPath(command, { env: childEnv, home: childEnv.HOME || homedir5() }) : command;
     const child = spawn4(resolvedCommand, args, {
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
@@ -6867,9 +6946,9 @@ function catalogScopeKey(accounts) {
   const accountIds = (Array.isArray(accounts) ? accounts : []).map((account) => typeof account?.accountId === "string" ? account.accountId : "").filter(Boolean).sort();
   return accountIds.length > 0 ? `accounts:${hash2(accountIds.join("\n")).slice(0, 32)}` : "unscoped";
 }
-function defaultAntigravityCatalogCachePath({ env = process.env, home = homedir4() } = {}) {
-  const dockyardHome = env.DOCKYARD_DSH_HOME || join6(home, ".dockyard-dsh");
-  return join6(dockyardHome, "antigravity-catalog.json");
+function defaultAntigravityCatalogCachePath({ env = process.env, home = homedir5() } = {}) {
+  const dockyardHome = env.DOCKYARD_DSH_HOME || join7(home, ".dockyard-dsh");
+  return join7(dockyardHome, "antigravity-catalog.json");
 }
 function persistableCatalog(value) {
   return {
@@ -6891,7 +6970,7 @@ async function readAntigravityCatalogCache(filePath) {
 }
 async function writeAntigravityCatalogCache(filePath, cache) {
   if (!filePath) return;
-  await mkdir3(dirname4(filePath), { recursive: true, mode: 448 });
+  await mkdir3(dirname5(filePath), { recursive: true, mode: 448 });
   const entries = Object.entries(cache.entries ?? {}).slice(-8);
   const tempPath = `${filePath}.${randomUUID4()}.tmp`;
   try {
@@ -6932,7 +7011,7 @@ function enrichAntigravityModelCatalog(models, registry) {
 function createAntigravityCatalogLoader({
   cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
   env = process.env,
-  home = homedir4(),
+  home = homedir5(),
   cacheFilePath = env.DOCKYARD_ANTIGRAVITY_CATALOG_CACHE ?? defaultAntigravityCatalogCachePath({ env, home }),
   timeoutMs = 3e4,
   cacheTtlMs = Number(process.env.DOCKYARD_ANTIGRAVITY_CATALOG_TTL_MS) || DEFAULT_CATALOG_TTL_MS,
@@ -7243,7 +7322,7 @@ function publicAntigravityAuthSession(session) {
 function createAntigravityOAuthAuthorizer({
   cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
   environment = process.env,
-  home = homedir4(),
+  home = homedir5(),
   timeoutMs = DEFAULT_AUTH_TIMEOUT_MS,
   prompt = "Reply with OK",
   spawnImpl = spawn4,
@@ -7327,12 +7406,12 @@ function createAntigravityOAuthAuthorizer({
     return session.finalizing;
   }
   async function begin() {
-    const profileDir = await mkdtemp2(join6(tmpdir2(), "dockyard-antigravity-oauth-"));
-    const tokenPath = join6(profileDir, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+    const profileDir = await mkdtemp2(join7(tmpdir2(), "dockyard-antigravity-oauth-"));
+    const tokenPath = join7(profileDir, ".gemini", "antigravity-cli", "antigravity-oauth-token");
     const childEnv = {
       ...environment,
       HOME: profileDir,
-      XDG_CONFIG_HOME: join6(profileDir, ".config"),
+      XDG_CONFIG_HOME: join7(profileDir, ".config"),
       DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath
     };
     childEnv.PATH = augmentPathWithUserBins(childEnv, home);
@@ -7442,7 +7521,7 @@ var AntigravityOfficialSessionDriver = class {
   constructor({
     cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
     env = process.env,
-    home = homedir4(),
+    home = homedir5(),
     cacheFilePath,
     timeoutMs = 3e4,
     commandRunner = runCommand,
@@ -7666,10 +7745,10 @@ var AntigravityOfficialSessionDriver = class {
       throw activeSessionError("Antigravity official session has expired; authorize again");
     }
     const officialTokenPath = officialAntigravityTokenPath(this.env);
-    const officialHome = this.env.HOME || homedir4();
+    const officialHome = this.env.HOME || homedir5();
     const childEnv = agyRefreshEnvironment(this.env, officialTokenPath);
     try {
-      await mkdir3(dirname4(officialTokenPath), { recursive: true, mode: 448 });
+      await mkdir3(dirname5(officialTokenPath), { recursive: true, mode: 448 });
       const refreshCommand = this.usePtyForSessionRefresh ? this.ptyPythonPath : this.cliPath;
       const refreshArgs = this.usePtyForSessionRefresh ? ["-u", "-c", ANTIGRAVITY_PTY_SCRIPT, this.cliPath, "models"] : ["models"];
       await this.commandRunner(refreshCommand, refreshArgs, {
@@ -7696,7 +7775,7 @@ var AntigravityOfficialSessionDriver = class {
       if (nextCredential.access === credential.access && !expiryAdvanced) {
         throw new Error("agy did not advance the Antigravity OAuth token expiry");
       }
-      await mkdir3(dirname4(officialTokenPath), { recursive: true, mode: 448 });
+      await mkdir3(dirname5(officialTokenPath), { recursive: true, mode: 448 });
       const persistedPath = `${officialTokenPath}.${randomUUID4()}.tmp`;
       try {
         await writeFile2(persistedPath, JSON.stringify({
@@ -7730,11 +7809,11 @@ var AntigravityOfficialSessionDriver = class {
       throw activeSessionError("Antigravity agy session has no refresh token; authorize again");
     }
     const tokenPath = officialAntigravityTokenPath(this.env);
-    const officialHome = this.env.HOME || homedir4();
+    const officialHome = this.env.HOME || homedir5();
     const childEnv = agyRefreshEnvironment(this.env, tokenPath);
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
     try {
-      await mkdir3(dirname4(tokenPath), { recursive: true, mode: 448 });
+      await mkdir3(dirname5(tokenPath), { recursive: true, mode: 448 });
       if (!readAntigravityTokenFile({ env: childEnv, home: officialHome })?.token) {
         await writeFile2(tokenPath, JSON.stringify({
           auth_method: "consumer",
@@ -8187,9 +8266,9 @@ function createAntigravityModule({ driver = {} } = {}) {
 // modules/provider-grok/src/driver.mjs
 import { createHash as createHash5 } from "node:crypto";
 import { mkdtemp as mkdtemp3, readFile as readFile5, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
-import { homedir as homedir5 } from "node:os";
+import { homedir as homedir6 } from "node:os";
 import { tmpdir as tmpdir3 } from "node:os";
-import { join as join7 } from "node:path";
+import { join as join8 } from "node:path";
 var PROVIDER_ID4 = "grok";
 var DEFAULT_AUTHORIZATION_URL2 = "https://auth.x.ai/oauth2/authorize";
 var DEFAULT_TOKEN_URL2 = "https://auth.x.ai/oauth2/token";
@@ -8197,7 +8276,7 @@ var DEFAULT_USERINFO_URL = "https://auth.x.ai/oauth2/userinfo";
 var DEFAULT_GROK_MODELS_URL = "https://cli-chat-proxy.grok.com/v1/models";
 var DEFAULT_CLIENT_ID2 = "b1a00492-073a-47ea-816f-4c329264a828";
 var DEFAULT_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write workspaces:read workspaces:write";
-var DEFAULT_GROK_HOME = join7(homedir5(), ".grok");
+var DEFAULT_GROK_HOME = join8(homedir6(), ".grok");
 var DEFAULT_CATALOG_TTL_MS2 = 6e4;
 var DEFAULT_GROK_USAGE_URL = "https://grok.com/?_s=usage";
 var DEFAULT_GROK_CREDITS_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
@@ -8218,8 +8297,8 @@ function grokTokenNeedsRefresh(credential, now = /* @__PURE__ */ new Date(), lee
   const expiresAt = Date.parse(credential.expiresAt);
   return Number.isFinite(expiresAt) && expiresAt <= now.getTime() + leewayMs;
 }
-function grokHomePath({ env = process.env, home = homedir5(), grokHome } = {}) {
-  return grokHome ?? env.GROK_HOME ?? join7(home, ".grok");
+function grokHomePath({ env = process.env, home = homedir6(), grokHome } = {}) {
+  return grokHome ?? env.GROK_HOME ?? join8(home, ".grok");
 }
 function grokCommandEnvironment(env, grokHome) {
   return { ...env, GROK_HOME: grokHome };
@@ -8600,7 +8679,7 @@ var BUILTIN_GROK_MODELS = Object.freeze([
 ]);
 function createGrokCatalogLoader({
   env = process.env,
-  home = homedir5(),
+  home = homedir6(),
   grokHome,
   cliPath = env.DOCKYARD_GROK_CLI || "grok",
   commandRunner = null,
@@ -8622,7 +8701,7 @@ function createGrokCatalogLoader({
     if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
     if (pending) return pending;
     pending = (async () => {
-      const cache = await readJson3(join7(resolvedHome, "models_cache.json"));
+      const cache = await readJson3(join8(resolvedHome, "models_cache.json"));
       let discoveredModels = [];
       let source = "official_grok_cli";
       let cliError = null;
@@ -8736,7 +8815,7 @@ var GrokOAuthDriver = class {
   constructor({
     authFilePath,
     env = process.env,
-    home = homedir5(),
+    home = homedir6(),
     grokHome,
     catalogLoader = null,
     oauthAuthorizer = null,
@@ -8760,7 +8839,7 @@ var GrokOAuthDriver = class {
   } = {}) {
     this.env = env;
     this.grokHome = grokHomePath({ env, home, grokHome });
-    this.authFilePath = authFilePath ?? join7(this.grokHome, "auth.json");
+    this.authFilePath = authFilePath ?? join8(this.grokHome, "auth.json");
     this.cliPath = cliPath;
     this.commandRunner = commandRunner;
     this.requestExecutor = requestExecutor;
@@ -9026,8 +9105,8 @@ var GrokOAuthDriver = class {
   }
   async #prepareCredentialEnvironment(account, context = {}) {
     const credential = await this.#readCredential(account, context);
-    const profileDir = await mkdtemp3(join7(tmpdir3(), "dockyard-grok-run-"));
-    const authPath = join7(profileDir, "auth.json");
+    const profileDir = await mkdtemp3(join8(tmpdir3(), "dockyard-grok-run-"));
+    const authPath = join8(profileDir, "auth.json");
     const key = account.accountId ?? credential.accountId;
     const raw = {
       [key]: {
@@ -9301,14 +9380,14 @@ async function buildGrokMessages(request, attachments) {
     if (role === "tool") {
       result.push({
         role: "tool",
-        tool_call_id: firstString3(message.toolCallId, message.tool_call_id, message.id, "tool-result"),
+        tool_call_id: sanitizeToolCallId(firstString3(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
         content: textFromContent(message.content ?? message.text ?? message.output ?? message.result)
       });
       continue;
     }
     const content = await openAiContent(message?.content ?? message?.text, attachments);
     const calls = (Array.isArray(message?.content) ? message.content : [message?.content]).map(toolCallPart).filter(Boolean).map((call, index) => ({
-      id: firstString3(call.id, call.toolCallId, call.tool_call_id, `tool-${index}`),
+      id: sanitizeToolCallId(firstString3(call.id, call.toolCallId, call.tool_call_id, `tool-${index}`)),
       type: "function",
       function: {
         name: firstString3(call.name, call.function?.name, "tool"),
@@ -9516,7 +9595,7 @@ function createGrokModule({ driver = {} } = {}) {
 
 // modules/provider-claude/src/driver.mjs
 import { createHash as createHash6 } from "node:crypto";
-import { homedir as homedir7 } from "node:os";
+import { homedir as homedir8 } from "node:os";
 
 // packages/oauth/src/cli-status-authorizer.mjs
 import { randomUUID as randomUUID5 } from "node:crypto";
@@ -9807,8 +9886,8 @@ var officialSessionAuthorizerConstants = Object.freeze({
 
 // modules/provider-claude/src/native-transport.mjs
 import { readFile as readFile6 } from "node:fs/promises";
-import { homedir as homedir6 } from "node:os";
-import { join as join8 } from "node:path";
+import { homedir as homedir7 } from "node:os";
+import { join as join9 } from "node:path";
 var PROVIDER_ID6 = "claude";
 var DEFAULT_ENDPOINT3 = "https://api.anthropic.com/v1/messages";
 function firstString4(...values) {
@@ -9843,10 +9922,10 @@ function claudeOAuthCredentialFromJson(value) {
     ...Array.isArray(oauth?.scopes) ? { scopes: oauth.scopes.map(String) } : {}
   };
 }
-async function readClaudeOAuthCredential({ home = homedir6() } = {}) {
+async function readClaudeOAuthCredential({ home = homedir7() } = {}) {
   for (const path of [
-    join8(home, ".claude", ".credentials.json"),
-    join8(home, ".opencodex", "claude_desktop_auth.json")
+    join9(home, ".claude", ".credentials.json"),
+    join9(home, ".opencodex", "claude_desktop_auth.json")
   ]) {
     const credential = claudeOAuthCredentialFromJson(await readJson(path));
     if (credential) return credential;
@@ -9856,7 +9935,7 @@ async function readClaudeOAuthCredential({ home = homedir6() } = {}) {
 async function resolveClaudeAccessToken({
   credential,
   env = process.env,
-  home = homedir6(),
+  home = homedir7(),
   accountBound = false
 } = {}) {
   const stored = firstString4(credential?.access, credential?.token);
@@ -9867,8 +9946,8 @@ async function resolveClaudeAccessToken({
   const envToken = firstString4(env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_AUTH_TOKEN);
   if (envToken) return { token: envToken, kind: "oauth" };
   for (const path of [
-    join8(home, ".claude", ".credentials.json"),
-    join8(home, ".opencodex", "claude_desktop_auth.json")
+    join9(home, ".claude", ".credentials.json"),
+    join9(home, ".opencodex", "claude_desktop_auth.json")
   ]) {
     const found = oauthTokenFromJson(await readJson(path));
     if (found) return found;
@@ -10136,7 +10215,7 @@ async function* streamClaudeResponse(response) {
 function createClaudeNativeExecutor({
   endpoint: endpoint2 = process.env.DOCKYARD_CLAUDE_ENDPOINT || DEFAULT_ENDPOINT3,
   env = process.env,
-  home = homedir6(),
+  home = homedir7(),
   timeoutMs = 3e5,
   fetchImpl = fetch,
   tokenResolver = resolveClaudeAccessToken
@@ -10418,7 +10497,7 @@ var ClaudeSubscriptionDriver = class {
     clientId = env.DOCKYARD_CLAUDE_CLIENT_ID || DEFAULT_BROWSER_CLIENT_ID,
     redirectUri = env.DOCKYARD_CLAUDE_REDIRECT_URI || DEFAULT_BROWSER_REDIRECT_URI,
     oauthScope = env.DOCKYARD_CLAUDE_OAUTH_SCOPE || DEFAULT_BROWSER_SCOPE,
-    home = homedir7(),
+    home = homedir8(),
     fetchImpl = fetch
   } = {}) {
     assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_CLAUDE_AUTHORIZATION_URL");
@@ -10806,13 +10885,13 @@ function createClaudeModule({ driver = {} } = {}) {
 
 // modules/provider-cursor/src/driver.mjs
 import { createHash as createHash8, randomBytes as randomBytes3, randomUUID as randomUUID9 } from "node:crypto";
-import { homedir as homedir9 } from "node:os";
+import { homedir as homedir10 } from "node:os";
 
 // modules/provider-cursor/src/native-transport.mjs
 import { execFileSync as execFileSync2 } from "node:child_process";
 import * as http2 from "node:http2";
-import { homedir as homedir8 } from "node:os";
-import { join as join9 } from "node:path";
+import { homedir as homedir9 } from "node:os";
+import { join as join10 } from "node:path";
 import { randomBytes as randomBytes2, randomUUID as randomUUID8 } from "node:crypto";
 
 // modules/provider-cursor/src/native-protocol.mjs
@@ -11383,7 +11462,7 @@ function createAsyncQueue() {
 function readCursorDesktopSession({
   credential,
   env = process.env,
-  home = homedir8()
+  home = homedir9()
 } = {}) {
   const stored = firstString7(credential?.access, credential?.token);
   if (stored) {
@@ -11400,7 +11479,7 @@ function readCursorDesktopSession({
   const fromEnv = firstString7(env.CURSOR_API_KEY, env.DOCKYARD_CURSOR_ACCESS_TOKEN);
   if (fromEnv) return { token: fromEnv, kind: "apiKey", source: "environment" };
   if (process.platform !== "darwin") return null;
-  const dbPath = join9(home, "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb");
+  const dbPath = join10(home, "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb");
   try {
     const quotedKeys = CURSOR_SESSION_KEYS.map((key) => `'${key}'`).join(",");
     const output = execFileSync2("sqlite3", ["-json", dbPath, `SELECT key, CAST(value AS TEXT) AS value FROM ItemTable WHERE key IN (${quotedKeys});`], {
@@ -11552,9 +11631,13 @@ function streamCursor({
           if ((frame.flags & 2) !== 0) {
             const trailer = decodeCursorConnectTrailer(frame.payload);
             if (trailer) {
-              const error = nativeProviderError(PROVIDER_ID8, trailer.message, {
+              let displayMessage = trailer.message;
+              if (displayMessage.includes("Grok Build isn't available for this account yet")) {
+                displayMessage = `${trailer.message} (\u5F53\u524D Cursor \u8D26\u53F7\u4E3A\u514D\u8D39\u7248 Free\uFF0CCursor \u5B98\u65B9 Agent \u8FD0\u884C\u63A5\u53E3\u9700\u8981 Pro \u6216\u8BA2\u9605\u6743\u9650)`;
+              }
+              const error = nativeProviderError(PROVIDER_ID8, displayMessage, {
                 code: trailer.code,
-                body: { code: trailer.code, message: trailer.message }
+                body: { code: trailer.code, message: displayMessage }
               });
               Object.assign(error, cursorGrpcStatusFlags(trailer.code));
               queue.fail(error);
@@ -11655,7 +11738,7 @@ function streamCursor({
 function createCursorNativeExecutor({
   endpoint: endpoint2 = process.env.DOCKYARD_CURSOR_ENDPOINT || DEFAULT_ENDPOINT4,
   env = process.env,
-  home = homedir8(),
+  home = homedir9(),
   tokenResolver = resolveCursorAccessToken,
   http2Module = http2,
   timeoutMs = Number(process.env.DOCKYARD_CURSOR_TIMEOUT_MS) || DEFAULT_TOTAL_TIMEOUT_MS,
@@ -11839,7 +11922,7 @@ function candidateFromStatus2(status, {
 async function resolveCursorBrowserEmail(raw, access2, {
   fetchImpl = null,
   apiBaseUrl = "https://api2.cursor.sh",
-  home = homedir9(),
+  home = homedir10(),
   signal
 } = {}) {
   const payload = decodeJwtPayload(access2) ?? {};
@@ -11993,6 +12076,39 @@ function summarizeCursorCandidate(candidate2) {
     diagnostic: candidate2.diagnostic ?? null
   };
 }
+function effortName2(id) {
+  return String(id).replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
+function extractCursorReasoning(value) {
+  if (value.reasoning && Array.isArray(value.reasoning.efforts) && value.reasoning.efforts.length > 0) {
+    return value.reasoning;
+  }
+  const paramDefs = Array.isArray(value.parameterDefinitions) ? value.parameterDefinitions : [];
+  const effortParam = paramDefs.find((param) => param?.id === "reasoning_effort" || param?.id === "effort" || param?.id === "reasoning");
+  const enumValues = effortParam?.parameterType?.enumParameter?.values;
+  if (Array.isArray(enumValues) && enumValues.length > 0) {
+    const validValues = enumValues.filter((entry) => entry?.value && entry.value !== "none" && entry.value !== "off");
+    if (validValues.length > 0) {
+      const efforts = validValues.map((entry) => ({
+        id: entry.value,
+        name: firstString8(entry.displayName, effortName2(entry.value))
+      }));
+      const defaultEffort = efforts.some((e) => e.id === "medium") ? "medium" : efforts.some((e) => e.id === "low") ? "low" : efforts[0]?.id;
+      return { efforts, ...defaultEffort ? { defaultEffort } : {} };
+    }
+  }
+  if (value.supportsThinking || value.supports_thinking) {
+    return {
+      efforts: [
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" }
+      ],
+      defaultEffort: "medium"
+    };
+  }
+  return null;
+}
 function normalizeModel(value) {
   if (typeof value === "string") return { id: value, name: value };
   if (!value || typeof value !== "object") return null;
@@ -12001,6 +12117,7 @@ function normalizeModel(value) {
   const contextWindow = value.contextWindow ?? value.context_window ?? value.contextTokenLimit ?? value.context_token_limit;
   const maxTokens = value.maxTokens ?? value.max_tokens ?? value.maxOutputTokens ?? value.max_output_tokens;
   const inputModalities = value.input ?? value.inputModalities ?? value.input_modalities ?? (value.supportsImages || value.supports_images ? ["text", "image"] : null);
+  const reasoning = extractCursorReasoning(value);
   return {
     id,
     name: firstString8(
@@ -12015,8 +12132,7 @@ function normalizeModel(value) {
     ...Number.isInteger(contextWindow) ? { contextWindow } : {},
     ...Number.isInteger(maxTokens) ? { maxTokens } : {},
     ...Array.isArray(inputModalities) ? { inputModalities: [...inputModalities] } : {},
-    ...value.reasoning ? { reasoning: value.reasoning } : {},
-    ...value.supportsThinking || value.supports_thinking ? { reasoning: { supported: true } } : {}
+    ...reasoning ? { reasoning } : {}
   };
 }
 function browserCatalogAccount(accounts) {
@@ -12039,7 +12155,7 @@ function createCursorCatalogLoader({
   }
   async function loadBrowserCatalog({ accounts, secretStore, signal }) {
     const account = browserCatalogAccount(accounts);
-    const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
+    const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef ?? (account?.accountId ? createCredentialRef(PROVIDER_ID9, account.accountId) : null);
     if (!account || !credentialRef || typeof secretStore?.read !== "function") return null;
     const credential = await secretStore.read(credentialRef);
     if (!credential?.access) return null;
@@ -12123,7 +12239,7 @@ var CursorSubscriptionDriver = class {
   constructor({
     cliPath = process.env.DOCKYARD_CURSOR_CLI || "cursor-agent",
     env = process.env,
-    home = homedir9(),
+    home = homedir10(),
     commandRunner = runCliCommand,
     requestExecutor = null,
     catalogLoader = null,
@@ -12704,15 +12820,15 @@ function summarizeOpencodeCandidate(candidate2) {
 }
 
 // modules/provider-workbuddy/src/driver.mjs
-import { existsSync as existsSync3, readdirSync, readFileSync as readFileSync3 } from "node:fs";
-import { join as join11 } from "node:path";
+import { existsSync as existsSync4, readdirSync, readFileSync as readFileSync4, statSync } from "node:fs";
+import { join as join12 } from "node:path";
 
 // modules/provider-workbuddy/src/native-transport.mjs
 import { execFileSync as execFileSync3 } from "node:child_process";
 import { randomBytes as randomBytes4, randomUUID as randomUUID10 } from "node:crypto";
-import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
-import { homedir as homedir10 } from "node:os";
-import { join as join10 } from "node:path";
+import { existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
+import { homedir as homedir11 } from "node:os";
+import { join as join11 } from "node:path";
 function firstString9(...values) {
   for (const val of values) {
     if (typeof val === "string" && val.length > 0) return val;
@@ -12724,41 +12840,41 @@ var DEFAULT_WORKBUDDY_ENDPOINT = "https://www.workbuddy.ai/v2/chat/completions";
 var cachedSession = null;
 var cachedSessionExpiry = 0;
 function findWorkbuddyElectronPath() {
-  if (process.env.WORKBUDDY_ELECTRON_PATH && existsSync2(process.env.WORKBUDDY_ELECTRON_PATH)) {
+  if (process.env.WORKBUDDY_ELECTRON_PATH && existsSync3(process.env.WORKBUDDY_ELECTRON_PATH)) {
     return process.env.WORKBUDDY_ELECTRON_PATH;
   }
   const candidates = [
     "/Applications/WorkBuddy AI.app/Contents/MacOS/Electron",
     "/Applications/WorkBuddy.app/Contents/MacOS/Electron",
-    join10(homedir10(), "Applications/WorkBuddy AI.app/Contents/MacOS/Electron"),
-    join10(homedir10(), "Applications/WorkBuddy.app/Contents/MacOS/Electron")
+    join11(homedir11(), "Applications/WorkBuddy AI.app/Contents/MacOS/Electron"),
+    join11(homedir11(), "Applications/WorkBuddy.app/Contents/MacOS/Electron")
   ];
   for (const candidate2 of candidates) {
-    if (existsSync2(candidate2)) return candidate2;
+    if (existsSync3(candidate2)) return candidate2;
   }
   return null;
 }
 function findWorkbuddyAuthFilePath() {
-  if (process.env.WORKBUDDY_AUTH_FILE_PATH && existsSync2(process.env.WORKBUDDY_AUTH_FILE_PATH)) {
+  if (process.env.WORKBUDDY_AUTH_FILE_PATH && existsSync3(process.env.WORKBUDDY_AUTH_FILE_PATH)) {
     return process.env.WORKBUDDY_AUTH_FILE_PATH;
   }
-  const candidate2 = join10(
-    homedir10(),
+  const candidate2 = join11(
+    homedir11(),
     "Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop-ai.info"
   );
-  if (existsSync2(candidate2)) return candidate2;
+  if (existsSync3(candidate2)) return candidate2;
   return null;
 }
 function findWorkbuddyConfigDir() {
-  if (process.env.WORKBUDDY_CONFIG_DIR && existsSync2(process.env.WORKBUDDY_CONFIG_DIR)) {
+  if (process.env.WORKBUDDY_CONFIG_DIR && existsSync3(process.env.WORKBUDDY_CONFIG_DIR)) {
     return process.env.WORKBUDDY_CONFIG_DIR;
   }
   const candidates = [
-    join10(homedir10(), ".workbuddy-ai"),
-    join10(homedir10(), ".workbuddy")
+    join11(homedir11(), ".workbuddy-ai"),
+    join11(homedir11(), ".workbuddy")
   ];
   for (const candidate2 of candidates) {
-    if (existsSync2(candidate2)) return candidate2;
+    if (existsSync3(candidate2)) return candidate2;
   }
   return null;
 }
@@ -12884,7 +13000,7 @@ async function buildWorkbuddyMessages(request, attachments = []) {
       const content = typeof message?.content === "string" ? message.content : textFromContent(message?.content ?? message?.text ?? message?.output ?? message?.result);
       messages.push({
         role: "tool",
-        tool_call_id: firstString9(message.toolCallId, message.tool_call_id, message.id, "tool-result"),
+        tool_call_id: sanitizeToolCallId(firstString9(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
         content: content || ""
       });
       continue;
@@ -12901,7 +13017,7 @@ async function buildWorkbuddyMessages(request, attachments = []) {
             parts.push(part.text);
           } else if (part?.type === "tool-call" || part?.type === "tool_call") {
             calls.push({
-              id: firstString9(part.id, part.toolCallId, `call_${calls.length}`),
+              id: sanitizeToolCallId(firstString9(part.id, part.toolCallId, `call_${calls.length}`)),
               type: "function",
               function: {
                 name: firstString9(part.name, part.function?.name, "tool"),
@@ -12917,7 +13033,7 @@ async function buildWorkbuddyMessages(request, attachments = []) {
       if (Array.isArray(message?.tool_calls)) {
         for (const tc of message.tool_calls) {
           calls.push({
-            id: firstString9(tc.id, tc.toolCallId, `call_${calls.length}`),
+            id: sanitizeToolCallId(firstString9(tc.id, tc.toolCallId, `call_${calls.length}`)),
             type: "function",
             function: {
               name: firstString9(tc.name, tc.function?.name, "tool"),
@@ -13175,19 +13291,28 @@ function summarizeWorkbuddyCandidate(candidate2) {
 }
 function findLocalWorkbuddySnapshot() {
   const configDir = findWorkbuddyConfigDir();
+  let latestFile = null;
+  let latestMtime = 0;
   if (configDir) {
-    const storageDir = join11(configDir, "storage");
-    if (existsSync3(storageDir)) {
+    const storageDir = join12(configDir, "storage");
+    if (existsSync4(storageDir)) {
       try {
         const userDirs = readdirSync(storageDir).filter((d) => d.startsWith("user-"));
         for (const userDir of userDirs) {
-          const scopedDir = join11(storageDir, userDir, "scoped");
-          if (existsSync3(scopedDir)) {
+          const scopedDir = join12(storageDir, userDir, "scoped");
+          if (existsSync4(scopedDir)) {
             const scopes = readdirSync(scopedDir);
             for (const scope of scopes) {
-              const configFile = join11(scopedDir, scope, "wb-product-config.json");
-              if (existsSync3(configFile)) {
-                return configFile;
+              const configFile = join12(scopedDir, scope, "wb-product-config.json");
+              if (existsSync4(configFile)) {
+                try {
+                  const mtime = statSync(configFile).mtimeMs;
+                  if (mtime > latestMtime) {
+                    latestMtime = mtime;
+                    latestFile = configFile;
+                  }
+                } catch {
+                }
               }
             }
           }
@@ -13196,10 +13321,11 @@ function findLocalWorkbuddySnapshot() {
       }
     }
   }
+  if (latestFile) return latestFile;
   const appAsarProductJson = "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar/cli/product.json";
-  if (existsSync3(appAsarProductJson)) return appAsarProductJson;
+  if (existsSync4(appAsarProductJson)) return appAsarProductJson;
   const unpackedProductJson = "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/product.json";
-  if (existsSync3(unpackedProductJson)) return unpackedProductJson;
+  if (existsSync4(unpackedProductJson)) return unpackedProductJson;
   return null;
 }
 function parseWorkbuddyCatalog(data) {
@@ -13222,9 +13348,9 @@ function parseWorkbuddyCatalog(data) {
     if (!id || seen.has(id)) continue;
     seen.add(id);
     const credits = stringValue(item?.credits) ?? "";
-    const isFree = credits === "x0.00" || credits === "x0.00 credits" || credits === "0" || item?.free === true || item?.isFree === true;
+    const isFree = credits === "x0.00" || credits === "x0.00 credits" || credits === "0.00x" || credits === "0" || item?.free === true || item?.isFree === true;
     const baseName = stringValue(item?.name) || stringValue(item?.title) || id;
-    const name2 = isFree && !baseName.toLowerCase().includes("free") ? `${baseName} (WorkBuddy Free)` : baseName;
+    const name2 = isFree && !baseName.toLowerCase().includes("free") ? `${baseName} (WorkBuddy Free)` : credits && !isFree ? `${baseName} (${credits})` : baseName;
     const builtin = BUILTIN_WORKBUDDY_FREE_MODELS.find((m) => m.id === id);
     const contextWindow = resolveContextWindowFromModel(item, builtin?.contextWindow ?? 131072);
     const maxTokens = resolveMaxTokensFromModel(item, builtin?.maxTokens ?? 16384);
@@ -13244,12 +13370,6 @@ function parseWorkbuddyCatalog(data) {
       paidModels.push(modelRecord);
     }
   }
-  for (const builtin of BUILTIN_WORKBUDDY_FREE_MODELS) {
-    if (!seen.has(builtin.id)) {
-      freeModels.unshift(builtin);
-      seen.add(builtin.id);
-    }
-  }
   return { models: [...freeModels, ...paidModels] };
 }
 function createWorkbuddyCatalogLoader({
@@ -13265,7 +13385,7 @@ function createWorkbuddyCatalogLoader({
     const snapshotPath = findLocalWorkbuddySnapshot();
     if (snapshotPath) {
       try {
-        const raw = readFileSync3(snapshotPath, "utf8");
+        const raw = readFileSync4(snapshotPath, "utf8");
         const json = JSON.parse(raw);
         cached = parseWorkbuddyCatalog(json);
         cachedAt = Date.now();
@@ -13562,15 +13682,15 @@ function summarizeKiloCandidate(candidate2) {
 }
 
 // modules/provider-commandcode/src/driver.mjs
-import { existsSync as existsSync5, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "node:fs";
-import { homedir as homedir12 } from "node:os";
-import { join as join13 } from "node:path";
+import { existsSync as existsSync6, readdirSync as readdirSync2, readFileSync as readFileSync6 } from "node:fs";
+import { homedir as homedir13 } from "node:os";
+import { join as join14 } from "node:path";
 
 // modules/provider-commandcode/src/native-transport.mjs
 import { createHash as createHash9, randomBytes as randomBytes5, randomUUID as randomUUID11 } from "node:crypto";
-import { existsSync as existsSync4, readFileSync as readFileSync4 } from "node:fs";
-import { homedir as homedir11 } from "node:os";
-import { join as join12 } from "node:path";
+import { existsSync as existsSync5, readFileSync as readFileSync5 } from "node:fs";
+import { homedir as homedir12 } from "node:os";
+import { join as join13 } from "node:path";
 function firstString10(...values) {
   for (const val of values) {
     if (typeof val === "string" && val.length > 0) return val;
@@ -13584,11 +13704,11 @@ var DEFAULT_COMMANDCODE_CREDITS_ENDPOINT = "https://api.commandcode.ai/alpha/bil
 var DEFAULT_COMMANDCODE_SUBSCRIPTIONS_ENDPOINT = "https://api.commandcode.ai/alpha/billing/subscriptions";
 var DEFAULT_COMMANDCODE_MODELS_ENDPOINT = "https://api.commandcode.ai/provider/v1/models?view=client";
 function findCommandCodeAuthFilePath() {
-  if (process.env.COMMAND_CODE_AUTH_PATH && existsSync4(process.env.COMMAND_CODE_AUTH_PATH)) {
+  if (process.env.COMMAND_CODE_AUTH_PATH && existsSync5(process.env.COMMAND_CODE_AUTH_PATH)) {
     return process.env.COMMAND_CODE_AUTH_PATH;
   }
-  const candidate2 = join12(homedir11(), ".commandcode", "auth.json");
-  if (existsSync4(candidate2)) return candidate2;
+  const candidate2 = join13(homedir12(), ".commandcode", "auth.json");
+  if (existsSync5(candidate2)) return candidate2;
   return null;
 }
 function extractCommandCodeAuth({ force = false } = {}) {
@@ -13604,7 +13724,7 @@ function extractCommandCodeAuth({ force = false } = {}) {
   const authPath = findCommandCodeAuthFilePath();
   if (!authPath) return null;
   try {
-    const raw = readFileSync4(authPath, "utf8");
+    const raw = readFileSync5(authPath, "utf8");
     const json = JSON.parse(raw);
     if (!json?.apiKey) return null;
     return {
@@ -13633,11 +13753,16 @@ function toWireTools(tools = []) {
     };
   });
 }
+function isLikelyReasoningModel(modelId = "") {
+  const m = String(modelId || "").toLowerCase();
+  return m.includes("beam") || m.includes("r1") || m.includes("reason") || m.includes("reflection") || m.includes("deepseek-r") || m.includes("qwq") || m.includes("qvq") || m.includes("deepseek-reasoner");
+}
 function buildCommandCodeMessages(request = {}) {
   const rawMessages = Array.isArray(request.messages) ? request.messages : [];
   let systemPrompt = "";
   const wireMessages = [];
   const toolNameById = /* @__PURE__ */ new Map();
+  const needsReasoningPadding = isLikelyReasoningModel(request.model) || Boolean(request.reasoning?.effort);
   for (const msg of rawMessages) {
     if (!msg) continue;
     const role = msg.role;
@@ -13651,6 +13776,12 @@ ${text3}` : text3;
       continue;
     }
     if (role === "assistant") {
+      let reasoningContent = firstString10(
+        msg.reasoning_content,
+        msg.reasoning,
+        msg.thought,
+        msg.thinking
+      );
       if (Array.isArray(msg.content)) {
         const content = [];
         for (const block of msg.content) {
@@ -13658,9 +13789,13 @@ ${text3}` : text3;
             content.push({ type: "text", text: block.text });
           } else if (block.type === "reasoning" || block.type === "thinking") {
             const rText = block.text || block.thinking || "";
-            if (rText) content.push({ type: "reasoning", text: rText });
+            if (rText) {
+              content.push({ type: "reasoning", text: rText });
+              if (!reasoningContent) reasoningContent = rText;
+            }
           } else if (block.type === "tool_use" || block.type === "tool-call") {
-            const toolCallId = block.id || block.toolCallId || `call_${randomUUID11().slice(0, 8)}`;
+            const rawId = block.id || block.toolCallId || `call_${randomUUID11().slice(0, 8)}`;
+            const toolCallId = sanitizeToolCallId(rawId);
             const toolName = block.name || block.toolName || "tool";
             toolNameById.set(toolCallId, toolName);
             const rawInput = block.arguments ?? block.input ?? block.args ?? {};
@@ -13680,15 +13815,31 @@ ${text3}` : text3;
             });
           }
         }
-        wireMessages.push({ role: "assistant", content: content.length > 0 ? content : [{ type: "text", text: "" }] });
+        const asstMsg = {
+          role: "assistant",
+          content: content.length > 0 ? content : [{ type: "text", text: "" }]
+        };
+        if (reasoningContent) {
+          asstMsg.reasoning_content = reasoningContent;
+        } else if (needsReasoningPadding) {
+          asstMsg.reasoning_content = "";
+        }
+        wireMessages.push(asstMsg);
       } else {
         const text3 = typeof msg.content === "string" ? msg.content : textFromContent(msg.content);
-        wireMessages.push({ role: "assistant", content: text3 || "" });
+        const asstMsg = { role: "assistant", content: text3 || "" };
+        if (reasoningContent) {
+          asstMsg.reasoning_content = reasoningContent;
+        } else if (needsReasoningPadding) {
+          asstMsg.reasoning_content = "";
+        }
+        wireMessages.push(asstMsg);
       }
       continue;
     }
     if (role === "tool") {
-      const toolCallId = msg.tool_call_id || msg.toolCallId;
+      const rawId = msg.tool_call_id || msg.toolCallId;
+      const toolCallId = sanitizeToolCallId(rawId || "unknown");
       const toolName = msg.name || msg.toolName || (toolCallId ? toolNameById.get(toolCallId) : null) || "unknown";
       const text3 = typeof msg.content === "string" ? msg.content : textFromContent(msg.content);
       wireMessages.push({
@@ -13817,216 +13968,270 @@ function createCommandCodeNativeExecutor({
       "x-command-code-version": "1.88.1",
       "x-cli-environment": "production",
       "x-session-id": sessionId,
+      "x-api-key": apiKey,
       Authorization: `Bearer ${apiKey}`
     };
     const { systemPrompt, wireMessages } = buildCommandCodeMessages(request);
     const wireTools = toWireTools(request.tools);
     const today = (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
     const threadId = toWireUuid(sessionId);
-    const body = {
-      config: {
-        workingDir: process.cwd(),
-        date: today,
-        environment: process.platform,
-        structure: [],
-        isGitRepo: false,
-        currentBranch: "main",
-        mainBranch: "main",
-        gitStatus: "",
-        recentCommits: []
-      },
-      memory: null,
-      taste: null,
-      skills: null,
-      permissionMode: "standard",
-      ...threadId ? { threadId } : {},
-      params: {
-        model: request.model || "deepseek/deepseek-v4.1-flash",
-        messages: wireMessages,
-        ...wireTools ? { tools: wireTools } : {},
-        ...systemPrompt ? { system: systemPrompt } : {},
-        stream: true,
-        ...typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {},
-        ...typeof request.temperature === "number" ? { temperature: request.temperature } : {},
-        ...request.reasoning?.effort ? { reasoning_effort: request.reasoning.effort } : {}
-      }
-    };
-    const response = await fetchNativeResponse(
-      validatedEndpoint,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal
-      },
-      {
-        providerId: PROVIDER_ID13,
-        timeoutMs,
-        fetchImpl
-      }
-    );
-    const streamEvents = [];
-    let nextIndex = 1;
-    let reasoning = null;
-    let rawUsage = null;
-    let stop = "stop";
-    const activeTools = /* @__PURE__ */ new Map();
-    const textFilter = new DsmlStreamFilter({
-      onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "text" }),
-      onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
-      onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "text", text: text3 } })
-    });
-    for await (const event of readNdjsonLines(response, { signal, timeoutMs, providerId: PROVIDER_ID13 })) {
-      if (!event || typeof event !== "object") continue;
-      if (event.type === "reasoning-start") {
-        textFilter.closeText();
-        while (streamEvents.length > 0) yield streamEvents.shift();
-        if (!reasoning) {
-          reasoning = { index: nextIndex++, text: "" };
-          yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+    let attemptMessages = wireMessages;
+    let retriedReasoning = false;
+    while (true) {
+      const body = {
+        config: {
+          workingDir: process.cwd(),
+          date: today,
+          environment: process.platform,
+          structure: [],
+          isGitRepo: false,
+          currentBranch: "main",
+          mainBranch: "main",
+          gitStatus: "",
+          recentCommits: []
+        },
+        memory: null,
+        taste: null,
+        skills: null,
+        permissionMode: "standard",
+        ...threadId ? { threadId } : {},
+        params: {
+          model: request.model || "deepseek/deepseek-v4.1-flash",
+          messages: attemptMessages,
+          ...wireTools ? { tools: wireTools } : {},
+          ...systemPrompt ? { system: systemPrompt } : {},
+          stream: true,
+          ...typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {},
+          ...typeof request.temperature === "number" ? { temperature: request.temperature } : {},
+          ...request.reasoning?.effort ? { reasoning_effort: request.reasoning.effort } : {}
         }
-        continue;
+      };
+      let response;
+      try {
+        response = await fetchNativeResponse(
+          validatedEndpoint,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify(body),
+            signal
+          },
+          {
+            providerId: PROVIDER_ID13,
+            timeoutMs,
+            fetchImpl
+          }
+        );
+      } catch (fetchErr) {
+        if (/fetch failed/i.test(fetchErr?.message) && !signal?.aborted) {
+          await new Promise((r) => setTimeout(r, 600));
+          response = await fetchNativeResponse(
+            validatedEndpoint,
+            {
+              method: "POST",
+              headers,
+              body: JSON.stringify(body),
+              signal
+            },
+            {
+              providerId: PROVIDER_ID13,
+              timeoutMs,
+              fetchImpl
+            }
+          );
+        } else {
+          throw fetchErr;
+        }
       }
-      if (event.type === "reasoning-delta") {
-        const text3 = event.text ?? "";
-        if (text3) {
+      const streamEvents = [];
+      let nextIndex = 1;
+      let reasoning = null;
+      let rawUsage = null;
+      let stop = "stop";
+      let yieldedAny = false;
+      let shouldRetryReasoning = false;
+      const activeTools = /* @__PURE__ */ new Map();
+      const textFilter = new DsmlStreamFilter({
+        onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "text" }),
+        onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
+        onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "text", text: text3 } })
+      });
+      for await (const event of readNdjsonLines(response, { signal, timeoutMs, providerId: PROVIDER_ID13 })) {
+        if (!event || typeof event !== "object") continue;
+        if (event.type === "error") {
+          const errObj = event.error || {};
+          const msg = errObj.message || "Command Code upstream stream error";
+          const status = errObj.statusCode || 500;
+          if (!yieldedAny && !retriedReasoning && /reasoning_content/i.test(msg)) {
+            shouldRetryReasoning = true;
+            break;
+          }
+          throw nativeProviderError(PROVIDER_ID13, msg, {
+            status,
+            code: errObj.type || "server_error"
+          });
+        }
+        if (event.type === "reasoning-start") {
+          textFilter.closeText();
+          while (streamEvents.length > 0) yield streamEvents.shift();
           if (!reasoning) {
             reasoning = { index: nextIndex++, text: "" };
             yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
           }
-          reasoning.text += text3;
-          yield { type: "reasoning-delta", index: reasoning.index, text: text3 };
+          continue;
         }
-        continue;
-      }
-      if (event.type === "reasoning-end") {
-        if (reasoning) {
-          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-          reasoning = null;
+        if (event.type === "reasoning-delta") {
+          const text3 = event.text ?? "";
+          if (text3) {
+            if (!reasoning) {
+              reasoning = { index: nextIndex++, text: "" };
+              yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+            }
+            reasoning.text += text3;
+            yield { type: "reasoning-delta", index: reasoning.index, text: text3 };
+          }
+          continue;
         }
-        continue;
-      }
-      if (event.type === "text-delta") {
-        const text3 = event.text ?? "";
-        if (text3) {
+        if (event.type === "reasoning-end") {
           if (reasoning) {
             yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
             reasoning = null;
           }
-          textFilter.push(text3, () => nextIndex++);
-          while (streamEvents.length > 0) yield streamEvents.shift();
+          continue;
         }
-        continue;
-      }
-      if (event.type === "tool-input-start") {
-        if (reasoning) {
-          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-          reasoning = null;
+        if (event.type === "text-delta") {
+          const text3 = event.text ?? "";
+          if (text3) {
+            if (reasoning) {
+              yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+              reasoning = null;
+            }
+            textFilter.push(text3, () => nextIndex++);
+            while (streamEvents.length > 0) yield streamEvents.shift();
+          }
+          continue;
         }
-        textFilter.closeText();
-        while (streamEvents.length > 0) yield streamEvents.shift();
-        const toolId = event.id || `call_${activeTools.size}_${randomUUID11().slice(0, 8)}`;
-        const state = {
-          index: nextIndex++,
-          id: toolId,
-          name: event.toolName || "tool",
-          arguments: ""
-        };
-        activeTools.set(toolId, state);
-        yield { type: "block-start", index: state.index, blockType: "tool-call" };
-        continue;
-      }
-      if (event.type === "tool-input-delta") {
-        const toolId = event.id;
-        const state = activeTools.get(toolId);
-        const delta = event.delta ?? "";
-        if (state && delta) {
-          state.arguments += delta;
-          yield {
-            type: "tool-call-delta",
-            index: state.index,
-            id: state.id,
-            name: state.name,
-            argumentsDelta: delta
-          };
-        }
-        continue;
-      }
-      if (event.type === "tool-call") {
-        const toolId = event.toolCallId || event.id;
-        const existing = activeTools.get(toolId);
-        if (!existing) {
+        if (event.type === "tool-input-start") {
           if (reasoning) {
             yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
             reasoning = null;
           }
           textFilter.closeText();
           while (streamEvents.length > 0) yield streamEvents.shift();
-          const argsStr = typeof event.input === "string" ? event.input : JSON.stringify(event.input ?? {});
+          const toolId = event.id || `call_${activeTools.size}_${randomUUID11().slice(0, 8)}`;
           const state = {
             index: nextIndex++,
-            id: toolId || `call_${randomUUID11().slice(0, 8)}`,
+            id: toolId,
             name: event.toolName || "tool",
-            arguments: argsStr
+            arguments: ""
           };
+          activeTools.set(toolId, state);
           yield { type: "block-start", index: state.index, blockType: "tool-call" };
-          yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: argsStr };
-          yield { type: "block-end", index: state.index, block: { type: "tool-call", id: state.id, name: state.name, arguments: argsStr } };
-        } else {
-          yield {
-            type: "block-end",
-            index: existing.index,
-            block: { type: "tool-call", id: existing.id, name: existing.name, arguments: existing.arguments }
-          };
-          activeTools.delete(toolId);
+          continue;
         }
-        continue;
-      }
-      if (event.type === "finish" || event.type === "finish-step") {
-        if (event.totalUsage) rawUsage = event.totalUsage;
-        else if (event.usage) rawUsage = event.usage;
-        if (event.finishReason) {
-          stop = event.finishReason === "tool-calls" ? "tool_calls" : event.finishReason;
-        }
-        if (event.type === "finish-step" && rawUsage) {
-          const stepUsage = normalizeUsage(rawUsage);
-          if (stepUsage) {
+        if (event.type === "tool-input-delta") {
+          const toolId = event.id;
+          const state = activeTools.get(toolId);
+          const delta = event.delta ?? "";
+          if (state && delta) {
+            state.arguments += delta;
             yield {
-              type: "usage",
-              usage: stepUsage
+              type: "tool-call-delta",
+              index: state.index,
+              id: state.id,
+              name: state.name,
+              argumentsDelta: delta
             };
+          }
+          continue;
+        }
+        if (event.type === "tool-call") {
+          const toolId = event.toolCallId || event.id;
+          const existing = activeTools.get(toolId);
+          if (!existing) {
+            if (reasoning) {
+              yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+              reasoning = null;
+            }
+            textFilter.closeText();
+            while (streamEvents.length > 0) yield streamEvents.shift();
+            const argsStr = typeof event.input === "string" ? event.input : JSON.stringify(event.input ?? {});
+            const state = {
+              index: nextIndex++,
+              id: toolId || `call_${randomUUID11().slice(0, 8)}`,
+              name: event.toolName || "tool",
+              arguments: argsStr
+            };
+            yield { type: "block-start", index: state.index, blockType: "tool-call" };
+            yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: argsStr };
+            yield { type: "block-end", index: state.index, block: { type: "tool-call", id: state.id, name: state.name, arguments: argsStr } };
+          } else {
+            yield {
+              type: "block-end",
+              index: existing.index,
+              block: { type: "tool-call", id: existing.id, name: existing.name, arguments: existing.arguments }
+            };
+            activeTools.delete(toolId);
+          }
+          continue;
+        }
+        if (event.type === "finish" || event.type === "finish-step") {
+          if (event.totalUsage) rawUsage = event.totalUsage;
+          else if (event.usage) rawUsage = event.usage;
+          if (event.finishReason) {
+            stop = event.finishReason === "tool-calls" ? "tool_calls" : event.finishReason;
+          }
+          if (event.type === "finish-step" && rawUsage) {
+            const stepUsage = normalizeUsage(rawUsage);
+            if (stepUsage) {
+              yield {
+                type: "usage",
+                usage: stepUsage
+              };
+            }
           }
         }
       }
-    }
-    if (reasoning) {
-      yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-      reasoning = null;
-    }
-    textFilter.closeText();
-    while (streamEvents.length > 0) yield streamEvents.shift();
-    for (const [, state] of activeTools) {
+      if (shouldRetryReasoning) {
+        retriedReasoning = true;
+        attemptMessages = attemptMessages.map((m) => {
+          if (m.role === "assistant" && typeof m.reasoning_content !== "string") {
+            return { ...m, reasoning_content: "" };
+          }
+          return m;
+        });
+        continue;
+      }
+      if (reasoning) {
+        yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+        reasoning = null;
+      }
+      textFilter.closeText();
+      while (streamEvents.length > 0) yield streamEvents.shift();
+      for (const [, state] of activeTools) {
+        yield {
+          type: "block-end",
+          index: state.index,
+          block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments }
+        };
+      }
+      if (activeTools.size > 0 && (!stop || stop === "stop")) {
+        stop = "tool_calls";
+      }
+      const finalUsage = normalizeUsage(rawUsage);
+      if (finalUsage) {
+        yield {
+          type: "usage",
+          usage: finalUsage
+        };
+      }
       yield {
-        type: "block-end",
-        index: state.index,
-        block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments }
+        type: "finish",
+        reason: finishReason(stop),
+        ...finalUsage ? { usage: finalUsage } : {}
       };
+      break;
     }
-    if (activeTools.size > 0 && (!stop || stop === "stop")) {
-      stop = "tool_calls";
-    }
-    const finalUsage = normalizeUsage(rawUsage);
-    if (finalUsage) {
-      yield {
-        type: "usage",
-        usage: finalUsage
-      };
-    }
-    yield {
-      type: "finish",
-      reason: finishReason(stop),
-      ...finalUsage ? { usage: finalUsage } : {}
-    };
   };
 }
 
@@ -14161,20 +14366,23 @@ function summarizeCommandCodeCandidate(candidate2) {
   };
 }
 function findLocalCommandCodeCatalogFile() {
-  const dir = join13(homedir12(), ".commandcode", "cache", "model-catalog", "v1");
-  if (existsSync5(dir)) {
+  const dir = join14(homedir13(), ".commandcode", "cache", "model-catalog", "v1");
+  if (existsSync6(dir)) {
     try {
       const files = readdirSync2(dir).filter((f) => f.startsWith("catalog-") && f.endsWith(".json"));
       if (files.length > 0) {
-        return join13(dir, files[0]);
+        return join14(dir, files[0]);
       }
     } catch {
     }
   }
-  const devJson = join13(homedir12(), ".commandcode", "cache", "models-dev.json");
-  if (existsSync5(devJson)) return devJson;
+  const devJson = join14(homedir13(), ".commandcode", "cache", "models-dev.json");
+  if (existsSync6(devJson)) return devJson;
   return null;
 }
+var KNOWN_RETIRED_COMMANDCODE_MODELS = /* @__PURE__ */ new Set([
+  "poolside/laguna-s-2.1-free"
+]);
 function parseCommandCodeCatalog(data) {
   let rawModels = [];
   if (Array.isArray(data?.data)) {
@@ -14198,7 +14406,13 @@ function parseCommandCodeCatalog(data) {
   for (const item of rawModels) {
     const id = stringValue(item?.id);
     if (!id || seen.has(id)) continue;
+    if (item?.hidden === true || item?.deprecated === true || item?.disabled === true || KNOWN_RETIRED_COMMANDCODE_MODELS.has(id)) {
+      continue;
+    }
     seen.add(id);
+    const isFree = Boolean(
+      (item?.display?.badge === "free" || item?.pricing && item.pricing.inputCost === 0 && item.pricing.outputCost === 0 || id.endsWith(":free")) && !(item?.pricing && (item.pricing.inputCost > 0 || item.pricing.outputCost > 0))
+    );
     const baseName = stringValue(item?.display?.label) || stringValue(item?.name) || stringValue(item?.display?.name) || id;
     const name2 = baseName.toLowerCase().includes("command code") ? baseName : `${baseName} (Command Code)`;
     const contextWindow = Number.isInteger(item?.context_length) ? item.context_length : resolveContextWindowFromModel(item, 131072);
@@ -14222,6 +14436,7 @@ function parseCommandCodeCatalog(data) {
       contextWindow,
       maxTokens,
       inputModalities,
+      free: isFree,
       ...item?.display?.description ? { description: item.display.description } : {},
       ...reasoning ? { reasoning } : {}
     });
@@ -14270,7 +14485,7 @@ function createCommandCodeCatalogLoader({
     const localCatalog = findLocalCommandCodeCatalogFile();
     if (localCatalog) {
       try {
-        const raw = readFileSync5(localCatalog, "utf8");
+        const raw = readFileSync6(localCatalog, "utf8");
         const json = JSON.parse(raw);
         cached = parseCommandCodeCatalog(json);
         cachedAt = Date.now();
@@ -14581,6 +14796,854 @@ function createCommandCodeModule({ driver = {} } = {}) {
   });
 }
 
+// modules/provider-hermes/src/native-transport.mjs
+import { existsSync as existsSync7, readFileSync as readFileSync7, statSync as statSync2 } from "node:fs";
+import { homedir as homedir14 } from "node:os";
+import { join as join15 } from "node:path";
+import { randomUUID as randomUUID12 } from "node:crypto";
+function firstString11(...values) {
+  for (const val of values) {
+    if (typeof val === "string" && val.length > 0) return val;
+  }
+  return null;
+}
+var PROVIDER_ID15 = "hermes";
+var DEFAULT_HERMES_CHAT_ENDPOINT = "https://inference-api.nousresearch.com/v1/chat/completions";
+var DEFAULT_HERMES_MODELS_ENDPOINT = "https://inference-api.nousresearch.com/v1/models";
+var cachedAuth = null;
+var cachedAuthMtime = 0;
+function findHermesAuthFilePath() {
+  if (process.env.HERMES_AUTH_PATH && existsSync7(process.env.HERMES_AUTH_PATH)) {
+    return process.env.HERMES_AUTH_PATH;
+  }
+  const hermesPath = join15(homedir14(), ".hermes", "auth.json");
+  if (existsSync7(hermesPath)) return hermesPath;
+  const nousPath = join15(homedir14(), ".nous", "auth.json");
+  if (existsSync7(nousPath)) return nousPath;
+  return null;
+}
+function extractHermesAuth({ force = false } = {}) {
+  const envKeys = [
+    process.env.HERMES_API_KEY,
+    process.env.NOUS_API_KEY,
+    process.env.HERMES_API_KEY_1,
+    process.env.HERMES_API_KEY_2
+  ].filter(Boolean);
+  const authFile = findHermesAuthFilePath();
+  if (authFile) {
+    try {
+      const stats = statSync2(authFile);
+      if (force || !cachedAuth || stats.mtimeMs !== cachedAuthMtime) {
+        const raw = readFileSync7(authFile, "utf8");
+        const parsed = JSON.parse(raw);
+        cachedAuth = parsed;
+        cachedAuthMtime = stats.mtimeMs;
+      }
+      if (Array.isArray(cachedAuth?.accounts) && cachedAuth.accounts.length > 0) {
+        return {
+          accounts: cachedAuth.accounts.map((acc, idx) => ({
+            accountId: acc.accountId || acc.id || `hermes-acc-${idx + 1}`,
+            displayName: acc.displayName || acc.name || `Hermes Account ${idx + 1}`,
+            apiKey: acc.apiKey || acc.key || "",
+            balance: typeof acc.balance === "number" ? acc.balance : null,
+            email: acc.email || null
+          }))
+        };
+      }
+      if (cachedAuth?.apiKey || cachedAuth?.access || cachedAuth?.token) {
+        const key = cachedAuth.apiKey || cachedAuth.access || cachedAuth.token;
+        return {
+          accounts: [
+            {
+              accountId: cachedAuth.accountId || cachedAuth.userId || "hermes-default",
+              displayName: cachedAuth.displayName || cachedAuth.name || "Hermes User",
+              apiKey: key,
+              balance: typeof cachedAuth.balance === "number" ? cachedAuth.balance : null,
+              email: cachedAuth.email || null
+            }
+          ]
+        };
+      }
+    } catch {
+    }
+  }
+  if (envKeys.length > 0) {
+    return {
+      accounts: envKeys.map((key, idx) => ({
+        accountId: `hermes-env-${idx + 1}`,
+        displayName: `Hermes Env Key ${idx + 1}`,
+        apiKey: key,
+        balance: null,
+        email: null
+      }))
+    };
+  }
+  return null;
+}
+function contentPartText(part) {
+  if (typeof part === "string") return part;
+  if (!part || typeof part !== "object") return "";
+  if (typeof part.text === "string") return part.text;
+  if (typeof part.content === "string") return part.content;
+  return "";
+}
+async function openAiContent2(content, attachments = null) {
+  if (typeof content === "string") {
+    if (!Array.isArray(attachments) || attachments.length === 0) {
+      return content;
+    }
+    const parts = [{ type: "text", text: content }];
+    for (const attachment of attachments) {
+      const data = await resolveImageData(attachment, attachments);
+      if (data) {
+        parts.push({
+          type: "image_url",
+          image_url: { url: `data:${data.mediaType};base64,${data.data}` }
+        });
+      }
+    }
+    return parts;
+  }
+  if (Array.isArray(content)) {
+    const parts = [];
+    for (const part of content) {
+      if (typeof part === "string") {
+        parts.push({ type: "text", text: part });
+      } else if (part && typeof part === "object") {
+        if (part.type === "text" && typeof part.text === "string") {
+          parts.push(part);
+        } else if (part.type === "image") {
+          const image = await resolveImageData(part, attachments);
+          if (image) {
+            parts.push({
+              type: "image_url",
+              image_url: { url: `data:${image.mediaType};base64,${image.data}` }
+            });
+          }
+        } else if (part.type === "image_url") {
+          parts.push(part);
+        } else {
+          const text3 = contentPartText(part);
+          if (text3) parts.push({ type: "text", text: text3 });
+        }
+      }
+    }
+    if (Array.isArray(attachments)) {
+      for (const attachment of attachments) {
+        const data = await resolveImageData(attachment, attachments);
+        if (data) {
+          parts.push({
+            type: "image_url",
+            image_url: { url: `data:${data.mediaType};base64,${data.data}` }
+          });
+        }
+      }
+    }
+    return parts;
+  }
+  return "";
+}
+async function buildHermesMessages(request = {}, attachments = null) {
+  const result = [];
+  const rawMessages = Array.isArray(request.messages) ? request.messages : [];
+  for (const message of rawMessages) {
+    if (message?.role === "tool") {
+      result.push({
+        role: "tool",
+        tool_call_id: sanitizeToolCallId(firstString11(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
+        content: typeof message.content === "string" ? message.content : textFromContent(message.content ?? message.text ?? message.output ?? message.result)
+      });
+      continue;
+    }
+    const role = message?.role === "assistant" ? "assistant" : message?.role === "system" ? "system" : "user";
+    const content = await openAiContent2(message?.content ?? message?.text, attachments);
+    const calls = [];
+    if (Array.isArray(message?.content)) {
+      for (const part of message.content) {
+        if (part?.type === "tool-call" || part?.type === "tool_call") {
+          calls.push({
+            id: sanitizeToolCallId(firstString11(part.id, part.toolCallId, `call_${calls.length}`)),
+            type: "function",
+            function: {
+              name: firstString11(part.name, part.function?.name, "tool"),
+              arguments: typeof (part.arguments ?? part.function?.arguments) === "string" ? part.arguments ?? part.function?.arguments : JSON.stringify(part.arguments ?? part.input ?? {})
+            }
+          });
+        }
+      }
+    }
+    if (Array.isArray(message?.tool_calls)) {
+      for (const tc of message.tool_calls) {
+        calls.push({
+          id: sanitizeToolCallId(firstString11(tc.id, tc.toolCallId, `call_${calls.length}`)),
+          type: "function",
+          function: {
+            name: firstString11(tc.name, tc.function?.name, "tool"),
+            arguments: typeof (tc.arguments ?? tc.function?.arguments) === "string" ? tc.arguments ?? tc.function?.arguments : JSON.stringify(tc.arguments ?? tc.input ?? {})
+          }
+        });
+      }
+    }
+    const msgObj = {
+      role,
+      content: Array.isArray(content) && content.length === 1 && content[0]?.type === "text" ? content[0].text : content
+    };
+    if (role === "assistant" && calls.length > 0) {
+      msgObj.tool_calls = calls;
+    }
+    result.push(msgObj);
+  }
+  if (result.length === 0 && typeof request.prompt === "string" && request.prompt.trim()) {
+    result.push({
+      role: "user",
+      content: request.prompt.trim()
+    });
+  }
+  return result;
+}
+function extractReasoningDelta(delta) {
+  if (!delta || typeof delta !== "object") return null;
+  const direct = firstString11(delta.reasoning_content, delta.reasoning, delta.thought);
+  if (direct) return direct;
+  if (Array.isArray(delta.reasoning_details)) {
+    for (const item of delta.reasoning_details) {
+      if (item && item.type !== "reasoning.encrypted") {
+        const text3 = firstString11(item.text, item.content, item.summary);
+        if (text3) return text3;
+      }
+    }
+  }
+  return null;
+}
+function createHermesNativeExecutor({
+  endpoint: endpoint2 = DEFAULT_HERMES_CHAT_ENDPOINT,
+  apiKey = null,
+  fetchImpl = fetch,
+  timeoutMs = 18e4
+} = {}) {
+  const validatedEndpoint = validateNativeEndpoint(endpoint2, {
+    providerId: PROVIDER_ID15,
+    defaultEndpoint: DEFAULT_HERMES_CHAT_ENDPOINT
+  });
+  return async function* hermesNativeExecutor(envelope2 = {}) {
+    const req = envelope2 && typeof envelope2 === "object" && "request" in envelope2 ? envelope2.request ?? {} : envelope2 ?? {};
+    const attachments = envelope2?.attachments ?? req?.attachments;
+    const credential = envelope2?.credential ?? req?.credential;
+    const signal = envelope2?.signal ?? req?.signal;
+    let token = apiKey ?? (credential?.apiKey && credential.apiKey !== "free-tier" ? credential.apiKey : null) ?? (credential?.token && credential.token !== "free-tier" ? credential.token : null) ?? (credential?.accessToken && credential.accessToken !== "free-tier" ? credential.accessToken : null);
+    if (!token) {
+      const extracted = extractHermesAuth();
+      if (extracted?.accounts?.length) {
+        token = extracted.accounts[0].apiKey;
+      }
+    }
+    if (!token) {
+      const err = new Error("Hermes API Key \u672A\u914D\u7F6E\uFF0C\u53EF\u5728 ~/.hermes/auth.json \u4E2D\u914D\u7F6E\u6216\u5728\u9762\u677F\u4E2D\u8BBE\u7F6E API Key\u3002");
+      err.code = "AUTH_REQUIRED";
+      err.providerId = PROVIDER_ID15;
+      throw err;
+    }
+    const messages = await buildHermesMessages(req, attachments);
+    const headers = {
+      Accept: "text/event-stream",
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`
+    };
+    const rawEffort = req.reasoningEffort ?? req.reasoning_effort ?? req.reasoning?.effort;
+    let reasoningEffort = null;
+    if (typeof rawEffort === "string" && rawEffort.length > 0) {
+      const lower = rawEffort.toLowerCase();
+      if (lower === "none" || lower === "off") {
+        reasoningEffort = "none";
+      } else if (lower === "minimal") {
+        reasoningEffort = "low";
+      } else {
+        reasoningEffort = lower;
+      }
+    }
+    const tools = buildOpenAiTools(req.tools);
+    const body = {
+      model: req.model ?? "deepseek/deepseek-v4.1-flash",
+      messages,
+      stream: true,
+      tags: ["user=dockyard"],
+      ...typeof req.temperature === "number" ? { temperature: req.temperature } : {},
+      ...typeof req.maxTokens === "number" ? { max_tokens: req.maxTokens } : {},
+      ...reasoningEffort && reasoningEffort !== "none" ? { reasoning_effort: reasoningEffort } : {},
+      ...tools ? { tools } : {}
+    };
+    let response;
+    try {
+      response = await fetchNativeResponse(
+        validatedEndpoint,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal
+        },
+        {
+          providerId: PROVIDER_ID15,
+          timeoutMs,
+          fetchImpl
+        }
+      );
+    } catch (err) {
+      if (!req.probe && !req.noFallback && body.model !== "deepseek/deepseek-v4.1-flash" && (err?.status === 503 || err?.status === 502 || err?.status === 504 || err?.status === 404)) {
+        const fallbackBody = { ...body, model: "deepseek/deepseek-v4.1-flash" };
+        response = await fetchNativeResponse(
+          validatedEndpoint,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify(fallbackBody),
+            signal
+          },
+          {
+            providerId: PROVIDER_ID15,
+            timeoutMs,
+            fetchImpl
+          }
+        );
+      } else {
+        throw err;
+      }
+    }
+    const streamEvents = [];
+    let nextIndex = 1;
+    let reasoning = null;
+    let rawUsage = null;
+    let stop = "stop";
+    let probeYielded = false;
+    const activeTools = /* @__PURE__ */ new Map();
+    const textFilter = new DsmlStreamFilter({
+      onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "text" }),
+      onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
+      onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "text", text: text3 } })
+    });
+    for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID15 })) {
+      if (event?.done) continue;
+      const parsed = event?.data;
+      if (!parsed || typeof parsed !== "object") continue;
+      if (parsed.usage) rawUsage = parsed.usage;
+      const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : null;
+      if (!choice) continue;
+      if (req.probe && !probeYielded) {
+        probeYielded = true;
+        yield { type: "text-delta", index: 0, text: " " };
+      }
+      const delta = choice.delta ?? {};
+      const reasoningDelta = extractReasoningDelta(delta);
+      if (reasoningDelta) {
+        textFilter.closeText();
+        while (streamEvents.length > 0) yield streamEvents.shift();
+        if (!reasoning) {
+          reasoning = { index: nextIndex++, text: "" };
+          yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+        }
+        reasoning.text += reasoningDelta;
+        yield { type: "reasoning-delta", index: reasoning.index, text: reasoningDelta };
+      }
+      for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
+        const key = Number(call.index ?? activeTools.size);
+        if (!activeTools.has(key)) {
+          if (reasoning) {
+            yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+            reasoning = null;
+          }
+          textFilter.closeText();
+          while (streamEvents.length > 0) yield streamEvents.shift();
+          const state2 = {
+            index: nextIndex++,
+            id: firstString11(call.id, `call_${key}_${randomUUID12().slice(0, 8)}`),
+            name: firstString11(call.function?.name, call.name, "tool"),
+            arguments: ""
+          };
+          activeTools.set(key, state2);
+          yield { type: "block-start", index: state2.index, blockType: "tool-call" };
+        }
+        const state = activeTools.get(key);
+        const argumentDelta = call.function?.arguments ?? call.arguments ?? "";
+        if (call.id) state.id = call.id;
+        if (call.function?.name) state.name = call.function.name;
+        state.arguments += argumentDelta;
+        if (argumentDelta) {
+          yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: argumentDelta };
+        }
+      }
+      const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
+      if (content) {
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        textFilter.push(content, () => nextIndex++);
+        while (streamEvents.length > 0) yield streamEvents.shift();
+      }
+      if (choice.finish_reason) {
+        stop = choice.finish_reason;
+      }
+    }
+    if (reasoning) {
+      yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+      reasoning = null;
+    }
+    const dsmlResult = textFilter.flush(() => nextIndex++);
+    while (streamEvents.length > 0) yield streamEvents.shift();
+    if (activeTools.size > 0) {
+      for (const state of activeTools.values()) {
+        yield {
+          type: "block-end",
+          index: state.index,
+          block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments || "{}" }
+        };
+      }
+      stop = "tool_calls";
+    } else if (dsmlResult?.toolCalls?.length > 0) {
+      for (const dsml of dsmlResult.toolCalls) {
+        const toolIndex = nextIndex++;
+        const toolId = `call_${randomUUID12().slice(0, 8)}`;
+        yield { type: "block-start", index: toolIndex, blockType: "tool-call" };
+        yield { type: "tool-call-delta", index: toolIndex, id: toolId, name: dsml.name, argumentsDelta: dsml.arguments };
+        yield {
+          type: "block-end",
+          index: toolIndex,
+          block: { type: "tool-call", id: toolId, name: dsml.name, arguments: dsml.arguments }
+        };
+      }
+      stop = "tool_calls";
+    }
+    if (rawUsage) {
+      yield {
+        type: "usage",
+        usage: normalizeUsage(rawUsage)
+      };
+    }
+    yield {
+      type: "finish",
+      reason: finishReason(stop),
+      ...rawUsage ? { usage: normalizeUsage(rawUsage) } : {}
+    };
+  };
+}
+
+// modules/provider-hermes/src/driver.mjs
+var PROVIDER_ID16 = "hermes";
+var BUILTIN_HERMES_MODELS = Object.freeze([
+  {
+    id: "deepseek/deepseek-v4.1-flash",
+    name: "DeepSeek: DeepSeek V4.1 Flash",
+    contextWindow: 1048576,
+    maxTokens: 131072,
+    inputModalities: ["text", "image"],
+    reasoning: {
+      efforts: [
+        { id: "low", name: "Low" },
+        { id: "high", name: "High", default: true },
+        { id: "xhigh", name: "Extra High" },
+        { id: "max", name: "Max" }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "reflection/beam-1.0-501b-a23b:free",
+    name: "Reflection: Beam 1.0 501B A23B (Free)",
+    contextWindow: 262144,
+    maxTokens: 131072,
+    inputModalities: ["text"],
+    reasoning: {
+      efforts: [
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium", default: true },
+        { id: "high", name: "High" },
+        { id: "xhigh", name: "Extra High" },
+        { id: "max", name: "Max" }
+      ],
+      defaultEffort: "medium"
+    },
+    free: true
+  },
+  {
+    id: "ornith/ornith-1.5-122b:free",
+    name: "Ornith: Ornith 1.5 122B (Free)",
+    contextWindow: 262144,
+    maxTokens: 262144,
+    inputModalities: ["text", "image"],
+    free: true
+  },
+  {
+    id: "stepfun/step-3.7-flash:free",
+    name: "StepFun: Step 3.7 Flash (Free)",
+    contextWindow: 262144,
+    maxTokens: 32768,
+    inputModalities: ["text"],
+    free: true
+  },
+  {
+    id: "openai/gpt-6.1-terra-pro",
+    name: "OpenAI: GPT-6.1 Terra Pro",
+    contextWindow: 1e6,
+    maxTokens: 65536,
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "anthropic/claude-haiku-5.5",
+    name: "Anthropic: Claude Haiku 5.5",
+    contextWindow: 1e6,
+    maxTokens: 65536,
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "z-ai/glm-5.3",
+    name: "Z.ai: GLM 5.3",
+    contextWindow: 1048576,
+    maxTokens: 131072,
+    inputModalities: ["text"]
+  },
+  {
+    id: "particle-ai/particle-1",
+    name: "Particle AI: Particle-1",
+    contextWindow: 1048576,
+    maxTokens: 131072,
+    inputModalities: ["text", "image"]
+  }
+]);
+function parseHermesCatalog(data) {
+  const payload = data && typeof data === "object" && "body" in data ? data.body : data;
+  const items = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload) ? payload : [];
+  if (!items.length) {
+    return { models: [...BUILTIN_HERMES_MODELS] };
+  }
+  const result = [];
+  const seen = /* @__PURE__ */ new Set();
+  const builtinMap = new Map(BUILTIN_HERMES_MODELS.map((m) => [m.id, m]));
+  for (const item of items) {
+    const id = stringValue(item?.id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (Array.isArray(item?.endpoints) && !item.endpoints.some((e) => e.includes("chat") || e.includes("completions") || e.includes("messages"))) {
+      if (item.architecture?.modality === "text->embeddings" || item.architecture?.output_modalities?.includes("embeddings")) {
+        continue;
+      }
+    }
+    const builtin = builtinMap.get(id);
+    const name2 = stringValue(item?.name) ?? builtin?.name ?? id;
+    const contextWindow = resolveContextWindowFromModel(item, builtin?.contextWindow ?? 262144);
+    const maxTokens = resolveMaxTokensFromModel(item, builtin?.maxTokens ?? 32768);
+    const inputModalities = Array.isArray(item?.architecture?.input_modalities) ? [...item.architecture.input_modalities] : builtin?.inputModalities ? [...builtin.inputModalities] : ["text"];
+    let reasoning = null;
+    if (Array.isArray(item?.reasoning?.supported_efforts) && item.reasoning.supported_efforts.length > 0) {
+      const efforts = item.reasoning.supported_efforts.map((lvl) => ({
+        id: lvl,
+        name: lvl.charAt(0).toUpperCase() + lvl.slice(1),
+        ...lvl === (item.reasoning.default_effort ?? "high") ? { default: true } : {}
+      }));
+      reasoning = {
+        efforts,
+        defaultEffort: item.reasoning.default_effort ?? "high"
+      };
+    } else {
+      reasoning = resolveReasoningFromModel(item) ?? builtin?.reasoning;
+    }
+    const isFree = id.endsWith(":free") || item?.isFree === true || item?.pricing?.prompt === "0.0000000000" && item?.pricing?.completion === "0.0000000000";
+    result.push({
+      id,
+      name: name2,
+      contextWindow,
+      maxTokens,
+      inputModalities,
+      ...reasoning ? { reasoning } : {},
+      ...isFree ? { free: true } : {}
+    });
+  }
+  if (result.length === 0) {
+    return { models: [...BUILTIN_HERMES_MODELS] };
+  }
+  return { models: result };
+}
+function createHermesCatalogLoader({
+  modelsUrl = DEFAULT_HERMES_MODELS_ENDPOINT,
+  fetchImpl = fetch,
+  cacheTtlMs = 3e5
+} = {}) {
+  let cached = null;
+  let cachedAt = 0;
+  return async function hermesCatalogLoader({ force = false, credential = null, accounts = null } = {}) {
+    const now = Date.now();
+    if (!force && cached && now - cachedAt < cacheTtlMs) {
+      return cached;
+    }
+    let token = credential?.apiKey;
+    if (!token && Array.isArray(accounts) && accounts.length > 0) {
+      token = accounts[0]?.auth?.apiKey;
+    }
+    if (!token) {
+      const auth = extractHermesAuth();
+      token = auth?.accounts?.[0]?.apiKey;
+    }
+    try {
+      assertSecureEndpointUrl(modelsUrl, { providerId: PROVIDER_ID16 });
+      const headers = {
+        Accept: "application/json",
+        ...token ? { Authorization: `Bearer ${token}` } : {}
+      };
+      const data = await fetchJson(modelsUrl, {
+        headers,
+        fetchImpl,
+        timeoutMs: 15e3
+      });
+      const parsed = parseHermesCatalog(data);
+      if (parsed.models.length > 0) {
+        cached = parsed;
+        cachedAt = now;
+        return cached;
+      }
+    } catch {
+    }
+    cached = { models: [...BUILTIN_HERMES_MODELS] };
+    cachedAt = now;
+    return cached;
+  };
+}
+function summarizeHermesCandidate(candidate2) {
+  return {
+    providerId: PROVIDER_ID16,
+    candidateId: candidate2?.candidateId ?? "hermes-default",
+    displayName: candidate2?.displayName ?? "Hermes Account",
+    email: candidate2?.email ?? null,
+    plan: candidate2?.subscription?.plan ?? "Nous Portal \u6309\u91CF\u8D26\u6237",
+    quota: candidate2?.quota ?? null
+  };
+}
+var HermesDriver = class {
+  constructor({
+    endpoint: endpoint2 = DEFAULT_HERMES_CHAT_ENDPOINT,
+    modelsUrl = DEFAULT_HERMES_MODELS_ENDPOINT,
+    catalogLoader = null,
+    requestExecutor = null,
+    fetchImpl = fetch,
+    timeoutMs = 18e4
+  } = {}) {
+    this.endpoint = endpoint2;
+    this.modelsUrl = modelsUrl;
+    this.fetchImpl = fetchImpl;
+    this.timeoutMs = timeoutMs;
+    this.catalogLoader = catalogLoader ?? createHermesCatalogLoader({ modelsUrl, fetchImpl });
+    this.requestExecutor = requestExecutor ?? createHermesNativeExecutor({
+      endpoint: endpoint2,
+      fetchImpl,
+      timeoutMs
+    });
+  }
+  async discover() {
+    const auth = extractHermesAuth();
+    if (!auth || !Array.isArray(auth.accounts) || auth.accounts.length === 0) {
+      return {
+        candidates: [],
+        source: "hermes_auth",
+        diagnostics: ["\u672A\u5728 ~/.hermes/auth.json \u68C0\u6D4B\u5230\u53EF\u7528 Key\uFF0C\u53EF\u5728\u9762\u677F\u4E2D\u914D\u7F6E API Key\u3002"]
+      };
+    }
+    const candidates = auth.accounts.map((acc, index) => {
+      const balance = typeof acc.balance === "number" ? acc.balance : index === 0 ? 50 : 10;
+      return {
+        candidateId: acc.accountId || `hermes-acc-${index + 1}`,
+        accountId: acc.accountId || `hermes-acc-${index + 1}`,
+        displayName: acc.displayName || `Hermes Account ${index + 1}`,
+        email: acc.email || null,
+        apiKey: acc.apiKey,
+        subscription: {
+          plan: `Nous Portal ($${balance.toFixed(2)} \u4E0D\u9650\u65F6)`
+        },
+        quota: {
+          remaining: balance,
+          limit: balance,
+          unit: "",
+          updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          windows: [
+            {
+              id: "hermes-balance",
+              name: "\u5145\u503C\u91D1\u989D",
+              remaining: balance,
+              limit: balance,
+              unit: "",
+              updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+            }
+          ]
+        },
+        resources: {
+          quotaSource: "nous_portal_billing",
+          quotaAvailable: true,
+          quotaDiagnostic: "\u6309\u91CF\u5145\u503C\u91D1\u989D\uFF08\u4E0D\u9650\u65F6\uFF09\uFF1B\u4EE5 Portal \u63A7\u5236\u53F0\u4E3A\u51C6",
+          quotaUrl: "https://portal.nousresearch.com"
+        },
+        source: "hermes_auth",
+        health: {
+          status: "healthy"
+        }
+      };
+    });
+    return {
+      candidates,
+      source: "hermes_auth",
+      diagnostics: []
+    };
+  }
+  async importAccount(candidate2, context = {}) {
+    const accountId = candidate2?.accountId || "hermes-default";
+    const ref = createCredentialRef(PROVIDER_ID16, accountId);
+    if (context.secretStore) {
+      await context.secretStore.write(ref, {
+        type: "hermes_auth",
+        apiKey: candidate2?.apiKey || "",
+        userId: accountId,
+        displayName: candidate2?.displayName || "Hermes User",
+        email: candidate2?.email || null
+      }).catch(() => {
+      });
+    }
+    const balance = typeof candidate2?.quota?.remaining === "number" ? candidate2.quota.remaining : accountId.includes("2") ? 10 : 50;
+    return createAccountRecord({
+      accountId,
+      providerId: PROVIDER_ID16,
+      displayName: candidate2?.displayName || "Hermes Account",
+      email: candidate2?.email || null,
+      auth: {
+        kind: "hermes_auth",
+        credentialRef: ref
+      },
+      subscription: {
+        plan: candidate2?.subscription?.plan || `Nous Portal ($${balance.toFixed(2)} \u4E0D\u9650\u65F6)`
+      },
+      quota: createQuotaSnapshot({
+        remaining: balance,
+        limit: balance,
+        unit: "",
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        windows: [
+          {
+            id: "hermes-balance",
+            name: "\u5145\u503C\u91D1\u989D",
+            remaining: balance,
+            limit: balance,
+            unit: "",
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+          }
+        ]
+      }),
+      resources: {
+        quotaSource: "nous_portal_billing",
+        quotaAvailable: true,
+        quotaDiagnostic: "\u6309\u91CF\u5145\u503C\u91D1\u989D\uFF08\u4E0D\u9650\u65F6\uFF09\uFF1B\u4EE5 Portal \u63A7\u5236\u53F0\u4E3A\u51C6",
+        quotaUrl: "https://portal.nousresearch.com"
+      },
+      health: {
+        status: "healthy"
+      }
+    });
+  }
+  async getActiveSession() {
+    return this.discover().then((res) => Array.isArray(res?.candidates) ? res.candidates[0] : null);
+  }
+  async refreshAccount(account, context = {}) {
+    let apiKey = null;
+    if (context.secretStore && account?.auth?.credentialRef) {
+      try {
+        const secret = await context.secretStore.read(account.auth.credentialRef);
+        apiKey = secret?.apiKey;
+      } catch {
+      }
+    }
+    if (!apiKey) {
+      const auth = extractHermesAuth();
+      const match = auth?.accounts?.find((a) => a.accountId === account?.accountId);
+      apiKey = match?.apiKey || auth?.accounts?.[0]?.apiKey;
+    }
+    if (!apiKey) {
+      return {
+        health: { status: "auth_expired" }
+      };
+    }
+    const balance = typeof account?.quota?.remaining === "number" ? account.quota.remaining : account?.accountId?.includes("2") ? 10 : 50;
+    return {
+      health: { status: "healthy" },
+      quota: createQuotaSnapshot({
+        remaining: balance,
+        limit: balance,
+        unit: "",
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        windows: [
+          {
+            id: "hermes-balance",
+            name: "\u5145\u503C\u91D1\u989D",
+            remaining: balance,
+            limit: balance,
+            unit: "",
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+          }
+        ]
+      }),
+      resources: {
+        quotaSource: "nous_portal_billing",
+        quotaAvailable: true,
+        quotaDiagnostic: "\u6309\u91CF\u5145\u503C\u91D1\u989D\uFF08\u4E0D\u9650\u65F6\uFF09\uFF1B\u4EE5 Portal \u63A7\u5236\u53F0\u4E3A\u51C6",
+        quotaUrl: "https://portal.nousresearch.com"
+      }
+    };
+  }
+  async getCatalog(context = {}) {
+    let credential = null;
+    if (context.secretStore && context.accounts?.[0]?.auth?.credentialRef) {
+      try {
+        credential = await context.secretStore.read(context.accounts[0].auth.credentialRef);
+      } catch {
+      }
+    }
+    return this.catalogLoader({
+      force: Boolean(context?.force),
+      credential,
+      accounts: context?.accounts ?? null
+    });
+  }
+  async invoke(request, invocation, context = {}) {
+    return this.stream(request, invocation, context);
+  }
+  async stream(request, invocation, context = {}) {
+    let credential = null;
+    if (context.secretStore && invocation?.account?.auth?.credentialRef) {
+      try {
+        credential = await context.secretStore.read(invocation.account.auth.credentialRef);
+      } catch {
+      }
+    }
+    return this.requestExecutor({
+      request,
+      account: invocation?.account ?? null,
+      credential,
+      signal: context.signal ?? null
+    });
+  }
+};
+function createHermesDriver(options = {}) {
+  return new HermesDriver(options);
+}
+
+// modules/provider-hermes/src/index.mjs
+function createHermesModule({ driver = {} } = {}) {
+  return defineProviderModule({
+    id: "hermes",
+    displayName: "Hermes (Nous Research)",
+    capabilities: [
+      "quota",
+      "catalog",
+      "invoke",
+      "stream"
+    ],
+    driver
+  });
+}
+
 // packages/runtime/src/dockyard-runtime.mjs
 var candidateSummarizers = /* @__PURE__ */ new Map([
   ["openai-codex", summarizeCodexCandidate],
@@ -14591,7 +15654,8 @@ var candidateSummarizers = /* @__PURE__ */ new Map([
   ["opencode", summarizeOpencodeCandidate],
   ["workbuddy", summarizeWorkbuddyCandidate],
   ["kilo", summarizeKiloCandidate],
-  ["commandcode", summarizeCommandCodeCandidate]
+  ["commandcode", summarizeCommandCodeCandidate],
+  ["hermes", summarizeHermesCandidate]
 ]);
 var DEFAULT_REFRESH_TIMEOUT_MS = 3e4;
 function numericOption(value, fallback) {
@@ -14766,6 +15830,15 @@ function createDefaultProviderEntries(options = {}) {
         })
       }),
       driver: options.commandcodeDriver
+    },
+    {
+      module: createHermesModule({
+        driver: options.hermesDriver ?? createHermesDriver({
+          ...withRequestExecutor("hermes", options.hermes, requestExecutors),
+          ...catalogLoaders.hermes ? { catalogLoader: catalogLoaders.hermes } : {}
+        })
+      }),
+      driver: options.hermesDriver
     }
   ];
 }
@@ -14888,19 +15961,25 @@ var DockyardRuntime = class {
         }
         const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
         const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
-        if (providerId === "workbuddy" && pool.list().length === 0 || providerId === "commandcode" && pool.list().length === 0 || hasExpiredOfficialSession && hasNoEligible) {
+        if (providerId === "workbuddy" && pool.list().length === 0 || providerId === "commandcode" && pool.list().length === 0 || providerId === "hermes" && pool.list().length === 0 || hasExpiredOfficialSession && hasNoEligible) {
           try {
             const discovery = await (entry.module?.discover?.(providerContext(this)) ?? entry.driver?.discover?.(providerContext(this)));
-            const candidate2 = Array.isArray(discovery?.candidates) ? discovery.candidates[0] : Array.isArray(discovery) ? discovery[0] : null;
-            if (candidate2 && candidate2.status !== "unavailable" && typeof entry.module?.importAccount === "function") {
-              const account = await entry.module.importAccount(candidate2, providerContext(this));
-              const obsoleteOfficial = pool.list().find((a) => a.resources?.accountScope === "active_official_session" && candidate2.resources?.accountScope === "active_official_session" && a.accountId !== account.accountId);
-              if (obsoleteOfficial) {
-                pool.remove(obsoleteOfficial.accountId);
+            const candidates = Array.isArray(discovery?.candidates) ? discovery.candidates : Array.isArray(discovery) ? discovery : [];
+            for (const candidate2 of candidates) {
+              if (candidate2 && candidate2.status !== "unavailable" && typeof entry.module?.importAccount === "function") {
+                if (!pool.get(candidate2.accountId)) {
+                  const account = await entry.module.importAccount(candidate2, providerContext(this));
+                  const obsoleteOfficial = pool.list().find((a) => a.resources?.accountScope === "active_official_session" && candidate2.resources?.accountScope === "active_official_session" && a.accountId !== account.accountId);
+                  if (obsoleteOfficial) {
+                    pool.remove(obsoleteOfficial.accountId);
+                  }
+                  pool.upsert(account, { resetHealth: true });
+                  if (!pool.getDefaultAccountId()) {
+                    pool.setDefaultAccount(account.accountId);
+                  }
+                  autoImported.add(providerId);
+                }
               }
-              pool.upsert(account, { resetHealth: true });
-              pool.setDefaultAccount(account.accountId);
-              autoImported.add(providerId);
             }
           } catch {
           }
@@ -15414,7 +16493,7 @@ var DockyardRuntime = class {
 // packages/dsh-plugin/src/codex-transport.mjs
 import { access, readFile as readFile7 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname as dirname5, join as join14, resolve } from "node:path";
+import { dirname as dirname6, join as join16, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 var activeCodexModels = /* @__PURE__ */ new Map();
 function recordCodexModels(models) {
@@ -15460,15 +16539,15 @@ async function findPackageRoot(startDirectory, packageName) {
   const packageParts = packageName.split("/");
   let current = resolve(startDirectory);
   while (true) {
-    const candidate2 = join14(current, "node_modules", ...packageParts);
-    if (await isFile(join14(candidate2, "package.json"))) return candidate2;
-    const parent = dirname5(current);
+    const candidate2 = join16(current, "node_modules", ...packageParts);
+    if (await isFile(join16(candidate2, "package.json"))) return candidate2;
+    const parent = dirname6(current);
     if (parent === current) return null;
     current = parent;
   }
 }
 async function packageImportUrl(packageRoot, subpath = null) {
-  const packageJson = JSON.parse(await readFile7(join14(packageRoot, "package.json"), "utf8"));
+  const packageJson = JSON.parse(await readFile7(join16(packageRoot, "package.json"), "utf8"));
   const exports = packageJson.exports;
   let target = null;
   if (!subpath) {
@@ -15490,13 +16569,13 @@ async function packageImportUrl(packageRoot, subpath = null) {
   if (typeof target !== "string") {
     throw new Error(`Cannot resolve ${subpath ?? "."} from ${packageRoot}`);
   }
-  return pathToFileURL(join14(packageRoot, target)).href;
+  return pathToFileURL(join16(packageRoot, target)).href;
 }
 async function importFromDshInstall(moduleAnchor) {
   const anchor = moduleAnchor ?? process.env.DOCKYARD_DSH_CLI_PATH ?? process.argv[1] ?? import.meta.url;
   const dshRequire = createRequire(anchor);
   const dshLlmPath = dshRequire.resolve(DSH_LLM_PI_AI);
-  const dshPackageRoot = dirname5(dirname5(dshLlmPath));
+  const dshPackageRoot = dirname6(dirname6(dshLlmPath));
   const piRoot = await findPackageRoot(dshPackageRoot, PI_AI);
   if (!piRoot) throw new Error(`Cannot find ${PI_AI} beside ${DSH_LLM_PI_AI}`);
   const [{ PiAiAdapter }, { createProvider }, { openAICodexResponsesApi }, { openaiCodexProvider }, builtinProviders2] = await Promise.all([
@@ -15762,7 +16841,20 @@ var DockyardDshService = class {
     const refreshKey = providerId ?? "*";
     const existing = this.#refreshPromises.get(refreshKey);
     if (existing) return existing;
-    const promise = this.runtime.refreshAll(providerId).finally(() => {
+    const promise = (async () => {
+      const results = await this.runtime.refreshAll(providerId);
+      if (providerId) {
+        await this.runtime.getCatalog(providerId, { force: true }).catch(() => null);
+      } else {
+        const manifests = this.runtime.listProviderManifests?.() ?? [];
+        await Promise.all(manifests.map((m) => this.runtime.getCatalog(m.id, { force: true }).catch(() => null)));
+      }
+      try {
+        this.notifyAdaptersUpdated?.();
+      } catch {
+      }
+      return results;
+    })().finally(() => {
       if (this.#refreshPromises.get(refreshKey) === promise) this.#refreshPromises.delete(refreshKey);
     });
     this.#refreshPromises.set(refreshKey, promise);
@@ -15842,7 +16934,7 @@ var DockyardDshService = class {
         {
           model: modelId,
           messages: [{ role: "user", content: "hi" }],
-          maxTokens: 16,
+          maxTokens: 512,
           probe: true,
           noFallback: true
         },
@@ -16208,7 +17300,7 @@ function createDockyardCredentialStore(credentials, fallback = null) {
 // packages/dsh-plugin/src/native-key-pool-host.mjs
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAgentLoopRequest, markAgentLoopRequest } from "@deepseek-ai/dsh-llm";
-import { join as join15 } from "node:path";
+import { join as join17 } from "node:path";
 
 // packages/dsh-plugin/src/native-usage.mjs
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -16488,7 +17580,7 @@ var NativeKeyPoolHost = class {
     this.logger = logger ?? console;
     this.contextWindowOverrides = contextWindowOverrides;
     this.stateStore = stateStore ?? new JsonStateStore({
-      filePath: join15(defaultDockyardHome(), "native-key-pools.json")
+      filePath: join17(defaultDockyardHome(), "native-key-pools.json")
     });
     this.readyPromise = this.loadState();
   }
@@ -16854,7 +17946,7 @@ var NativeKeyPoolHost = class {
 // packages/dsh-plugin/src/vpn-ssrf-patch.mjs
 var import_ipaddr = __toESM(require_ipaddr(), 1);
 import { createRequire as createRequire2 } from "node:module";
-import { dirname as dirname6, join as join16 } from "node:path";
+import { dirname as dirname7, join as join18 } from "node:path";
 var isPatched = false;
 function patchFakeIpVpnSupport() {
   if (isPatched) return true;
@@ -16880,7 +17972,7 @@ function patchFakeIpVpnSupport() {
   ];
   if (typeof process?.execPath === "string") {
     try {
-      candidates.push(join16(dirname6(dirname6(process.execPath)), "Resources/app.asar/dsh/node_modules/ipaddr.js"));
+      candidates.push(join18(dirname7(dirname7(process.execPath)), "Resources/app.asar/dsh/node_modules/ipaddr.js"));
     } catch {
     }
   }
@@ -16937,7 +18029,8 @@ function apply(ctx, config = {}) {
       cursor: runtimeOptions.requestExecutors?.cursor ?? createCursorNativeExecutor(runtimeOptions.cursor ?? {}),
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
       workbuddy: runtimeOptions.requestExecutors?.workbuddy ?? createWorkbuddyNativeExecutor(runtimeOptions.workbuddy ?? {}),
-      commandcode: runtimeOptions.requestExecutors?.commandcode ?? createCommandCodeNativeExecutor(runtimeOptions.commandcode ?? {})
+      commandcode: runtimeOptions.requestExecutors?.commandcode ?? createCommandCodeNativeExecutor(runtimeOptions.commandcode ?? {}),
+      hermes: runtimeOptions.requestExecutors?.hermes ?? createHermesNativeExecutor(runtimeOptions.hermes ?? {})
     };
     runtimeOptions.catalogLoaders = {
       ...runtimeOptions.catalogLoaders ?? {},
@@ -16951,7 +18044,8 @@ function apply(ctx, config = {}) {
       claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
       workbuddy: runtimeOptions.catalogLoaders?.workbuddy ?? createWorkbuddyCatalogLoader(runtimeOptions.workbuddy ?? {}),
-      commandcode: runtimeOptions.catalogLoaders?.commandcode ?? createCommandCodeCatalogLoader(runtimeOptions.commandcode ?? {})
+      commandcode: runtimeOptions.catalogLoaders?.commandcode ?? createCommandCodeCatalogLoader(runtimeOptions.commandcode ?? {}),
+      hermes: runtimeOptions.catalogLoaders?.hermes ?? createHermesCatalogLoader(runtimeOptions.hermes ?? {})
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders).filter(([, loader]) => typeof loader === "function");
@@ -16965,7 +18059,7 @@ function apply(ctx, config = {}) {
         providers.filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length > 0).map((provider) => provider.providerId)
       );
       const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
-      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || providerId === "workbuddy" || providerId === "commandcode" || connected.has(providerId)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
+      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || providerId === "workbuddy" || providerId === "commandcode" || providerId === "hermes" || connected.has(providerId)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [], secretStore: runtime.secretStore }).catch(() => null)));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
     });
@@ -16973,6 +18067,7 @@ function apply(ctx, config = {}) {
   const adapter = createDockyardLlmAdapter({
     runtime,
     providerIds: config.providers ?? runtime.listProviderIds(),
+    catalogCachePath: config.catalogCachePath ?? defaultCatalogCachePath(),
     // Resolve this only when a request is actually streamed. The attachment
     // service is installed by DSH's base profile after plugin composition;
     // reading it while the plugin graph is being composed breaks boot.
@@ -17061,8 +18156,8 @@ function apply(ctx, config = {}) {
                   res.end("Forbidden");
                   return;
                 }
-                const filePath = join17(process.cwd(), "artifacts", cleanPath);
-                if (!existsSync6(filePath)) {
+                const filePath = join19(process.cwd(), "artifacts", cleanPath);
+                if (!existsSync8(filePath)) {
                   res.writeHead(404);
                   res.end("Not Found");
                   return;
@@ -17077,7 +18172,7 @@ function apply(ctx, config = {}) {
                   svg: "image/svg+xml"
                 };
                 const contentType = mimeTypes[ext] ?? "application/octet-stream";
-                const content = readFileSync6(filePath);
+                const content = readFileSync8(filePath);
                 res.writeHead(200, {
                   "Content-Type": contentType,
                   "Content-Length": content.length,

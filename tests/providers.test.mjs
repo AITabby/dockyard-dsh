@@ -2433,6 +2433,65 @@ test("Cursor browser OAuth loads the official account model catalog without the 
   assert.equal(JSON.parse(request.init.body).useReactModelPicker, true);
 });
 
+test("Cursor browser OAuth extracts reasoning efforts from parameterDefinitions and supportsThinking", async () => {
+  const secretStore = new MemorySecretStore();
+  const credentialRef = "keychain://cursor/browser-reasoning";
+  await secretStore.write(credentialRef, { access: "cursor-access" });
+  const loader = createCursorCatalogLoader({
+    cliPath: "missing-cursor-agent",
+    commandRunner: async () => { throw new Error("CLI must not be used"); },
+    fetchImpl: async () => response(200, {
+      models: [
+        {
+          name: "grok-4.7",
+          clientDisplayName: "Grok 4.7",
+          supportsThinking: true,
+          parameterDefinitions: [
+            {
+              id: "reasoning_effort",
+              parameterType: {
+                enumParameter: {
+                  values: [
+                    { value: "low", displayName: "Low" },
+                    { value: "medium", displayName: "Medium" },
+                    { value: "high", displayName: "High" },
+                    { value: "xhigh", displayName: "Extra High" },
+                  ],
+                },
+              },
+            },
+          ],
+        },
+        {
+          name: "composer-2.5",
+          clientDisplayName: "Composer 2.5",
+          supportsThinking: true,
+        },
+      ],
+    }),
+  });
+  const catalog = await loader({
+    accounts: [{
+      auth: { credentialRef },
+      resources: { sessionSource: "browser", authSource: "official_cursor_browser_oauth" },
+    }],
+    secretStore,
+  });
+  assert.equal(catalog.models[0].reasoning.defaultEffort, "medium");
+  assert.deepEqual(catalog.models[0].reasoning.efforts, [
+    { id: "low", name: "Low" },
+    { id: "medium", name: "Medium" },
+    { id: "high", name: "High" },
+    { id: "xhigh", name: "Extra High" },
+  ]);
+  assert.equal(catalog.models[1].reasoning.defaultEffort, "medium");
+  assert.deepEqual(catalog.models[1].reasoning.efforts, [
+    { id: "low", name: "Low" },
+    { id: "medium", name: "Medium" },
+    { id: "high", name: "High" },
+  ]);
+});
+
 test("Cursor official CLI executor passes the selected model and normalizes stream-json", async () => {
   const calls = [];
   const executor = createCursorCliExecutor({

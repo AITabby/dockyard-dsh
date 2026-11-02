@@ -82,4 +82,4 @@ export function createDshBridgeModule(bridge) {
   };
 }
 
-export { createDockyardLlmAdapter } from "./llm-adapter.mjs";
+export { createDockyardLlmAdapter, defaultCatalogCachePath } from "./llm-adapter.mjs";

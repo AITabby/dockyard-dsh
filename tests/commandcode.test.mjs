@@ -68,6 +68,17 @@ test("parseCommandCodeCatalog parses live and cache structures", () => {
         reasoningEfforts: ["low", "high"],
         inputModalities: ["text", "image"],
       },
+      {
+        id: "retired-model:free",
+        name: "Retired Model",
+        hidden: true,
+      },
+      {
+        id: "active-free-model:free",
+        name: "Active Free Model",
+        display: { badge: "free" },
+        pricing: { inputCost: 0, outputCost: 0 },
+      },
     ],
   };
 
@@ -79,6 +90,12 @@ test("parseCommandCodeCatalog parses live and cache structures", () => {
   assert.equal(custom.maxTokens, 8192);
   assert.equal(custom.reasoning.defaultEffort, "high");
   assert.deepEqual(custom.inputModalities, ["text", "image"]);
+
+  // Verify hidden/retired models are filtered out
+  assert.equal(parsed.models.some((m) => m.id === "retired-model:free"), false);
+  const activeFree = parsed.models.find((m) => m.id === "active-free-model:free");
+  assert.ok(activeFree);
+  assert.equal(activeFree.free, true);
 
   // Verify builtin models are merged
   assert.ok(parsed.models.some((m) => m.id === "deepseek/deepseek-v4.1-flash"));
@@ -147,6 +164,39 @@ test("buildCommandCodeMessages and toWireTools transform DSH payloads", () => {
   assert.equal(tools.length, 1);
   assert.equal(tools[0].name, "test_tool");
   assert.equal(tools[0].description, "A test tool");
+});
+
+test("buildCommandCodeMessages pads reasoning_content for reasoning models and sanitizes tool IDs", () => {
+  const codexId = "call_0194ff7b2b647bc58a184bf418431050|item_0194ff7b2b647bc58a184bf418431051";
+  const request = {
+    model: "reflection/beam:free",
+    messages: [
+      { role: "user", content: "Hi" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Here is the response" },
+          { type: "tool-call", id: codexId, name: "lookup", arguments: "{}" },
+        ],
+      },
+      { role: "tool", toolCallId: codexId, content: "done" },
+    ],
+  };
+
+  const { wireMessages } = buildCommandCodeMessages(request);
+  assert.equal(wireMessages.length, 3);
+  const asst = wireMessages[1];
+  assert.equal(asst.role, "assistant");
+  assert.equal(typeof asst.reasoning_content, "string");
+  assert.equal(asst.reasoning_content, "");
+
+  const tc = asst.content.find((p) => p.type === "tool-call");
+  assert.ok(tc.toolCallId.length <= 64);
+  assert.ok(!tc.toolCallId.includes("|"));
+
+  const tr = wireMessages[2];
+  assert.equal(tr.role, "tool");
+  assert.equal(tr.content[0].toolCallId, tc.toolCallId);
 });
 
 test("createCommandCodeNativeExecutor streams NDJSON events", async () => {

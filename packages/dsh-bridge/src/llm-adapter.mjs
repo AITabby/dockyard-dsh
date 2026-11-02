@@ -1,4 +1,53 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { ValidationError } from "../../core/src/errors.mjs";
+
+export function defaultCatalogCachePath() {
+  const home = process.env.DOCKYARD_DSH_HOME || join(homedir(), ".dockyard-dsh");
+  return join(home, "catalog-cache.json");
+}
+
+function loadDiskCatalogCache(filePath) {
+  try {
+    if (!filePath || !existsSync(filePath)) return new Map();
+    const raw = readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    const map = new Map();
+    if (parsed && typeof parsed === "object") {
+      for (const [providerId, entry] of Object.entries(parsed)) {
+        if (entry && Array.isArray(entry.value?.models) && entry.value.models.length > 0) {
+          map.set(providerId, {
+            value: entry.value,
+            fetchedAt: Number(entry.fetchedAt) || Date.now(),
+          });
+        }
+      }
+    }
+    return map;
+  } catch {
+    return new Map();
+  }
+}
+
+function saveDiskCatalogCache(filePath, map) {
+  try {
+    if (!filePath) return;
+    const obj = {};
+    for (const [providerId, entry] of map) {
+      if (entry && Array.isArray(entry.value?.models) && entry.value.models.length > 0) {
+        obj[providerId] = {
+          value: entry.value,
+          fetchedAt: entry.fetchedAt,
+        };
+      }
+    }
+    mkdirSync(dirname(filePath), { recursive: true, mode: 0o700 });
+    writeFileSync(filePath, JSON.stringify(obj, null, 2), "utf8");
+  } catch {
+    // Disk write failure must not break generation or catalog discovery.
+  }
+}
 
 function effortName(id) {
   return String(id)
@@ -217,6 +266,13 @@ function retryFinishFromThrownError(error) {
     code = "TRANSPORT";
   } else if (isContextOverflowError(error)) {
     code = "CONTEXT_WINDOW_EXCEEDED";
+  } else if (
+    code === "TRANSPORT" ||
+    /\bfetch failed\b/i.test(String(error?.message ?? "")) ||
+    error?.cause?.code === "ECONNRESET" ||
+    error?.cause?.code === "ETIMEDOUT"
+  ) {
+    code = "TRANSPORT";
   }
   if (!RETRYABLE_THROWN_FAILURE_CODES.has(code)) return null;
   return {
@@ -263,7 +319,7 @@ export function resolveFallbackModelMetadata(provider, model) {
   } else if (id.includes("gpt-") || id.includes("codex-") || provider === "openai-codex") {
     contextWindow = 200000;
     maxTokens = 8192;
-  } else if (provider === "commandcode") {
+  } else if (provider === "commandcode" || provider === "hermes") {
     contextWindow = 1000000;
     maxTokens = 16384;
   }
@@ -284,12 +340,17 @@ export function resolveFallbackModelMetadata(provider, model) {
  * keeping the bridge structural lets the local page and unit tests run without
  * installing DSH into Dockyard's own workspace.
  */
-export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = null } = {}) {
+export function createDockyardLlmAdapter({
+  runtime,
+  providerIds,
+  attachmentsResolver = null,
+  catalogCachePath = null,
+} = {}) {
   if (!runtime) throw new ValidationError("Dockyard runtime is required");
   const owned = [...(providerIds ?? runtime.listProviderIds?.() ?? [])];
   if (owned.length === 0) throw new ValidationError("At least one Dockyard provider is required");
   const catalogPromises = new Map();
-  const catalogCache = new Map();
+  const catalogCache = catalogCachePath ? loadDiskCatalogCache(catalogCachePath) : new Map();
   const STREAM_CATALOG_REFRESH_MS = 60_000;
 
   async function ensureRuntimeReady() {
@@ -336,7 +397,10 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
       promise = Promise.resolve()
         .then(() => runtime.getCatalog(provider, { force }))
         .then((catalog) => {
-          catalogCache.set(provider, { value: catalog, fetchedAt: Date.now() });
+          if (Array.isArray(catalog?.models) && catalog.models.length > 0) {
+            catalogCache.set(provider, { value: catalog, fetchedAt: Date.now() });
+            saveDiskCatalogCache(catalogCachePath, catalogCache);
+          }
           return catalog;
         })
         .finally(() => {
@@ -353,7 +417,7 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
     if (Date.now() - entry.fetchedAt >= STREAM_CATALOG_REFRESH_MS && !catalogPromises.has(provider)) {
       // Refresh metadata opportunistically, but never put model generation
       // behind a provider's CLI/remote catalog endpoint.
-      void providerCatalog(provider).catch(() => {});
+      void providerCatalog(provider, undefined, { force: true }).catch(() => {});
     }
     return entry.value;
   }
@@ -401,7 +465,8 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
     async listModels(provider, signal) {
       await ensureRuntimeReady();
       if (!providerHasConnectedAccount(runtime, provider)) return [];
-      const catalog = await providerCatalog(provider, signal);
+      const cached = cachedProviderCatalog(provider);
+      const catalog = cached ?? await providerCatalog(provider, signal);
       const allModels = providerCatalogModels(provider, catalog);
       const enabled = runtime.getModelSelection?.(provider);
       if (Array.isArray(enabled)) {

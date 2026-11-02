@@ -22,6 +22,11 @@ import {
   createCommandCodeModule,
   summarizeCommandCodeCandidate,
 } from "../../../modules/provider-commandcode/src/index.mjs";
+import {
+  createHermesDriver,
+  createHermesModule,
+  summarizeHermesCandidate,
+} from "../../../modules/provider-hermes/src/index.mjs";
 import { redactError } from "../../providers/src/provider-utils.mjs";
 
 const candidateSummarizers = new Map([
@@ -34,6 +39,7 @@ const candidateSummarizers = new Map([
   ["workbuddy", summarizeWorkbuddyCandidate],
   ["kilo", summarizeKiloCandidate],
   ["commandcode", summarizeCommandCodeCandidate],
+  ["hermes", summarizeHermesCandidate],
 ]);
 
 // Official provider CLIs may need a network round-trip to rotate OAuth
@@ -252,6 +258,15 @@ export function createDefaultProviderEntries(options = {}) {
       }),
       driver: options.commandcodeDriver,
     },
+    {
+      module: createHermesModule({
+        driver: options.hermesDriver ?? createHermesDriver({
+          ...withRequestExecutor("hermes", options.hermes, requestExecutors),
+          ...(catalogLoaders.hermes ? { catalogLoader: catalogLoaders.hermes } : {}),
+        }),
+      }),
+      driver: options.hermesDriver,
+    },
   ];
 }
 
@@ -378,25 +393,31 @@ export class DockyardRuntime {
         }
         const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
         const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
-        if ((providerId === "workbuddy" && pool.list().length === 0) || (providerId === "commandcode" && pool.list().length === 0) || (hasExpiredOfficialSession && hasNoEligible)) {
+        if ((providerId === "workbuddy" && pool.list().length === 0) || (providerId === "commandcode" && pool.list().length === 0) || (providerId === "hermes" && pool.list().length === 0) || (hasExpiredOfficialSession && hasNoEligible)) {
           try {
             const discovery = await (entry.module?.discover?.(providerContext(this)) ?? entry.driver?.discover?.(providerContext(this)));
-            const candidate = Array.isArray(discovery?.candidates)
-              ? discovery.candidates[0]
-              : (Array.isArray(discovery) ? discovery[0] : null);
-            if (candidate && candidate.status !== "unavailable" && typeof entry.module?.importAccount === "function") {
-              const account = await entry.module.importAccount(candidate, providerContext(this));
-              const obsoleteOfficial = pool.list().find((a) => (
-                a.resources?.accountScope === "active_official_session"
-                && candidate.resources?.accountScope === "active_official_session"
-                && a.accountId !== account.accountId
-              ));
-              if (obsoleteOfficial) {
-                pool.remove(obsoleteOfficial.accountId);
+            const candidates = Array.isArray(discovery?.candidates)
+              ? discovery.candidates
+              : (Array.isArray(discovery) ? discovery : []);
+            for (const candidate of candidates) {
+              if (candidate && candidate.status !== "unavailable" && typeof entry.module?.importAccount === "function") {
+                if (!pool.get(candidate.accountId)) {
+                  const account = await entry.module.importAccount(candidate, providerContext(this));
+                  const obsoleteOfficial = pool.list().find((a) => (
+                    a.resources?.accountScope === "active_official_session"
+                    && candidate.resources?.accountScope === "active_official_session"
+                    && a.accountId !== account.accountId
+                  ));
+                  if (obsoleteOfficial) {
+                    pool.remove(obsoleteOfficial.accountId);
+                  }
+                  pool.upsert(account, { resetHealth: true });
+                  if (!pool.getDefaultAccountId()) {
+                    pool.setDefaultAccount(account.accountId);
+                  }
+                  autoImported.add(providerId);
+                }
               }
-              pool.upsert(account, { resetHealth: true });
-              pool.setDefaultAccount(account.accountId);
-              autoImported.add(providerId);
             }
           } catch {
             // best-effort auto-import

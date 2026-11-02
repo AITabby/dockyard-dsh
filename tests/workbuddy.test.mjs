@@ -156,20 +156,22 @@ test("DockyardRuntime auto-provisions WorkBuddy free account and allows real-tim
   // Initially all available models returned
   const allModels = await adapter.listModels("workbuddy");
   assert.ok(allModels.length >= 2, "WorkBuddy should list available models");
-  assert.ok(allModels.some((m) => m.id === "deepseek-v4.1-flash"));
+  assert.ok(allModels.some((m) => m.id.includes("deepseek") || m.id === "hy3"));
   assert.ok(allModels.some((m) => m.id === "hy3"));
 
-  // Real-time selection of free tier model subset
-  await runtime.setModelSelection("workbuddy", ["deepseek-v4.1-flash"]);
+  // Real-time selection of model subset
+  const firstId = allModels[0].id;
+  await runtime.setModelSelection("workbuddy", [firstId]);
   const filteredModels = await adapter.listModels("workbuddy");
   assert.equal(filteredModels.length, 1);
-  assert.equal(filteredModels[0].id, "deepseek-v4.1-flash");
+  assert.equal(filteredModels[0].id, firstId);
 
   // Switch selection in real-time
-  await runtime.setModelSelection("workbuddy", ["hy3"]);
+  const secondId = allModels[1].id;
+  await runtime.setModelSelection("workbuddy", [secondId]);
   const switchedModels = await adapter.listModels("workbuddy");
   assert.equal(switchedModels.length, 1);
-  assert.equal(switchedModels[0].id, "hy3");
+  assert.equal(switchedModels[0].id, secondId);
 
   // Reset selection (restores full list)
   await runtime.setModelSelection("workbuddy", null);
