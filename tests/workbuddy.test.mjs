@@ -139,9 +139,20 @@ test("DockyardRuntime auto-provisions WorkBuddy free account and allows real-tim
   const stateStore = memoryStateStore({});
   const runtime = new DockyardRuntime({
     stateStore,
-    workbuddy: {
-      fetchImpl: async () => new Response(""),
+    secretStore: {
+      data: new Map(),
+      async write(ref, val) { this.data.set(ref, val); },
+      async read(ref) { return this.data.get(ref); },
     },
+    providers: [
+      {
+        module: createWorkbuddyModule({
+          driver: createWorkbuddyDriver({
+            fetchImpl: async () => new Response(""),
+          }),
+        }),
+      },
+    ],
   });
   await runtime.init();
 

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { writeFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -227,67 +230,106 @@ test("createHermesNativeExecutor streams reasoning deltas, text deltas, and usag
 });
 
 test("HermesDriver discovers both configured accounts and imports into account pool", async () => {
-  const driver = createHermesDriver();
-  const discovery = await driver.discover();
-  assert.ok(discovery.candidates.length >= 2, "Should discover both configured keys from ~/.hermes/auth.json");
+  const tempAuthPath = join(tmpdir(), `hermes-test-auth-${Date.now()}.json`);
+  writeFileSync(tempAuthPath, JSON.stringify({
+    accounts: [
+      { accountId: "hermes-acc-1", displayName: "Hermes Account 1 ($50)", apiKey: "sk-hermes-1", balance: 50 },
+      { accountId: "hermes-acc-2", displayName: "Hermes Account 2 ($10)", apiKey: "sk-hermes-2", balance: 10 },
+    ],
+  }));
+  const prevAuthPath = process.env.HERMES_AUTH_PATH;
+  process.env.HERMES_AUTH_PATH = tempAuthPath;
 
-  const cand1 = discovery.candidates[0];
-  const cand2 = discovery.candidates[1];
-  assert.equal(cand1.candidateId, "hermes-acc-1");
-  assert.equal(cand1.quota.remaining, 50);
-  assert.equal(cand1.quota.windows[0].remaining, 50);
-  assert.ok(cand1.resources?.quotaDiagnostic);
-  assert.equal(cand2.candidateId, "hermes-acc-2");
-  assert.equal(cand2.quota.remaining, 10);
-  assert.equal(cand2.quota.windows[0].remaining, 10);
+  try {
+    const driver = createHermesDriver();
+    const discovery = await driver.discover();
+    assert.ok(discovery.candidates.length >= 2, "Should discover both configured keys from auth.json");
 
-  const mockSecretStore = {
-    data: new Map(),
-    async write(ref, val) { this.data.set(ref, val); },
-    async read(ref) { return this.data.get(ref); },
-  };
+    const cand1 = discovery.candidates[0];
+    const cand2 = discovery.candidates[1];
+    assert.equal(cand1.candidateId, "hermes-acc-1");
+    assert.equal(cand1.quota.remaining, 50);
+    assert.equal(cand1.quota.windows[0].remaining, 50);
+    assert.ok(cand1.resources?.quotaDiagnostic);
+    assert.equal(cand2.candidateId, "hermes-acc-2");
+    assert.equal(cand2.quota.remaining, 10);
+    assert.equal(cand2.quota.windows[0].remaining, 10);
 
-  const acc1 = await driver.importAccount(cand1, { secretStore: mockSecretStore });
-  const acc2 = await driver.importAccount(cand2, { secretStore: mockSecretStore });
-
-  assert.equal(acc1.providerId, "hermes");
-  assert.equal(acc1.accountId, "hermes-acc-1");
-  assert.equal(acc1.quota.remaining, 50);
-  assert.ok(acc1.resources?.quotaDiagnostic);
-
-  assert.equal(acc2.providerId, "hermes");
-  assert.equal(acc2.accountId, "hermes-acc-2");
-  assert.equal(acc2.quota.remaining, 10);
-});
-
-test("DockyardRuntime auto-provisions Hermes accounts and exposes model catalog in adapter", async () => {
-  const runtime = new DockyardRuntime({
-    stateStore: memoryStateStore(),
-    secretStore: {
+    const mockSecretStore = {
       data: new Map(),
       async write(ref, val) { this.data.set(ref, val); },
       async read(ref) { return this.data.get(ref); },
-    },
-    hermes: {
-      apiKey: "sk-mock-key",
-    },
-  });
+    };
 
-  await runtime.init();
-  const snapshot = runtime.snapshot();
-  const hermesEntry = snapshot.providers.find((p) => p.providerId === "hermes");
-  assert.ok(hermesEntry, "Hermes provider should be registered");
-  assert.ok(hermesEntry.accounts.length >= 2, "Both accounts should be auto-provisioned into the pool");
-  assert.ok(hermesEntry.accounts.some((a) => a.accountId === "hermes-acc-1"));
-  assert.ok(hermesEntry.accounts.some((a) => a.accountId === "hermes-acc-2"));
+    const acc1 = await driver.importAccount(cand1, { secretStore: mockSecretStore });
+    const acc2 = await driver.importAccount(cand2, { secretStore: mockSecretStore });
 
-  const adapter = createDockyardLlmAdapter({
-    runtime,
-    providerIds: ["hermes"],
-  });
+    assert.equal(acc1.providerId, "hermes");
+    assert.equal(acc1.accountId, "hermes-acc-1");
+    assert.equal(acc1.quota.remaining, 50);
+    assert.ok(acc1.resources?.quotaDiagnostic);
 
-  const models = await adapter.listModels("hermes");
-  assert.ok(models.length >= 5);
-  assert.ok(models.some((m) => m.id === "deepseek/deepseek-v4.1-flash"));
-  assert.ok(models.some((m) => m.id === "reflection/beam-1.0-501b-a23b:free"));
+    assert.equal(acc2.providerId, "hermes");
+    assert.equal(acc2.accountId, "hermes-acc-2");
+    assert.equal(acc2.quota.remaining, 10);
+  } finally {
+    if (prevAuthPath === undefined) delete process.env.HERMES_AUTH_PATH;
+    else process.env.HERMES_AUTH_PATH = prevAuthPath;
+    try { unlinkSync(tempAuthPath); } catch {}
+  }
+});
+
+test("DockyardRuntime auto-provisions Hermes accounts and exposes model catalog in adapter", async () => {
+  const tempAuthPath = join(tmpdir(), `hermes-runtime-auth-${Date.now()}.json`);
+  writeFileSync(tempAuthPath, JSON.stringify({
+    accounts: [
+      { accountId: "hermes-acc-1", displayName: "Hermes Account 1 ($50)", apiKey: "sk-hermes-1", balance: 50 },
+      { accountId: "hermes-acc-2", displayName: "Hermes Account 2 ($10)", apiKey: "sk-hermes-2", balance: 10 },
+    ],
+  }));
+  const prevAuthPath = process.env.HERMES_AUTH_PATH;
+  process.env.HERMES_AUTH_PATH = tempAuthPath;
+
+  try {
+    const runtime = new DockyardRuntime({
+      stateStore: memoryStateStore(),
+      secretStore: {
+        data: new Map(),
+        async write(ref, val) { this.data.set(ref, val); },
+        async read(ref) { return this.data.get(ref); },
+      },
+      providers: [
+        {
+          module: createHermesModule({
+            driver: createHermesDriver({
+              apiKey: "sk-mock-key",
+              fetchImpl: async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
+            }),
+          }),
+        },
+      ],
+    });
+
+    await runtime.init();
+    const snapshot = runtime.snapshot();
+    const hermesEntry = snapshot.providers.find((p) => p.providerId === "hermes");
+    assert.ok(hermesEntry, "Hermes provider should be registered");
+    assert.ok(hermesEntry.accounts.length >= 2, "Both accounts should be auto-provisioned into the pool");
+    assert.ok(hermesEntry.accounts.some((a) => a.accountId === "hermes-acc-1"));
+    assert.ok(hermesEntry.accounts.some((a) => a.accountId === "hermes-acc-2"));
+
+    const adapter = createDockyardLlmAdapter({
+      runtime,
+      providerIds: ["hermes"],
+    });
+
+    const models = await adapter.listModels("hermes");
+    assert.ok(models.length >= 5);
+    assert.ok(models.some((m) => m.id === "deepseek/deepseek-v4.1-flash"));
+    assert.ok(models.some((m) => m.id === "reflection/beam-1.0-501b-a23b:free"));
+  } finally {
+    if (prevAuthPath === undefined) delete process.env.HERMES_AUTH_PATH;
+    else process.env.HERMES_AUTH_PATH = prevAuthPath;
+    try { unlinkSync(tempAuthPath); } catch {}
+  }
 });

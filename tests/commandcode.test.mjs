@@ -282,53 +282,60 @@ test("createCommandCodeNativeExecutor streams NDJSON events", async () => {
 });
 
 test("CommandCodeDriver discover and importAccount work with mock endpoints", async () => {
-  const fetchImpl = async (url) => {
-    if (url.includes("whoami")) {
-      return new Response(JSON.stringify({
-        user: { id: "usr_123", name: "Test User", email: "test@example.com" },
-      }), { status: 200 });
-    }
-    if (url.includes("billing/credits")) {
-      return new Response(JSON.stringify({
-        credits: { monthlyCredits: 8.5 },
-        windowLimits: {
-          fiveHour: { cap: 3, used: 1, resetAt: Date.now() + 3600000 },
-          weekly: { cap: 6, used: 2, resetAt: Date.now() + 86400000 },
-        },
-      }), { status: 200 });
-    }
-    if (url.includes("billing/subscriptions")) {
-      return new Response(JSON.stringify({
-        data: {
-          planId: "individual-go-v1",
-          status: "active",
-          currentPeriodEnd: "2026-12-01T00:00:00.000Z",
-        },
-      }), { status: 200 });
-    }
-    return new Response("Not found", { status: 404 });
-  };
+  const prevKey = process.env.COMMAND_CODE_API_KEY;
+  process.env.COMMAND_CODE_API_KEY = "mock-command-code-key";
+  try {
+    const fetchImpl = async (url) => {
+      if (url.includes("whoami")) {
+        return new Response(JSON.stringify({
+          user: { id: "usr_123", name: "Test User", email: "test@example.com" },
+        }), { status: 200 });
+      }
+      if (url.includes("billing/credits")) {
+        return new Response(JSON.stringify({
+          credits: { monthlyCredits: 8.5 },
+          windowLimits: {
+            fiveHour: { cap: 3, used: 1, resetAt: Date.now() + 3600000 },
+            weekly: { cap: 6, used: 2, resetAt: Date.now() + 86400000 },
+          },
+        }), { status: 200 });
+      }
+      if (url.includes("billing/subscriptions")) {
+        return new Response(JSON.stringify({
+          data: {
+            planId: "individual-go-v1",
+            status: "active",
+            currentPeriodEnd: "2026-12-01T00:00:00.000Z",
+          },
+        }), { status: 200 });
+      }
+      return new Response("Not found", { status: 404 });
+    };
 
-  const driver = createCommandCodeDriver({ fetchImpl });
-  const discovery = await driver.discover();
-  assert.ok(discovery.candidates.length > 0);
-  const cand = discovery.candidates[0];
-  assert.equal(cand.accountId, "usr_123");
-  assert.equal(cand.subscription.plan, "Command Code Go Plan");
-  assert.equal(cand.quota.remaining, 8.5);
-  assert.equal(cand.quota.windows.length, 2);
+    const driver = createCommandCodeDriver({ fetchImpl });
+    const discovery = await driver.discover();
+    assert.ok(discovery.candidates.length > 0);
+    const cand = discovery.candidates[0];
+    assert.equal(cand.accountId, "usr_123");
+    assert.equal(cand.subscription.plan, "Command Code Go Plan");
+    assert.equal(cand.quota.remaining, 8.5);
+    assert.equal(cand.quota.windows.length, 2);
 
-  const mockSecretStore = {
-    data: new Map(),
-    async write(ref, val) { this.data.set(ref, val); },
-    async read(ref) { return this.data.get(ref); },
-  };
+    const mockSecretStore = {
+      data: new Map(),
+      async write(ref, val) { this.data.set(ref, val); },
+      async read(ref) { return this.data.get(ref); },
+    };
 
-  const account = await driver.importAccount(cand, { secretStore: mockSecretStore });
-  assert.equal(account.providerId, "commandcode");
-  assert.equal(account.accountId, "usr_123");
-  assert.equal(account.subscription.plan, "Command Code Go Plan");
-  assert.ok(account.auth.credentialRef.startsWith("keychain://dockyard-dsh/"));
+    const account = await driver.importAccount(cand, { secretStore: mockSecretStore });
+    assert.equal(account.providerId, "commandcode");
+    assert.equal(account.accountId, "usr_123");
+    assert.equal(account.subscription.plan, "Command Code Go Plan");
+    assert.ok(account.auth.credentialRef.startsWith("keychain://dockyard-dsh/"));
+  } finally {
+    if (prevKey === undefined) delete process.env.COMMAND_CODE_API_KEY;
+    else process.env.COMMAND_CODE_API_KEY = prevKey;
+  }
 });
 
 test("createCommandCodeNativeExecutor extracts prompt cache read tokens and normalizes input tokens", async () => {
@@ -437,30 +444,41 @@ test("CommandCodeNativeExecutor sends valid UUID threadId and deterministic sess
 });
 
 test("DockyardRuntime auto-provisions commandcode if local auth exists", async () => {
-  const stateStore = memoryStateStore();
-  const runtime = new DockyardRuntime({
-    stateStore,
-    providers: [
-      {
-        module: createCommandCodeModule({
-          driver: createCommandCodeDriver({
-            fetchImpl: async () => new Response(JSON.stringify({
-              user: { id: "usr_123", name: "AITabby", email: "aitabbyspace@gmail.com" },
-              credits: { monthlyCredits: 10 },
-              data: { planId: "individual-go-v1", status: "active" },
-            }), { status: 200 }),
-          }),
-        }),
+  const prevKey = process.env.COMMAND_CODE_API_KEY;
+  process.env.COMMAND_CODE_API_KEY = "mock-command-code-key";
+  try {
+    const stateStore = memoryStateStore();
+    const runtime = new DockyardRuntime({
+      stateStore,
+      secretStore: {
+        data: new Map(),
+        async write(ref, val) { this.data.set(ref, val); },
+        async read(ref) { return this.data.get(ref); },
       },
-    ],
-  });
+      providers: [
+        {
+          module: createCommandCodeModule({
+            driver: createCommandCodeDriver({
+              fetchImpl: async () => new Response(JSON.stringify({
+                user: { id: "usr_123", name: "AITabby", email: "aitabbyspace@gmail.com" },
+                credits: { monthlyCredits: 10 },
+                data: { planId: "individual-go-v1", status: "active" },
+              }), { status: 200 }),
+            }),
+          }),
+        },
+      ],
+    });
 
-  await runtime.init();
-  const snapshot = runtime.snapshot();
-  const ccProvider = snapshot.providers.find((p) => p.providerId === "commandcode");
-  assert.ok(ccProvider, "commandcode provider must be registered");
-  // Local auth exists on this test machine (~/.commandcode/auth.json), so it should auto-provision!
-  assert.ok(ccProvider.accounts.length > 0, "local auth should be auto-imported into account pool");
-  assert.equal(ccProvider.accounts[0].displayName, "AITabby (aitabbyspace@gmail.com)");
-  assert.equal(ccProvider.accounts[0].subscription.plan, "Command Code Go Plan");
+    await runtime.init();
+    const snapshot = runtime.snapshot();
+    const ccProvider = snapshot.providers.find((p) => p.providerId === "commandcode");
+    assert.ok(ccProvider, "commandcode provider must be registered");
+    assert.ok(ccProvider.accounts.length > 0, "local auth should be auto-imported into account pool");
+    assert.equal(ccProvider.accounts[0].displayName, "AITabby (aitabbyspace@gmail.com)");
+    assert.equal(ccProvider.accounts[0].subscription.plan, "Command Code Go Plan");
+  } finally {
+    if (prevKey === undefined) delete process.env.COMMAND_CODE_API_KEY;
+    else process.env.COMMAND_CODE_API_KEY = prevKey;
+  }
 });
