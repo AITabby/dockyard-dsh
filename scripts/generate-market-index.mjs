@@ -95,7 +95,9 @@ const packageVersion = JSON.parse(
 const currentCommit = (process.env.DOCKYARD_RELEASE_COMMIT || execSync("git rev-parse HEAD", { cwd: rootDir, encoding: "utf8" }).trim());
 
 const RELEASE_HISTORY = [
-  { version: "0.1.17", publishTimestamp: 1793786618, commit: "e67b24cf4a0f4c3eaa2b8b0a2dc73e69f159f82f" },
+  // 0.1.17 was never published: its local commit embedded OAuth credentials and
+  // was rewritten into the 0.1.18 release before being pushed. Do not list a
+  // version whose commit does not exist on the remote.
   { version: "0.1.16", publishTimestamp: 1793776800, commit: "28ef85a09aff6cd0f2077e2681f8b8f2d6f06408" },
   { version: "0.1.15", publishTimestamp: 1793629755, commit: "c4a6d34ce823d6f93b0539e1b58b2b73114330d5" },
   { version: "0.1.11", publishTimestamp: 1793547152, commit: "62e4ee0e4f6891e3788a4872b67e057e0c41253f" },

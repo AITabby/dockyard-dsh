@@ -122,4 +122,16 @@ test("market/index.json conforms strictly to DSH plugin market format 1", async 
     );
     seenCommits.add(commit);
   }
+
+  // The default (current) version must point at a commit that actually exists
+  // in this repository; otherwise a market install resolves to a dead SHA.
+  const exists = (() => {
+    try {
+      execSync(`git cat-file -e ${defaultVersion.source.commit}^{commit}`, { cwd: rootDir, stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  assert.ok(exists, `default version ${defaultVersion.version} points at a missing commit ${defaultVersion.source.commit}`);
 });
