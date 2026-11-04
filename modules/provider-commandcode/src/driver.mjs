@@ -45,7 +45,13 @@ export const BUILTIN_COMMANDCODE_MODELS = Object.freeze([
       ],
       defaultEffort: "high",
     },
-    inputModalities: ["text"],
+    // The live provider catalog reports ["text","image"] for this model, and a
+    // direct request proves the gateway forwards image parts to it (verified
+    // 2026-11-04: image token delta was +195 and the model read a red/green/blue
+    // test chart correctly). The builtin fallback must not be more restrictive
+    // than the catalog, or images are silently dropped whenever the live
+    // catalog is unavailable or stale.
+    inputModalities: ["text", "image"],
   },
   {
     id: "deepseek/deepseek-v4-pro",

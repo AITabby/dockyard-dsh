@@ -47,6 +47,15 @@ test("Command Code module manifest and builtin models", async () => {
   assert.ok(deepseekFlash);
   assert.equal(deepseekFlash.name, "DeepSeek V4.1 Flash (Command Code)");
   assert.equal(deepseekFlash.contextWindow, 1000000);
+  // Regression: this model accepts images on the Command Code gateway (the live
+  // catalog reports ["text","image"] and a real request carries image tokens).
+  // The builtin fallback previously said ["text"], which made DSH silently drop
+  // every pasted image whenever the live catalog was stale or unavailable.
+  assert.ok(deepseekFlash.inputModalities.includes("image"), "builtin fallback must allow image input for v4.1-flash");
+
+  const deepseekPro = BUILTIN_COMMANDCODE_MODELS.find((m) => m.id === "deepseek/deepseek-v4-pro");
+  assert.ok(deepseekPro);
+  assert.deepEqual(deepseekPro.inputModalities, ["text"], "v4-pro genuinely does not receive images");
 
   const claudeSonnet = BUILTIN_COMMANDCODE_MODELS.find((m) => m.id === "claude-sonnet-5-5");
   assert.ok(claudeSonnet);
@@ -481,4 +490,38 @@ test("DockyardRuntime auto-provisions commandcode if local auth exists", async (
     if (prevKey === undefined) delete process.env.COMMAND_CODE_API_KEY;
     else process.env.COMMAND_CODE_API_KEY = prevKey;
   }
+});
+
+test("commandcode deepseek-v4.1-flash forwards image parts end to end", async () => {
+  const { createDockyardLlmAdapter } = await import("../packages/dsh-bridge/src/llm-adapter.mjs");
+  let forwarded = null;
+  const runtime = {
+    async init() {},
+    listProviderIds() { return ["commandcode"]; },
+    listProviderManifests() { return [{ id: "commandcode", capabilities: ["catalog"] }]; },
+    snapshot() { return { providers: [{ providerId: "commandcode", accounts: [{ accountId: "a" }] }] }; },
+    async getCatalog() { return { models: BUILTIN_COMMANDCODE_MODELS }; },
+    async *stream(_provider, request) {
+      forwarded = request;
+      yield { type: "text", text: "ok" };
+    },
+  };
+  const adapter = createDockyardLlmAdapter({ runtime, providerIds: ["commandcode"] });
+  // Warm the catalog exactly like the model picker does before generation.
+  await adapter.resolveModel("commandcode", "deepseek/deepseek-v4.1-flash");
+
+  const messages = [{
+    role: "user",
+    content: [
+      { type: "image", attachment: { attachmentId: "sha256:abc", mediaType: "image/webp", width: 10, height: 10 } },
+      { type: "text", text: "这张图里是什么？" },
+    ],
+  }];
+
+  for await (const _chunk of adapter.stream({ provider: "commandcode", model: "deepseek/deepseek-v4.1-flash", messages })) {
+    // drain
+  }
+  assert.ok(forwarded, "the provider transport must receive the request");
+  const types = (forwarded.messages?.at(-1)?.content ?? []).map((part) => part.type);
+  assert.ok(types.includes("image"), `image part must survive the adapter, got: ${types.join(",")}`);
 });
