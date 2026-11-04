@@ -93,7 +93,7 @@
       "versions": [
         {
           "version": "0.1.18",
-          "publishTimestamp": 1793791177,
+          "publishTimestamp": 1793792499,
           "source": {
             "type": "git",
             "url": "https://github.com/AITabby/dockyard-dsh",
@@ -165,11 +165,11 @@
         },
         {
           "version": "0.1.8",
-          "publishTimestamp": 1793543000,
+          "publishTimestamp": 1793514548,
           "source": {
             "type": "git",
             "url": "https://github.com/AITabby/dockyard-dsh",
-            "commit": "ff39f7cf7c08a4f9e1fc4be6504a7e937dbe10bf"
+            "commit": "ff39f7c643b6e22c6a791884b76ddfd37eefcaf2"
           },
           "engines": {
             "dsh": ">=0.1.0"
@@ -177,11 +177,11 @@
         },
         {
           "version": "0.1.7",
-          "publishTimestamp": 1793514000,
+          "publishTimestamp": 1793475442,
           "source": {
             "type": "git",
             "url": "https://github.com/AITabby/dockyard-dsh",
-            "commit": "8c49cda9b6cf42735d4fa55c48b26ddfbece78d8"
+            "commit": "8c49cdac8a3fad23e829d938e992f7d40dcf6a59"
           },
           "engines": {
             "dsh": ">=0.1.0"

@@ -110,9 +110,19 @@ test("market/index.json conforms strictly to DSH plugin market format 1", async 
   assert.ok(target.spec.startsWith("git+https://github.com/AITabby/dockyard-dsh.git#"));
 
   // Regression: v0.1.17 accidentally pointed 0.1.16 and 0.1.17 at the same
-  // pre-release commit, so installing from the market silently fetched old
-  // code. Every version must pin a distinct commit of its own.
+  // pre-release commit, and older entries (0.1.8 / 0.1.7) carried mistyped,
+  // non-existent SHAs. Every version must pin a distinct commit that really
+  // exists in the repository; otherwise a market install resolves to dead code
+  // or fails outright.
   const seenCommits = new Set();
+  const commitExists = (commit) => {
+    try {
+      execSync(`git cat-file -e ${commit}^{commit}`, { cwd: rootDir, stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  };
   for (const version of dockyard.versions) {
     const commit = version.source.commit;
     assert.match(commit, COMMIT_RE);
@@ -120,18 +130,10 @@ test("market/index.json conforms strictly to DSH plugin market format 1", async 
       !seenCommits.has(commit),
       `version ${version.version} reuses commit ${commit} already used by another version`,
     );
+    assert.ok(
+      commitExists(commit),
+      `version ${version.version} points at a missing commit ${commit}`,
+    );
     seenCommits.add(commit);
   }
-
-  // The default (current) version must point at a commit that actually exists
-  // in this repository; otherwise a market install resolves to a dead SHA.
-  const exists = (() => {
-    try {
-      execSync(`git cat-file -e ${defaultVersion.source.commit}^{commit}`, { cwd: rootDir, stdio: "ignore" });
-      return true;
-    } catch {
-      return false;
-    }
-  })();
-  assert.ok(exists, `default version ${defaultVersion.version} points at a missing commit ${defaultVersion.source.commit}`);
 });
