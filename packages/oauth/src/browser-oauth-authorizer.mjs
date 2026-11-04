@@ -202,7 +202,7 @@ export function createBrowserOAuthAuthorizer({
       });
     });
     session.server = server;
-    await new Promise((resolve, reject) => {
+    const listenOnPort = (port) => new Promise((resolve, reject) => {
       const onError = (error) => {
         server.off("listening", onListening);
         reject(error);
@@ -213,10 +213,28 @@ export function createBrowserOAuthAuthorizer({
       };
       server.once("error", onError);
       server.once("listening", onListening);
-      server.listen({ host: resolveLoopbackListenHost(callbackHost), port: session.callbackPort });
+      server.listen({ host: resolveLoopbackListenHost(callbackHost), port });
     });
+    try {
+      await listenOnPort(session.callbackPort);
+    } catch (error) {
+      if (error?.code === "EADDRINUSE" && session.callbackPort !== 0) {
+        await listenOnPort(0);
+      } else {
+        throw error;
+      }
+    }
     server.unref?.();
     const address = server.address();
+    if (address && typeof address === "object" && address.port && session.redirectUri) {
+      try {
+        const parsed = new URL(session.redirectUri);
+        if (isLoopbackHostname(parsed.hostname) && Number(parsed.port || 80) !== address.port) {
+          parsed.port = String(address.port);
+          session.redirectUri = parsed.toString();
+        }
+      } catch {}
+    }
     session.redirectUri = session.redirectUri ?? `http://${callbackHost}:${address.port}${callbackPath}`;
   }
 

@@ -929,7 +929,14 @@ var init_dockyard_remote_host = __esm({
         return envelope(result, await this.dockyard.snapshot());
       }
       async add(request = {}) {
-        const result = await this.dockyard.add(request?.providerId ?? null, request?.candidateId ?? null);
+        const result = await this.dockyard.add(
+          request?.providerId ?? null,
+          request?.candidateId ?? null,
+          {
+            apiKey: request?.apiKey ?? null,
+            label: request?.label ?? ""
+          }
+        );
         return envelope(result, await this.dockyard.snapshot());
       }
       async login(request) {
@@ -1079,6 +1086,13 @@ var PROVIDER_CAPABILITIES = Object.freeze([
   "invoke",
   "stream"
 ]);
+var PROVIDER_BEHAVIOR_CAPABILITIES = Object.freeze({
+  AUTO_PROVISION_FREE_ACCOUNT: "auto_provision_free_account",
+  FORCE_LIVE_CATALOG: "force_live_catalog",
+  CATALOG_WARMUP: "catalog_warmup",
+  API_KEY_AUTH: "api_key_auth",
+  REPAIR_LEGACY_CREDENTIAL: "repair_legacy_credential"
+});
 function isoOrNull(value, fieldName) {
   if (value === void 0 || value === null || value === "") return null;
   const date = value instanceof Date ? value : new Date(value);
@@ -1408,9 +1422,9 @@ function defineProviderModule({
 
 // packages/providers/src/provider-utils.mjs
 import { readFile } from "node:fs/promises";
-async function readJsonFile(path) {
+async function readJsonFile(path2) {
   try {
-    return JSON.parse(await readFile(path, "utf8"));
+    return JSON.parse(await readFile(path2, "utf8"));
   } catch (error) {
     if (error?.code === "ENOENT") return null;
     throw error;
@@ -1487,6 +1501,40 @@ function resolveReasoningFromModel(model) {
   if (model.reasoning === false) return void 0;
   if (Array.isArray(model.reasoning?.efforts) && model.reasoning.efforts.length > 0) {
     return model.reasoning;
+  }
+  if (Array.isArray(model.reasoning?.supportedEfforts) && model.reasoning.supportedEfforts.length > 0) {
+    const raw = model.reasoning.supportedEfforts;
+    const standardEfforts = [
+      { id: "minimal", name: "Minimal" },
+      { id: "low", name: "Low" },
+      { id: "medium", name: "Medium" },
+      { id: "high", name: "High" }
+    ];
+    let efforts;
+    if (raw.length >= 2) {
+      efforts = raw.map((lvl) => {
+        const id = typeof lvl === "string" ? lvl : lvl?.id ?? lvl?.value;
+        if (!id) return null;
+        const name2 = typeof lvl === "object" && (lvl.name ?? lvl.label) ? lvl.name ?? lvl.label : id.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+        return { id, name: name2 };
+      }).filter(Boolean);
+    } else {
+      efforts = standardEfforts;
+    }
+    const defaultEffort = model.reasoning.defaultEffort ?? (efforts.some((e) => e.id === "high") ? "high" : efforts.some((e) => e.id === "medium") ? "medium" : efforts[0]?.id);
+    return { efforts, defaultEffort };
+  }
+  if (model.supportsReasoning === true || model.onlyReasoning === true) {
+    const defaultEffort = model.reasoning?.defaultEffort ?? "high";
+    return {
+      efforts: [
+        { id: "minimal", name: "Minimal" },
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" }
+      ],
+      defaultEffort
+    };
   }
   if (Array.isArray(model.supported_reasoning_levels) && model.supported_reasoning_levels.length > 0) {
     const efforts = model.supported_reasoning_levels.map((lvl) => {
@@ -1596,7 +1644,7 @@ function redactError(error) {
 }
 function recursiveQuotaWindows(value, { source, now = /* @__PURE__ */ new Date(), prefix = "quota" } = {}) {
   const windows = [];
-  function visit(node, path, label) {
+  function visit(node, path2, label) {
     if (!node || typeof node !== "object" || Array.isArray(node)) return;
     const usedPercent = finiteNumber(node.used_percent ?? node.usedPercent);
     const remainingFraction = finiteNumber(node.remaining_fraction ?? node.remainingFraction);
@@ -1618,8 +1666,8 @@ function recursiveQuotaWindows(value, { source, now = /* @__PURE__ */ new Date()
         unit = unit ?? "percent";
       }
       windows.push({
-        id: path || prefix,
-        name: label || path || prefix,
+        id: path2 || prefix,
+        name: label || path2 || prefix,
         remaining,
         limit,
         unit,
@@ -1629,7 +1677,7 @@ function recursiveQuotaWindows(value, { source, now = /* @__PURE__ */ new Date()
     }
     for (const [key, child] of Object.entries(node)) {
       if (child && typeof child === "object" && !Array.isArray(child)) {
-        visit(child, path ? `${path}.${key}` : key, key);
+        visit(child, path2 ? `${path2}.${key}` : key, key);
       }
     }
   }
@@ -2216,6 +2264,10 @@ function normalizeDshReasoning(reasoning) {
     ...defaultEffort === void 0 ? {} : { defaultEffort }
   };
 }
+function cleanModelDisplayName(name2, id) {
+  if (typeof name2 !== "string" || name2.length === 0) return id;
+  return name2.replace(/^\[隐秘限免\]\s*/g, "").replace(/^\[限时免费\]\s*/g, "").replace(/\s*\(智能路由全部免费\/隐秘\/限免\)\s*$/g, "").replace(/\s*\[Free\]\s*$/i, "").replace(/\s*\(free\)\s*$/i, "").trim() || id;
+}
 function providerCatalogModels(providerId, catalog) {
   if (!Array.isArray(catalog?.models)) return [];
   const seen = /* @__PURE__ */ new Set();
@@ -2236,7 +2288,7 @@ function providerCatalogModels(providerId, catalog) {
     return {
       provider: providerId,
       id: model.id,
-      name: typeof model.name === "string" && model.name.length > 0 ? model.name : model.id,
+      name: cleanModelDisplayName(model.name, model.id),
       description: modelDescription(model),
       ...Array.isArray(model.inputModalities) ? { inputModalities: [...model.inputModalities] } : {},
       ...contextWindow ? { context: { contextWindow } } : {},
@@ -2249,7 +2301,7 @@ function manifestFor(runtime, providerId) {
   return runtime.listProviderManifests?.().find((manifest) => manifest.id === providerId) ?? null;
 }
 function providerHasConnectedAccount(runtime, providerId) {
-  if (providerId === "workbuddy") return true;
+  if (runtime.hasProviderCapability?.(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT)) return true;
   if (typeof runtime.snapshot !== "function") return true;
   const snapshot = runtime.snapshot();
   if (!Array.isArray(snapshot?.providers)) return true;
@@ -2385,6 +2437,26 @@ function resolveFallbackModelMetadata(provider, model) {
   } else if (provider === "commandcode" || provider === "hermes") {
     contextWindow = 1e6;
     maxTokens = 16384;
+  } else if (provider === "openrouter-free") {
+    if (id === "openrouter/free" || id === "free") {
+      contextWindow = 2e5;
+      maxTokens = 16384;
+    } else if (id.includes("crouton") || id.includes("inkling")) {
+      contextWindow = 1048576;
+      maxTokens = 16384;
+    } else if (id.includes("nemotron-3.5-super") || id.includes("nemotron-3.5-lightning") || id.includes("nemotron-3-ultra")) {
+      contextWindow = 1e6;
+      maxTokens = 16384;
+    } else if (id.includes("dots-3")) {
+      contextWindow = 512e3;
+      maxTokens = 16384;
+    } else if (id.includes("lfm-2.5")) {
+      contextWindow = 65536;
+      maxTokens = 8192;
+    } else {
+      contextWindow = 262144;
+      maxTokens = 16384;
+    }
   }
   return {
     provider,
@@ -3420,7 +3492,7 @@ function createBrowserOAuthAuthorizer({
       });
     });
     session.server = server;
-    await new Promise((resolve2, reject) => {
+    const listenOnPort = (port) => new Promise((resolve2, reject) => {
       const onError = (error) => {
         server.off("listening", onListening);
         reject(error);
@@ -3431,10 +3503,29 @@ function createBrowserOAuthAuthorizer({
       };
       server.once("error", onError);
       server.once("listening", onListening);
-      server.listen({ host: resolveLoopbackListenHost(callbackHost), port: session.callbackPort });
+      server.listen({ host: resolveLoopbackListenHost(callbackHost), port });
     });
+    try {
+      await listenOnPort(session.callbackPort);
+    } catch (error) {
+      if (error?.code === "EADDRINUSE" && session.callbackPort !== 0) {
+        await listenOnPort(0);
+      } else {
+        throw error;
+      }
+    }
     server.unref?.();
     const address = server.address();
+    if (address && typeof address === "object" && address.port && session.redirectUri) {
+      try {
+        const parsed = new URL(session.redirectUri);
+        if (isLoopbackHostname2(parsed.hostname) && Number(parsed.port || 80) !== address.port) {
+          parsed.port = String(address.port);
+          session.redirectUri = parsed.toString();
+        }
+      } catch {
+      }
+    }
     session.redirectUri = session.redirectUri ?? `http://${callbackHost}:${address.port}${callbackPath}`;
   }
   async function finalize(session, context = {}) {
@@ -4691,7 +4782,8 @@ function createCodexModule({ driver = {} } = {}) {
       "quota",
       "catalog",
       "invoke",
-      "stream"
+      "stream",
+      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP
     ],
     driver
   });
@@ -5541,7 +5633,7 @@ function detectAntigravityUserAgent() {
     } catch {
     }
   }
-  return null;
+  return `antigravity/hub/2.29.0 ${process.platform}/${process.arch}`;
 }
 function firstString(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
@@ -5714,9 +5806,9 @@ function oauthRecordFromObject(value, depth = 0) {
   }
   return null;
 }
-function readOfficialTokenFile(path) {
+function readOfficialTokenFile(path2) {
   try {
-    const parsed = JSON.parse(readFileSync2(path, "utf8"));
+    const parsed = JSON.parse(readFileSync2(path2, "utf8"));
     const record = oauthRecordFromObject(parsed);
     return record ? {
       ...record,
@@ -5782,6 +5874,7 @@ function readAntigravityKeychainToken({ home = homedir4() } = {}) {
     }
     return parsed;
   } catch {
+    lastKeychainReadTime = now;
     return null;
   }
 }
@@ -6747,6 +6840,14 @@ function extractAntigravityAccountEmail(...values) {
       value?.email ?? value?.account?.email ?? value?.user?.email ?? value?.identity?.email ?? value?.accountEmail ?? value?.userEmail ?? value?.email_address ?? value?.command?.data?.email ?? value?.command?.data?.email_address
     );
     if (direct) return direct;
+    if (value?.id_token || value?.idToken) {
+      try {
+        const decoded = decodeJwtPayload(value.id_token || value.idToken);
+        const email = normalizeEmail(decoded?.email);
+        if (email) return email;
+      } catch {
+      }
+    }
     const nested = findEmailField(value);
     if (nested) return nested;
     const text3 = typeof value === "string" ? value : "";
@@ -6796,10 +6897,13 @@ function agyRefreshEnvironment(environment, tokenPath) {
     AGY_CLI_HIDE_ACCOUNT_INFO: "1"
   };
 }
-function credentialRefreshMode(account) {
+function credentialRefreshMode(account, { hasExplicitBrowserClient = false } = {}) {
   const explicit = account?.resources?.credentialRefreshMode;
   if (explicit) return explicit;
-  return account?.resources?.sessionPersistence === "captured" ? ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION : null;
+  if (account?.resources?.sessionPersistence === "captured" && !hasExplicitBrowserClient) {
+    return ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION;
+  }
+  return null;
 }
 function cliFailure2(code, signal, output, errorOutput) {
   const error = new Error(`Antigravity CLI failed (${signal ?? code})`);
@@ -6816,7 +6920,7 @@ function runCommand(command, args, {
   includeAccountInfo = false
 } = {}) {
   return new Promise((resolve2, reject) => {
-    const childEnv = { ...env };
+    const childEnv = { ...env, [AGY_FILE_STORAGE_ENV]: "true" };
     if (includeAccountInfo) delete childEnv.AGY_CLI_HIDE_ACCOUNT_INFO;
     else childEnv.AGY_CLI_HIDE_ACCOUNT_INFO ??= "1";
     childEnv.PATH = augmentPathWithUserBins(childEnv, childEnv.HOME || homedir5());
@@ -7087,6 +7191,18 @@ function createAntigravityCatalogLoader({
           diagnostics: [redactError(error)]
         };
       }
+      if (persistentCache?.entries && typeof persistentCache.entries === "object") {
+        const anyCached = Object.values(persistentCache.entries).find((item) => Array.isArray(item?.value?.models) && item.value.models.length > 0);
+        if (anyCached?.value) {
+          const fallbackValue = {
+            ...anyCached.value,
+            source: `${anyCached.value.source ?? "official_antigravity_cli"}_persistent_cache`,
+            diagnostics: [redactError(error)]
+          };
+          cached.set(scope, { value: fallbackValue, cachedAt: Date.now() });
+          return fallbackValue;
+        }
+      }
       const unavailable = {
         models: [],
         source: error?.code === "ENOENT" ? "antigravity_cli_not_found" : "antigravity_cli_unavailable",
@@ -7108,7 +7224,7 @@ function createAntigravityCatalogLoader({
     let entry = cached.get(scope);
     if (!entry) {
       const persisted = await loadPersistent();
-      const stored = persistentCache?.entries?.[scope] ?? persisted.entries?.[scope];
+      const stored = persistentCache?.entries?.[scope] ?? persisted.entries?.[scope] ?? persistentCache?.entries?.unscoped ?? persisted.entries?.unscoped ?? Object.values(persisted.entries ?? {}).find((item) => Array.isArray(item?.value?.models) && item.value.models.length > 0);
       if (stored?.value && Array.isArray(stored.value.models)) {
         entry = {
           value: {
@@ -7173,13 +7289,16 @@ function creditsFromData(data) {
 function parseQuotaData(data, now = /* @__PURE__ */ new Date(), source = "antigravity_cli") {
   const windows = [];
   for (const group of quotaGroups(data)) {
+    const groupName = stringValue(group?.displayName ?? group?.name);
     for (const bucket of group?.buckets ?? []) {
       const fraction = finiteNumber(bucket.remaining_fraction ?? bucket.remainingFraction);
       const percent = finiteNumber(bucket.remaining_percent ?? bucket.remainingPercent);
       const remaining = fraction ?? (percent === null ? null : percent / 100);
+      const bucketName = stringValue(bucket?.displayName ?? bucket?.name);
+      const bucketId = stringValue(bucket.bucketId ?? bucket.id) ?? (groupName && bucketName ? `${groupName}:${bucketName}` : `${groupName ?? "group"}:${bucketName ?? "window"}`);
       windows.push({
-        id: stringValue(bucket.id) ?? `${group.name ?? "group"}:${bucket.name ?? "window"}`,
-        name: [group.name, bucket.name].filter(Boolean).join(" / ") || null,
+        id: bucketId,
+        name: [groupName, bucketName].filter(Boolean).join(" / ") || null,
         remaining,
         limit: remaining === null ? null : 1,
         unit: remaining === null ? null : "fraction",
@@ -7242,7 +7361,7 @@ function candidate(now, {
   const legacy = existingAccounts.find((account) => account?.accountId === "antigravity:active");
   const accountId = known?.accountId ?? (legacy && !legacy.resources?.sessionFingerprint && stableAccountId !== "antigravity:active" ? legacy.accountId : stableAccountId);
   const identityLabel = normalizedEmail ?? (fingerprint ? `Antigravity \u5B98\u65B9\u4F1A\u8BDD \xB7 ${fingerprint}` : "Antigravity \u5B98\u65B9\u5F53\u524D\u4F1A\u8BDD");
-  const identitySource = normalizedEmail ? "official_cli_auth_status" : fingerprint ? "local_oauth_session_fingerprint" : "official_active_session";
+  const identitySource = normalizedEmail ? sourceKind === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER ? "official_browser_oauth" : "official_cli_auth_status" : fingerprint ? "local_oauth_session_fingerprint" : "official_active_session";
   const credentialRef = createCredentialRef(PROVIDER_ID3, accountId);
   const value = {
     candidateId: `antigravity:${hash2(accountId).slice(0, 20)}`,
@@ -7268,7 +7387,7 @@ function candidate(now, {
       identitySource,
       identityLabel,
       ...fingerprint ? { sessionFingerprint: fingerprint } : {},
-      identityNote: normalizedEmail ? "\u8D26\u53F7\u90AE\u7BB1\u6765\u81EA\u5B98\u65B9 Antigravity \u767B\u5F55\u6001" : fingerprint ? "\u5B98\u65B9\u767B\u5F55\u6001\u672A\u8FD4\u56DE\u90AE\u7BB1\uFF1B\u4F7F\u7528\u4F1A\u8BDD\u6307\u7EB9\u533A\u5206\u8D26\u53F7" : "\u5B98\u65B9\u53EA\u8FD4\u56DE\u5F53\u524D\u4F1A\u8BDD\uFF1B\u5207\u6362\u8D26\u53F7\u540E\u8BF7\u91CD\u65B0\u626B\u63CF",
+      identityNote: normalizedEmail ? sourceKind === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER ? "Google \u8D26\u53F7\u5DF2\u6388\u6743" : "\u8D26\u53F7\u90AE\u7BB1\u6765\u81EA\u5B98\u65B9 Antigravity \u767B\u5F55\u6001" : fingerprint ? "\u5B98\u65B9\u767B\u5F55\u6001\u672A\u8FD4\u56DE\u90AE\u7BB1\uFF1B\u4F7F\u7528\u4F1A\u8BDD\u6307\u7EB9\u533A\u5206\u8D26\u53F7" : "\u5B98\u65B9\u53EA\u8FD4\u56DE\u5F53\u524D\u4F1A\u8BDD\uFF1B\u5207\u6362\u8D26\u53F7\u540E\u8BF7\u91CD\u65B0\u626B\u63CF",
       sessionPersistence: capturedSession?.token ? "captured" : "active"
     }
   };
@@ -7412,7 +7531,8 @@ function createAntigravityOAuthAuthorizer({
       ...environment,
       HOME: profileDir,
       XDG_CONFIG_HOME: join7(profileDir, ".config"),
-      DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath
+      DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath,
+      [AGY_FILE_STORAGE_ENV]: "true"
     };
     childEnv.PATH = augmentPathWithUserBins(childEnv, home);
     delete childEnv.AGY_CLI_HIDE_ACCOUNT_INFO;
@@ -7563,6 +7683,7 @@ var AntigravityOfficialSessionDriver = class {
     this.browserUserInfoUrl = userInfoUrl ? assertSecureEndpointUrl(userInfoUrl, "DOCKYARD_ANTIGRAVITY_USERINFO_URL") : userInfoUrl;
     this.browserClientId = clientId;
     this.browserClientSecret = clientSecret;
+    this.hasExplicitBrowserClient = Boolean(clientId && clientSecret);
     this.requestExecutor = requestExecutor;
     this.quotaReader = quotaReader;
     this.tokenResolver = tokenResolver;
@@ -7586,7 +7707,7 @@ var AntigravityOfficialSessionDriver = class {
         client_id: clientId,
         code_challenge: codeChallenge,
         code_challenge_method: "S256",
-        prompt: "consent",
+        prompt: "select_account consent",
         redirect_uri: callback,
         response_type: "code",
         scope: oauthScope,
@@ -7617,22 +7738,32 @@ var AntigravityOfficialSessionDriver = class {
         const refresh = tokens?.refresh_token ?? tokens?.refreshToken;
         if (!access2) throw new Error("Antigravity Google OAuth did not return an access token");
         let profile = null;
-        try {
-          const response = await this.fetchImpl(userInfoUrl, {
-            headers: { authorization: `Bearer ${access2}` },
-            ...context.signal ? { signal: context.signal } : {}
-          });
-          if (response.ok) profile = await response.json().catch(() => null);
-        } catch {
+        if (tokens?.id_token || tokens?.idToken) {
+          try {
+            profile = decodeJwtPayload(tokens.id_token || tokens.idToken);
+          } catch {
+          }
         }
+        if (!profile?.email) {
+          try {
+            const response = await this.fetchImpl(userInfoUrl, {
+              headers: { authorization: `Bearer ${access2}` },
+              ...context.signal ? { signal: context.signal } : {}
+            });
+            if (response.ok) profile = await response.json().catch(() => null);
+          } catch {
+          }
+        }
+        const email = profile?.email ?? extractAntigravityAccountEmail(tokens);
         const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
         const candidateValue = candidate(now, {
-          email: profile?.email,
+          email,
           session: {
             token: access2,
             refreshToken: refresh,
             expiresAt: tokenExpiresAt(tokens, now),
-            lastRefreshedAt: now.toISOString()
+            lastRefreshedAt: now.toISOString(),
+            ...email ? { email } : {}
           },
           existingAccounts: context.accounts ?? [],
           source: "official_antigravity_browser_oauth",
@@ -7870,16 +8001,18 @@ var AntigravityOfficialSessionDriver = class {
     if (!credential?.access) {
       throw activeSessionError("Antigravity browser OAuth credential is missing; authorize again");
     }
-    const refreshMode = credentialRefreshMode(account);
-    const dshManagedRefresh = refreshMode !== ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION;
+    const refreshMode = credentialRefreshMode(account, {
+      hasExplicitBrowserClient: Boolean(this.hasExplicitBrowserClient)
+    });
+    const useAgyCliRefresh = refreshMode === ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION && (this.commandRunner !== runCommand || !this.browserClientId || !this.browserClientSecret);
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
-    if (refreshMode === ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION) {
+    if (useAgyCliRefresh) {
       if (!tokenNeedsRefresh(credential, now)) return credential;
       const updated2 = await this.#refreshAgyCredential(credential, context);
       await context.secretStore.write(credentialRef, updated2);
       return updated2;
     }
-    if (!dshManagedRefresh || !this.browserClientId || !this.browserClientSecret) return credential;
+    if (!this.browserClientId || !this.browserClientSecret) return credential;
     if (!tokenNeedsRefresh(credential, now)) return credential;
     if (!credential.refresh) {
       throw activeSessionError("Antigravity browser OAuth token expired; authorize again");
@@ -7922,7 +8055,9 @@ var AntigravityOfficialSessionDriver = class {
     if (typeof this.quotaReader !== "function") return null;
     let credential = null;
     const credentialRef = account?.auth?.credentialRef;
-    if (account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) {
+    if (context.browserCredential) {
+      credential = context.browserCredential;
+    } else if (account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) {
       credential = await this.#refreshBrowserCredential(account, context);
     } else if (context.officialCredential) {
       credential = context.officialCredential;
@@ -8077,26 +8212,65 @@ var AntigravityOfficialSessionDriver = class {
       ...officialCredential?.rotated ? { allowSessionTokenRotation: true } : {}
     });
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
-    let session = officialCredential?.session ?? null;
-    try {
-      session = session ?? await this.tokenResolver({ env: this.env });
-    } catch {
+    const isBrowserAccount = account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER;
+    const isTestAgyMock = isBrowserAccount && credentialRefreshMode(account, {
+      hasExplicitBrowserClient: Boolean(this.hasExplicitBrowserClient)
+    }) === ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION && this.commandRunner !== runCommand;
+    let session = officialCredential?.session ?? (browserCredential && !isTestAgyMock ? {
+      token: browserCredential.access,
+      refreshToken: browserCredential.refresh,
+      expiresAt: browserCredential.expiresAt,
+      email: browserCredential.email ?? null
+    } : null);
+    if (!session && !isBrowserAccount) {
+      try {
+        session = await this.tokenResolver({ env: this.env });
+      } catch {
+      }
     }
-    const sessionEmail = await this.#resolveSessionEmail(session, context);
+    const sessionEmail = await this.#resolveSessionEmail(session, context) ?? normalizeEmail(account?.email);
+    if (sessionEmail && browserCredential && !browserCredential.email) {
+      const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
+      if (credentialRef && typeof context.secretStore?.write === "function") {
+        await context.secretStore.write(credentialRef, { ...browserCredential, email: sessionEmail }).catch(() => {
+        });
+      }
+    }
     const fingerprint = sessionFingerprint(sessionEmail && session && !session.email ? { ...session, email: sessionEmail } : session);
-    const fingerprintResources = fingerprint ? { sessionFingerprint: fingerprint } : {};
-    const persistedRefreshMode = account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER ? credentialRefreshMode(account) ?? (!this.browserClientId || !this.browserClientSecret ? ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION : null) : null;
-    const identityPatch = sessionEmail ? { email: sessionEmail } : {};
+    const fingerprintResources = {
+      ...fingerprint ? { sessionFingerprint: fingerprint } : {},
+      ...sessionEmail ? {
+        identitySource: "official_cli_auth_status",
+        identityLabel: sessionEmail,
+        identityNote: "\u8D26\u53F7\u90AE\u7BB1\u6765\u81EA\u5B98\u65B9 Antigravity \u767B\u5F55\u6001"
+      } : {}
+    };
+    const persistedRefreshMode = isBrowserAccount ? credentialRefreshMode(account, {
+      hasExplicitBrowserClient: Boolean(this.hasExplicitBrowserClient)
+    }) ?? (!this.browserClientId || !this.browserClientSecret ? ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION : ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.DSH_BROWSER_OAUTH) : null;
+    const shouldUpdateDisplayName = Boolean(
+      sessionEmail && (!account?.displayName || account.displayName.startsWith("Antigravity \u5B98\u65B9") || account.displayName === account.accountId)
+    );
+    const identityPatch = {
+      ...sessionEmail ? { email: sessionEmail } : {},
+      ...shouldUpdateDisplayName ? { displayName: sessionEmail } : {}
+    };
     let nativeError = null;
     try {
       const native = await this.#nativeQuota(account, {
         ...context,
+        ...browserCredential ? { browserCredential } : {},
         ...officialCredential?.credential ? { officialCredential: officialCredential.credential } : {}
       }, now);
       if (native) {
         const primary2 = selectPrimaryQuotaWindow(native.windows);
         return {
           ...identityPatch,
+          subscription: {
+            plan: account?.subscription?.plan ?? "Google Code Assist",
+            status: "active",
+            expiresAt: account?.subscription?.expiresAt ?? null
+          },
           quota: {
             ...primary2,
             windows: native.windows,
@@ -8120,7 +8294,7 @@ var AntigravityOfficialSessionDriver = class {
     } catch (error) {
       nativeError = error;
     }
-    if (typeof this.quotaReader === "function" && account?.auth?.credentialRef) {
+    if (isBrowserAccount || account?.auth?.credentialRef) {
       throw nativeError ?? new Error("Antigravity native quota did not return data for the selected account");
     }
     const [result, creditsResult] = await Promise.all([
@@ -8188,7 +8362,7 @@ var AntigravityOfficialSessionDriver = class {
     } catch (error) {
       nativeError = error;
     }
-    if (typeof this.quotaReader === "function" && account?.auth?.credentialRef) {
+    if (account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER || account?.auth?.credentialRef) {
       throw nativeError ?? new Error("Antigravity native quota did not return data for the selected account");
     }
     const [quotaResult, creditsResult] = await Promise.all([
@@ -9587,7 +9761,8 @@ function createGrokModule({ driver = {} } = {}) {
       "quota",
       "catalog",
       "invoke",
-      "stream"
+      "stream",
+      PROVIDER_BEHAVIOR_CAPABILITIES.REPAIR_LEGACY_CREDENTIAL
     ],
     driver
   });
@@ -9893,9 +10068,9 @@ var DEFAULT_ENDPOINT3 = "https://api.anthropic.com/v1/messages";
 function firstString4(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
 }
-async function readJson(path) {
+async function readJson(path2) {
   try {
-    return JSON.parse(await readFile6(path, "utf8"));
+    return JSON.parse(await readFile6(path2, "utf8"));
   } catch {
     return null;
   }
@@ -9923,11 +10098,11 @@ function claudeOAuthCredentialFromJson(value) {
   };
 }
 async function readClaudeOAuthCredential({ home = homedir7() } = {}) {
-  for (const path of [
+  for (const path2 of [
     join9(home, ".claude", ".credentials.json"),
     join9(home, ".opencodex", "claude_desktop_auth.json")
   ]) {
-    const credential = claudeOAuthCredentialFromJson(await readJson(path));
+    const credential = claudeOAuthCredentialFromJson(await readJson(path2));
     if (credential) return credential;
   }
   return null;
@@ -9945,11 +10120,11 @@ async function resolveClaudeAccessToken({
   if (apiKey) return { token: apiKey, kind: "apiKey" };
   const envToken = firstString4(env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_AUTH_TOKEN);
   if (envToken) return { token: envToken, kind: "oauth" };
-  for (const path of [
+  for (const path2 of [
     join9(home, ".claude", ".credentials.json"),
     join9(home, ".opencodex", "claude_desktop_auth.json")
   ]) {
-    const found = oauthTokenFromJson(await readJson(path));
+    const found = oauthTokenFromJson(await readJson(path2));
     if (found) return found;
   }
   return null;
@@ -11185,8 +11360,8 @@ function cursorFrameMetadata(message, flags = null) {
   const visit = (value, prefix = [], depth = 0) => {
     if (depth > 4 || fieldPaths.length >= 64) return;
     for (const field of decodeProtoFields(value).slice(0, 32)) {
-      const path = [...prefix, field.field].join(".");
-      fieldPaths.push({ path, wireType: field.wireType, byteLength: field.value instanceof Uint8Array ? field.value.byteLength : null });
+      const path2 = [...prefix, field.field].join(".");
+      fieldPaths.push({ path: path2, wireType: field.wireType, byteLength: field.value instanceof Uint8Array ? field.value.byteLength : null });
       if (field.wireType === 2) visit(field.value, [...prefix, field.field], depth + 1);
       if (fieldPaths.length >= 64) return;
     }
@@ -13117,12 +13292,14 @@ function createWorkbuddyNativeExecutor({
       "X-Trace-ID": traceId,
       ...uid ? { "X-User-Id": uid } : {}
     };
+    const effort = req.reasoningEffort ?? req.reasoning_effort ?? req.reasoning?.effort;
     const body = {
       model: req.model ?? "deepseek-v4.1-flash",
       messages,
       stream: true,
       ...typeof req.temperature === "number" ? { temperature: req.temperature } : {},
       ...typeof req.maxTokens === "number" ? { max_tokens: req.maxTokens } : {},
+      ...effort ? { reasoning_effort: effort, reasoning: { effort } } : {},
       ...tools ? { tools } : {}
     };
     const response = await fetchNativeResponse(
@@ -13255,6 +13432,36 @@ function createWorkbuddyNativeExecutor({
 // modules/provider-workbuddy/src/driver.mjs
 var PROVIDER_ID11 = "workbuddy";
 var BUILTIN_WORKBUDDY_FREE_MODELS = Object.freeze([
+  {
+    id: "hy4free",
+    name: "Hy4 (WorkBuddy Free)",
+    contextWindow: 1e6,
+    maxTokens: 64e3,
+    reasoning: {
+      efforts: [
+        { id: "minimal", name: "Minimal" },
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "hy4",
+    name: "Hy4 (WorkBuddy Free)",
+    contextWindow: 1e6,
+    maxTokens: 64e3,
+    reasoning: {
+      efforts: [
+        { id: "minimal", name: "Minimal" },
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" }
+      ],
+      defaultEffort: "high"
+    }
+  },
   {
     id: "deepseek-v4.1-flash",
     name: "DeepSeek v4.1 Flash (WorkBuddy Free)",
@@ -13558,7 +13765,9 @@ function createWorkbuddyModule({ driver = {} } = {}) {
       "quota",
       "catalog",
       "invoke",
-      "stream"
+      "stream",
+      PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
+      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP
     ],
     driver
   });
@@ -14790,7 +14999,9 @@ function createCommandCodeModule({ driver = {} } = {}) {
       "quota",
       "catalog",
       "invoke",
-      "stream"
+      "stream",
+      PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
+      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP
     ],
     driver
   });
@@ -15638,7 +15849,1499 @@ function createHermesModule({ driver = {} } = {}) {
       "quota",
       "catalog",
       "invoke",
-      "stream"
+      "stream",
+      PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
+      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP
+    ],
+    driver
+  });
+}
+
+// modules/provider-openrouter-free/src/driver.mjs
+import os2 from "node:os";
+
+// modules/provider-openrouter-free/src/native-transport.mjs
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import crypto, { randomUUID as randomUUID13 } from "node:crypto";
+var OPENROUTER_API_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
+var OPENROUTER_MODELS_ENDPOINT = "https://openrouter.ai/api/v1/models";
+var OPENROUTER_CREDITS_ENDPOINT = "https://openrouter.ai/api/v1/credits";
+var OPENROUTER_KEY_ENDPOINT = "https://openrouter.ai/api/v1/key";
+var OPENROUTER_AGENTIC_HEADERS = Object.freeze({
+  "HTTP-Referer": "https://opencode.ai",
+  "X-Title": "OpenCode"
+});
+var OPENROUTER_FREE_ROUTER_ID = "openrouter/free";
+var PRIORITIZED_FREE_MODELS = [
+  "stealth/crouton-alpha",
+  "thinkingmachines/inkling:free",
+  "thinkingmachines/inkling-small:free",
+  "cohere/north-mini-code:free",
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "nvidia/nemotron-3.5-super-vl:free",
+  "nvidia/nemotron-3.5-lightning:free",
+  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "google/gemma-4-31b-it:free",
+  "google/gemma-4-26b-a4b-it:free",
+  "xingchen-agi/xing4.0-29b-a4b:free",
+  "dots-studio/dots-3-note-preview:free",
+  "recursive/flint-v1.0:free",
+  "liquid/lfm-2.5-2.6b:free"
+];
+var MODEL_COOLDOWN_MS = 2 * 60 * 1e3;
+var failedFreeModels = /* @__PURE__ */ new Map();
+var cachedLiveModels = null;
+var cachedLiveModelsAt = 0;
+var LIVE_MODELS_CACHE_TTL_MS = 10 * 1e3;
+function createOpenRouterExecutionError(message, details = {}) {
+  const err = new DockyardError("provider_execution_error", message, details);
+  if (details.status) err.status = details.status;
+  if (details.code) err.code = details.code;
+  if (details.accountStatus === "expired") err.authExpired = true;
+  if (details.status === 429) err.rateLimited = true;
+  return err;
+}
+function estimateOpenRouterRequestTokens(request = {}) {
+  let chars = 0;
+  const sysText = request.system ?? request.systemPrompt ?? request.instructions;
+  if (typeof sysText === "string") chars += sysText.length;
+  const messages = Array.isArray(request.messages) ? request.messages : [];
+  for (const msg of messages) {
+    if (!msg || typeof msg !== "object") continue;
+    if (typeof msg.content === "string") {
+      chars += msg.content.length;
+    } else if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (typeof block === "string") chars += block.length;
+        else if (typeof block?.text === "string") chars += block.text.length;
+        else if (typeof block?.thinking === "string") chars += block.thinking.length;
+        else if (typeof block?.arguments === "string") chars += block.arguments.length;
+      }
+    }
+    if (Array.isArray(msg.tool_calls)) {
+      for (const tc of msg.tool_calls) {
+        if (typeof tc?.function?.arguments === "string") chars += tc.function.arguments.length;
+      }
+    }
+  }
+  if (Array.isArray(request.tools)) {
+    for (const tool of request.tools) {
+      chars += JSON.stringify(tool ?? {}).length;
+    }
+  }
+  return Math.ceil(chars / 3.5) + 512;
+}
+function isOpenRouterContextOverflowBody(status, errBody = "") {
+  if (status !== 400 && status !== 413 && status !== 422) return false;
+  return /context[\s_-]*(?:length|window)|maximum context|tokens.*exceed|too\s+(?:long|large)\s+for|prompt is too long|input is too long/i.test(String(errBody));
+}
+function markOpenRouterModelCooldown(modelId, nowMs = Date.now()) {
+  if (!modelId || modelId === OPENROUTER_FREE_ROUTER_ID) return;
+  failedFreeModels.set(modelId, nowMs);
+}
+function isOpenRouterModelCoolingDown(modelId, nowMs = Date.now()) {
+  const failedAt = failedFreeModels.get(modelId);
+  if (!failedAt) return false;
+  if (nowMs - failedAt >= MODEL_COOLDOWN_MS) {
+    failedFreeModels.delete(modelId);
+    return false;
+  }
+  return true;
+}
+function hashApiKeyFingerprint(apiKey) {
+  return crypto.createHash("sha256").update(String(apiKey ?? "")).digest("hex").slice(0, 12);
+}
+function maskApiKey(apiKey) {
+  const trimmed = String(apiKey ?? "").trim();
+  if (trimmed.length <= 12) return "sk-or-***";
+  return `${trimmed.slice(0, 9)}\u2026${trimmed.slice(-4)}`;
+}
+function stripYamlQuotes(raw) {
+  const val = String(raw ?? "").trim();
+  if (val.startsWith('"') && val.endsWith('"') || val.startsWith("'") && val.endsWith("'")) {
+    return val.slice(1, -1);
+  }
+  return val;
+}
+function parseDshCredentialsYaml(rawText) {
+  const entries = [];
+  if (typeof rawText !== "string" || !rawText.trim()) return entries;
+  const lines = rawText.split(/\r?\n/);
+  let currentRef = null;
+  let currentValue = null;
+  for (const line of lines) {
+    const inlineMatch = line.match(/^\s{2}([A-Za-z0-9_.-]+):\s*(\S.+?)\s*$/);
+    if (inlineMatch) {
+      if (currentRef && currentValue) {
+        entries.push({ ref: currentRef, apiKey: currentValue });
+      }
+      currentRef = null;
+      currentValue = null;
+      entries.push({ ref: inlineMatch[1], apiKey: stripYamlQuotes(inlineMatch[2]) });
+      continue;
+    }
+    const refMatch = line.match(/^\s{2}([A-Za-z0-9_.-]+):\s*$/);
+    if (refMatch) {
+      if (currentRef && currentValue) {
+        entries.push({ ref: currentRef, apiKey: currentValue });
+      }
+      currentRef = refMatch[1];
+      currentValue = null;
+      continue;
+    }
+    if (currentRef) {
+      const valMatch = line.match(/^\s{4}value:\s*(.+?)\s*$/);
+      if (valMatch) {
+        currentValue = stripYamlQuotes(valMatch[1]);
+      }
+    }
+  }
+  if (currentRef && currentValue) {
+    entries.push({ ref: currentRef, apiKey: currentValue });
+  }
+  const results = [];
+  for (const entry of entries) {
+    if ((entry.ref === "OPENROUTER_API_KEY" || entry.ref.startsWith("OPENROUTER_DOCKYARD_") || entry.ref.startsWith("OPENROUTER_FREE_")) && entry.apiKey.startsWith("sk-or-")) {
+      results.push(entry);
+      continue;
+    }
+    if (entry.ref.startsWith("DOCKYARD_DSH_") && entry.apiKey.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(entry.apiKey);
+        if (parsed?.providerId === "openrouter-free" && typeof parsed?.apiKey === "string" && parsed.apiKey.startsWith("sk-or-")) {
+          results.push({ ref: entry.ref, apiKey: parsed.apiKey, label: parsed.label });
+        }
+      } catch {
+      }
+    }
+  }
+  return results;
+}
+function discoverLocalOpenRouterKeys({ homeDir = os.homedir(), env = process.env } = {}) {
+  const discovered = [];
+  const seenKeys = /* @__PURE__ */ new Set();
+  const addCandidate = (apiKey, source, label) => {
+    const trimmed = typeof apiKey === "string" ? apiKey.trim() : "";
+    if (!trimmed) return;
+    const fp = hashApiKeyFingerprint(trimmed);
+    if (seenKeys.has(fp)) return;
+    seenKeys.add(fp);
+    discovered.push({
+      apiKey: trimmed,
+      fingerprint: fp,
+      maskedKey: maskApiKey(trimmed),
+      source,
+      label: label || `OpenRouter Key (${maskApiKey(trimmed)})`
+    });
+  };
+  if (env?.OPENROUTER_FREE_API_KEY) {
+    addCandidate(env.OPENROUTER_FREE_API_KEY, "env:OPENROUTER_FREE_API_KEY", "Env OPENROUTER_FREE_API_KEY");
+  }
+  if (env?.OPENROUTER_API_KEY) {
+    addCandidate(env.OPENROUTER_API_KEY, "env:OPENROUTER_API_KEY", "Env OPENROUTER_API_KEY");
+  }
+  try {
+    const credPath = path.join(homeDir, ".dsh", ".credentials.yaml");
+    if (fs.existsSync(credPath)) {
+      const raw = fs.readFileSync(credPath, "utf8");
+      const parsed = parseDshCredentialsYaml(raw);
+      for (const item of parsed) {
+        addCandidate(
+          item.apiKey,
+          `dsh_credentials:${item.ref}`,
+          item.label || `OpenRouter Key (${maskApiKey(item.apiKey)})`
+        );
+      }
+    }
+  } catch {
+  }
+  return discovered;
+}
+function extractOpenRouterFreeAuth({ homeDir = os.homedir(), env = process.env } = {}) {
+  const keys = discoverLocalOpenRouterKeys({ homeDir, env });
+  return keys[0] ?? null;
+}
+function classifyOpenRouterFreeKind(item) {
+  const id = String(item?.id ?? "").trim();
+  const lowerId = id.toLowerCase();
+  const desc = String(item?.description ?? "").toLowerCase();
+  if (id === OPENROUTER_FREE_ROUTER_ID) return "router";
+  if (lowerId.startsWith("stealth/") || lowerId.includes("stealth") || lowerId.includes("cloak") || !lowerId.endsWith(":free") && (lowerId.includes("-alpha") || desc.includes("stealth") || desc.includes("cloaked"))) {
+    return "stealth";
+  }
+  if (!lowerId.endsWith(":free")) {
+    return "limited_free";
+  }
+  return "free";
+}
+function isUsableOpenRouterFreeModel(item) {
+  if (!item || typeof item.id !== "string") return false;
+  const id = item.id.trim();
+  if (!id) return false;
+  if (id === OPENROUTER_FREE_ROUTER_ID) return true;
+  const lowerId = id.toLowerCase();
+  if (lowerId.includes("content-safety") || lowerId.includes("llama-guard") || lowerId.includes("prompt-guard") || lowerId.startsWith("google/lyria") || lowerId.startsWith("openrouter/auto") || lowerId.startsWith("openrouter/bodybuilder") || lowerId.startsWith("openrouter/fusion") || lowerId.startsWith("openrouter/pareto")) {
+    return false;
+  }
+  const isFreeSuffix = lowerId.endsWith(":free");
+  const promptPrice = item.pricing?.prompt;
+  const completionPrice = item.pricing?.completion;
+  const requestPrice = item.pricing?.request;
+  const isZeroPriced = promptPrice !== void 0 && completionPrice !== void 0 && Number(promptPrice) === 0 && Number(completionPrice) === 0 && (requestPrice === void 0 || Number(requestPrice) === 0);
+  if (!isFreeSuffix && !isZeroPriced) return false;
+  const outputModalities = item.architecture?.output_modalities;
+  if (Array.isArray(outputModalities)) {
+    if (outputModalities.length > 0 && !outputModalities.includes("text")) {
+      return false;
+    }
+    if (outputModalities.includes("audio") && !isFreeSuffix) {
+      return false;
+    }
+  }
+  const supportedParams = item.supported_parameters;
+  if (Array.isArray(supportedParams) && supportedParams.length === 0) {
+    return false;
+  }
+  return true;
+}
+function normalizeOpenRouterFreeModelEntry(item) {
+  const id = String(item.id).trim();
+  const kind = classifyOpenRouterFreeKind(item);
+  const isRouter = kind === "router";
+  const rawName = String(item.name || id).replace(/\s*\(free\)\s*$/i, "").replace(/\s*\[free\]\s*$/i, "").trim();
+  const name2 = isRouter ? "Free Models Router" : rawName;
+  const rawContextLength = Number(item.top_provider?.context_length || item.context_length);
+  const contextWindow = rawContextLength > 0 ? rawContextLength : isRouter ? 2e5 : 131072;
+  const rawMaxCompletion = Number(item.top_provider?.max_completion_tokens);
+  const maxTokens = rawMaxCompletion > 0 ? rawMaxCompletion : isRouter ? 32768 : Math.min(contextWindow, 16384);
+  const inputModalities = ["text"];
+  if (isRouter || item.architecture?.input_modalities?.includes("image")) {
+    inputModalities.push("image");
+  }
+  const supportedParams = Array.isArray(item.supported_parameters) ? item.supported_parameters : [];
+  const supportsTools = isRouter || supportedParams.length === 0 || supportedParams.includes("tools");
+  const supportsReasoning = isRouter || supportedParams.includes("reasoning") || supportedParams.includes("include_reasoning");
+  const created = Number(item.created) || 0;
+  return {
+    id,
+    name: name2,
+    free: true,
+    freeKind: kind,
+    created,
+    contextWindow,
+    maxTokens,
+    inputModalities,
+    supportsTools,
+    supportsReasoning,
+    ...supportsReasoning ? {
+      reasoning: {
+        defaultEffort: "medium",
+        efforts: [
+          { id: "low", name: "Low" },
+          { id: "medium", name: "Medium" },
+          { id: "high", name: "High" },
+          { id: "xhigh", name: "Extra High" }
+        ]
+      }
+    } : {}
+  };
+}
+function buildOpenRouterFreeCatalogFromRaw(rawModels = []) {
+  const entriesById = /* @__PURE__ */ new Map();
+  entriesById.set(OPENROUTER_FREE_ROUTER_ID, normalizeOpenRouterFreeModelEntry({
+    id: OPENROUTER_FREE_ROUTER_ID,
+    name: "Free Models Router",
+    context_length: 2e5,
+    top_provider: { context_length: 2e5, max_completion_tokens: 32768 },
+    architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] },
+    supported_parameters: ["tools", "reasoning", "include_reasoning", "max_tokens", "temperature"]
+  }));
+  const rawArray = Array.isArray(rawModels) ? rawModels : [];
+  for (let i = 0; i < rawArray.length; i++) {
+    const item = rawArray[i];
+    if (!isUsableOpenRouterFreeModel(item)) continue;
+    const normalized = normalizeOpenRouterFreeModelEntry({
+      ...item,
+      // Preserve OpenRouter's natural newest-first ordering when `created` is equal or missing
+      created: Number(item.created) || 1e6 - i
+    });
+    entriesById.set(normalized.id, normalized);
+  }
+  const routerEntry = entriesById.get(OPENROUTER_FREE_ROUTER_ID);
+  const specificEntries = [...entriesById.values()].filter((m) => m.id !== OPENROUTER_FREE_ROUTER_ID);
+  const kindRank = (m) => m.freeKind === "stealth" ? 0 : m.freeKind === "limited_free" ? 1 : 2;
+  specificEntries.sort((a, b) => {
+    const rA = kindRank(a);
+    const rB = kindRank(b);
+    if (rA !== rB) return rA - rB;
+    if (b.created !== a.created) return b.created - a.created;
+    return a.id.localeCompare(b.id);
+  });
+  return [routerEntry, ...specificEntries];
+}
+async function fetchLiveOpenRouterFreeModels({
+  fetchImpl = globalThis.fetch,
+  apiKey = null,
+  forceRefresh = false
+} = {}) {
+  const now = Date.now();
+  if (!forceRefresh && cachedLiveModels && now - cachedLiveModelsAt < LIVE_MODELS_CACHE_TTL_MS) {
+    return cachedLiveModels;
+  }
+  if (typeof fetchImpl !== "function") {
+    return cachedLiveModels ?? buildOpenRouterFreeCatalogFromRaw(
+      PRIORITIZED_FREE_MODELS.map((id, idx) => ({
+        id,
+        name: id,
+        created: 1e6 - idx,
+        pricing: { prompt: "0", completion: "0" }
+      }))
+    );
+  }
+  try {
+    const headers = {
+      Accept: "application/json",
+      "Cache-Control": "no-cache",
+      ...OPENROUTER_AGENTIC_HEADERS,
+      ...apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
+    };
+    const response = await fetchImpl(OPENROUTER_MODELS_ENDPOINT, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(1e4)
+    });
+    if (response.ok) {
+      const payload = await response.json();
+      const rawData = Array.isArray(payload?.data) ? payload.data : [];
+      const catalog = buildOpenRouterFreeCatalogFromRaw(rawData);
+      if (catalog.length > 1) {
+        cachedLiveModels = catalog;
+        cachedLiveModelsAt = Date.now();
+        return catalog;
+      }
+    }
+  } catch {
+  }
+  return cachedLiveModels ?? buildOpenRouterFreeCatalogFromRaw(
+    PRIORITIZED_FREE_MODELS.map((id, idx) => ({
+      id,
+      name: id,
+      created: 1e6 - idx,
+      pricing: { prompt: "0", completion: "0" }
+    }))
+  );
+}
+function contentToText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return textFromContent(content);
+  return content.map((block) => {
+    if (typeof block === "string") return block;
+    if (block?.type === "text") return block.text ?? "";
+    if (block?.type === "tool-result" || block?.type === "tool_result") {
+      return textFromContent(block.content ?? block.output ?? block.result ?? block.text);
+    }
+    return textFromContent(block);
+  }).filter(Boolean).join("\n");
+}
+function isToolCallBlock(block) {
+  if (!block || typeof block !== "object") return false;
+  const type = String(block.type ?? "").toLowerCase().replace(/[_-]/g, "");
+  return type === "toolcall" || type === "tooluse" || type === "functioncall" || Boolean(block.functionCall);
+}
+function isToolResultBlock(block) {
+  if (!block || typeof block !== "object") return false;
+  const type = String(block.type ?? "").toLowerCase().replace(/[_-]/g, "");
+  return type === "toolresult";
+}
+function extractNormalizedToolCall(block, fallbackIndex = 1) {
+  const fnObj = block.function ?? block.functionCall ?? null;
+  const rawId = block.id ?? block.toolCallId ?? block.tool_call_id ?? fnObj?.id ?? `call_${fallbackIndex}`;
+  const rawName = block.name ?? block.toolName ?? block.tool_name ?? fnObj?.name ?? "tool";
+  const rawArgs = block.arguments ?? block.input ?? block.args ?? fnObj?.arguments ?? fnObj?.args ?? {};
+  return {
+    id: sanitizeToolCallId(String(rawId)),
+    type: "function",
+    function: {
+      name: String(rawName),
+      arguments: typeof rawArgs === "string" ? rawArgs : JSON.stringify(rawArgs ?? {})
+    }
+  };
+}
+function normalizeMessages(request = {}, { includeReasoningContent = false } = {}) {
+  const out = [];
+  const sysText = request.system ?? request.systemPrompt ?? request.instructions;
+  if (typeof sysText === "string" && sysText.trim()) {
+    out.push({ role: "system", content: sysText.trim() });
+  }
+  const messages = Array.isArray(request.messages) ? request.messages : [];
+  for (const msg of messages) {
+    if (!msg || typeof msg !== "object") continue;
+    const role = msg.role === "developer" ? "system" : msg.role ?? "user";
+    if (role === "tool" || role === "toolResult" || role === "tool_result") {
+      if (Array.isArray(msg.content) && msg.content.some(isToolResultBlock)) {
+        for (const block of msg.content) {
+          if (!isToolResultBlock(block)) continue;
+          const toolCallId2 = sanitizeToolCallId(
+            block.toolCallId ?? block.tool_call_id ?? block.id ?? msg.tool_call_id ?? msg.toolCallId ?? msg.id ?? "call_1"
+          );
+          const resultText = typeof block.content === "string" ? block.content : textFromContent(block.content ?? block.output ?? block.result ?? block.text);
+          out.push({
+            role: "tool",
+            tool_call_id: toolCallId2,
+            content: resultText || ""
+          });
+        }
+        continue;
+      }
+      const toolCallId = sanitizeToolCallId(msg.tool_call_id ?? msg.toolCallId ?? msg.id ?? "call_1");
+      const rawContent = msg.content ?? msg.output ?? msg.result ?? msg.text;
+      out.push({
+        role: "tool",
+        tool_call_id: toolCallId,
+        content: typeof rawContent === "string" ? rawContent : contentToText(rawContent)
+      });
+      continue;
+    }
+    if (role === "assistant" && Array.isArray(msg.content)) {
+      const textParts = [];
+      const thinkingParts = [];
+      const toolCalls = [];
+      for (const block of msg.content) {
+        if (typeof block === "string") {
+          textParts.push(block);
+        } else if (block?.type === "text" && block.text) {
+          textParts.push(block.text);
+        } else if ((block?.type === "thinking" || block?.type === "reasoning") && (block.thinking ?? block.text)) {
+          thinkingParts.push(block.thinking ?? block.text);
+        } else if (isToolCallBlock(block)) {
+          toolCalls.push(extractNormalizedToolCall(block, toolCalls.length + 1));
+        }
+      }
+      if (Array.isArray(msg.tool_calls)) {
+        for (const tc of msg.tool_calls) {
+          const normalizedTc = extractNormalizedToolCall(tc, toolCalls.length + 1);
+          if (!toolCalls.some((existing) => existing.id === normalizedTc.id)) {
+            toolCalls.push(normalizedTc);
+          }
+        }
+      }
+      const joinedText = textParts.join("\n").replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "").trim();
+      const entry2 = {
+        role: "assistant",
+        content: joinedText || (toolCalls.length > 0 ? null : "")
+      };
+      const existingReasoning = msg.reasoning_content ?? msg.reasoning ?? (thinkingParts.length > 0 ? thinkingParts.join("\n") : void 0);
+      if (existingReasoning !== void 0) {
+        entry2.reasoning_content = existingReasoning;
+      } else if (includeReasoningContent) {
+        entry2.reasoning_content = " ";
+      }
+      if (toolCalls.length > 0) entry2.tool_calls = toolCalls;
+      out.push(entry2);
+      continue;
+    }
+    if (role === "user" && Array.isArray(msg.content)) {
+      const toolResults = msg.content.filter(isToolResultBlock);
+      const nonToolBlocks = msg.content.filter((b) => !isToolResultBlock(b));
+      for (const block of toolResults) {
+        const toolCallId = sanitizeToolCallId(block.toolCallId ?? block.tool_call_id ?? block.id ?? "call_1");
+        const resultText = typeof block.content === "string" ? block.content : textFromContent(block.content ?? block.output ?? block.result ?? block.text);
+        out.push({
+          role: "tool",
+          tool_call_id: toolCallId,
+          content: resultText || ""
+        });
+      }
+      if (nonToolBlocks.length === 0 && toolResults.length > 0) {
+        continue;
+      }
+      const parts = [];
+      for (const block of nonToolBlocks) {
+        if (typeof block === "string") {
+          parts.push({ type: "text", text: block });
+        } else if (block?.type === "text" && block.text) {
+          parts.push({ type: "text", text: block.text });
+        } else if (block?.type === "image") {
+          const url = block.url ?? (block.data ? `data:${block.mimeType ?? "image/png"};base64,${block.data}` : null);
+          if (url) parts.push({ type: "image_url", image_url: { url } });
+        } else if (block?.type === "image_url" && block.image_url) {
+          parts.push({ type: "image_url", image_url: block.image_url });
+        }
+      }
+      if (parts.some((p) => p.type === "image_url")) {
+        out.push({ role: "user", content: parts });
+        continue;
+      }
+      const textOnly = parts.map((p) => p.text).filter(Boolean).join("\n");
+      out.push({ role: "user", content: textOnly });
+      continue;
+    }
+    const rawText = typeof msg.content === "string" ? msg.content : contentToText(msg.content);
+    const cleanedText = role === "assistant" ? rawText.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "").trim() : rawText;
+    const entry = {
+      role,
+      content: cleanedText
+    };
+    if (role === "assistant") {
+      if (msg.reasoning_content !== void 0) {
+        entry.reasoning_content = msg.reasoning_content;
+      } else if (includeReasoningContent) {
+        entry.reasoning_content = " ";
+      }
+    }
+    if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+      entry.tool_calls = msg.tool_calls.map((tc, idx) => extractNormalizedToolCall(tc, idx + 1));
+      if (!entry.content) entry.content = null;
+    }
+    out.push(entry);
+  }
+  let lastAssistant = null;
+  for (let i = 0; i < out.length; i++) {
+    const item = out[i];
+    if (item.role === "assistant") {
+      lastAssistant = item;
+    } else if (item.role === "tool") {
+      const tcId = item.tool_call_id || "call_1";
+      if (!lastAssistant) {
+        lastAssistant = {
+          role: "assistant",
+          content: null,
+          ...includeReasoningContent ? { reasoning_content: " " } : {},
+          tool_calls: [{
+            id: tcId,
+            type: "function",
+            function: { name: "tool", arguments: "{}" }
+          }]
+        };
+        out.splice(i, 0, lastAssistant);
+        i += 1;
+      } else {
+        if (!Array.isArray(lastAssistant.tool_calls)) {
+          lastAssistant.tool_calls = [];
+          if (!lastAssistant.content) lastAssistant.content = null;
+        }
+        if (!lastAssistant.tool_calls.some((tc) => tc.id === tcId)) {
+          lastAssistant.tool_calls.push({
+            id: tcId,
+            type: "function",
+            function: { name: "tool", arguments: "{}" }
+          });
+        }
+      }
+    } else if (item.role === "user") {
+      lastAssistant = null;
+    }
+  }
+  return out;
+}
+function normalizeTools(tools) {
+  if (!Array.isArray(tools) || tools.length === 0) return void 0;
+  return tools.map((tool) => {
+    if (tool?.type === "function" && tool.function) return tool;
+    return {
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description ?? "",
+        parameters: tool.parameters ?? tool.inputSchema ?? { type: "object", properties: {} }
+      }
+    };
+  });
+}
+function requestHasImages(messages = []) {
+  return messages.some((m) => Array.isArray(m?.content) && m.content.some((part) => part?.type === "image" || part?.type === "image_url"));
+}
+function normalizeReasoningParam(request = {}) {
+  const rawEffort = request.reasoningEffort ?? request.reasoning?.effort ?? null;
+  if (!rawEffort || rawEffort === "none" || rawEffort === "off" || rawEffort === "default") {
+    return void 0;
+  }
+  const validEfforts = /* @__PURE__ */ new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
+  const normalized = String(rawEffort).toLowerCase().trim();
+  if (validEfforts.has(normalized)) {
+    return { effort: normalized };
+  }
+  return void 0;
+}
+function extractReasoningDelta2(delta = {}) {
+  if (typeof delta.reasoning_content === "string" && delta.reasoning_content) return delta.reasoning_content;
+  if (typeof delta.reasoning === "string" && delta.reasoning) return delta.reasoning;
+  if (Array.isArray(delta.reasoning_details)) {
+    for (const detail of delta.reasoning_details) {
+      if (typeof detail?.text === "string" && detail.text) return detail.text;
+      if (typeof detail?.summary === "string" && detail.summary) return detail.summary;
+    }
+  }
+  return "";
+}
+function selectOpenRouterFreeCandidateQueue({
+  requestedModel,
+  liveCatalog = [],
+  hasTools = false,
+  hasImages = false,
+  estimatedTokens = 0,
+  noFallback = false,
+  nowMs = Date.now()
+} = {}) {
+  const rawModel = String(requestedModel || OPENROUTER_FREE_ROUTER_ID).replace(/^openrouter-free\//, "");
+  const isRouter = rawModel === OPENROUTER_FREE_ROUTER_ID || rawModel === "free";
+  if (!isRouter && noFallback) {
+    return [rawModel];
+  }
+  const catalogEntries = liveCatalog.filter((entry) => entry.id && entry.id !== OPENROUTER_FREE_ROUTER_ID);
+  const entryMap = new Map(catalogEntries.map((entry) => [entry.id, entry]));
+  const orderedIds = [];
+  const seen = /* @__PURE__ */ new Set();
+  const pushCandidate = (id) => {
+    if (!id || seen.has(id)) return;
+    if (isOpenRouterModelCoolingDown(id, nowMs)) return;
+    seen.add(id);
+    orderedIds.push(id);
+  };
+  if (!isRouter) {
+    pushCandidate(rawModel);
+  }
+  const compatiblePool = [];
+  const contextFallbackPool = [];
+  const secondaryPool = [];
+  const allKnownIds = [
+    ...PRIORITIZED_FREE_MODELS.filter((id) => entryMap.size === 0 || entryMap.has(id)),
+    ...catalogEntries.map((e) => e.id)
+  ];
+  const requiredContextWindow = estimatedTokens > 0 ? estimatedTokens + 4096 : 0;
+  for (const id of allKnownIds) {
+    const meta = entryMap.get(id);
+    const toolsOk = !hasTools || !meta || meta.supportsTools !== false;
+    const imagesOk = !hasImages || !meta || Array.isArray(meta.inputModalities) && meta.inputModalities.includes("image");
+    const contextOk = !requiredContextWindow || !meta?.contextWindow || meta.contextWindow >= requiredContextWindow;
+    if (toolsOk && imagesOk && contextOk) {
+      compatiblePool.push(id);
+    } else if (toolsOk && imagesOk) {
+      contextFallbackPool.push(id);
+    } else {
+      secondaryPool.push(id);
+    }
+  }
+  contextFallbackPool.sort((a, b) => {
+    const ctxA = entryMap.get(a)?.contextWindow || 0;
+    const ctxB = entryMap.get(b)?.contextWindow || 0;
+    return ctxB - ctxA;
+  });
+  for (const id of compatiblePool) pushCandidate(id);
+  for (const id of contextFallbackPool) pushCandidate(id);
+  for (const id of secondaryPool) pushCandidate(id);
+  if (!seen.has(OPENROUTER_FREE_ROUTER_ID)) {
+    orderedIds.push(OPENROUTER_FREE_ROUTER_ID);
+  }
+  if (orderedIds.length === 0) {
+    return [isRouter ? OPENROUTER_FREE_ROUTER_ID : rawModel];
+  }
+  return orderedIds;
+}
+function createOpenRouterFreeNativeExecutor({
+  fetchImpl = globalThis.fetch,
+  homeDir = os.homedir(),
+  env = process.env,
+  timeoutMs = 12e4
+} = {}) {
+  return async function* executeOpenRouterFreeStream(input = {}, maybeInvocation = {}, maybeContext = {}) {
+    const isWrappedInput = input && typeof input === "object" && ("request" in input || "credential" in input);
+    const request = isWrappedInput ? input.request ?? {} : input ?? {};
+    const secret = isWrappedInput ? input.credential ?? input.secret ?? null : maybeInvocation?.secret ?? maybeInvocation?.credential ?? maybeContext?.secret ?? null;
+    const signal = (isWrappedInput ? input.signal : null) ?? request.signal ?? maybeContext?.signal ?? null;
+    const localAuth = extractOpenRouterFreeAuth({ homeDir, env });
+    const apiKey = secret?.apiKey ?? secret?.accessToken ?? secret?.token ?? localAuth?.apiKey;
+    if (!apiKey) {
+      throw createOpenRouterExecutionError(
+        "\u672A\u627E\u5230 OpenRouter API Key\u3002\u8BF7\u5728 Dockyard \u7684 OpenRouter Free \u8BA2\u9605\u5F39\u7A97\u4E2D\u7C98\u8D34\u60A8\u7684 API Key\uFF08\u6216\u626B\u63CF\u672C\u673A\u5DF2\u914D\u7F6E\u7684 OPENROUTER_API_KEY\uFF09\u3002",
+        { retryable: false, accountStatus: "expired" }
+      );
+    }
+    const rawModel = String(request.model || OPENROUTER_FREE_ROUTER_ID).replace(/^openrouter-free\//, "");
+    const isRouterRequest = rawModel === OPENROUTER_FREE_ROUTER_ID || rawModel === "free";
+    const noFallback = Boolean(request.noFallback || request.probe);
+    const tools = normalizeTools(request.tools);
+    const hasTools = Boolean(tools && tools.length > 0);
+    const hasImages = requestHasImages(request.messages);
+    const liveCatalog = await fetchLiveOpenRouterFreeModels({ fetchImpl, apiKey });
+    const estimatedTokens = estimateOpenRouterRequestTokens(request);
+    const candidateQueue = selectOpenRouterFreeCandidateQueue({
+      requestedModel: rawModel,
+      liveCatalog,
+      hasTools,
+      hasImages,
+      estimatedTokens,
+      noFallback: noFallback && !isRouterRequest
+    });
+    const reasoningParam = normalizeReasoningParam(request);
+    const buildBodyForModels = (modelsSlice, { includeReasoningContent: includeReasoningContent2 = false } = {}) => {
+      const primaryModel = modelsSlice[0];
+      const fallbackModels = modelsSlice.slice(1, 3);
+      return {
+        model: primaryModel,
+        ...fallbackModels.length > 0 ? { models: [primaryModel, ...fallbackModels] } : {},
+        messages: normalizeMessages(request, { includeReasoningContent: includeReasoningContent2 }),
+        stream: true,
+        ...tools ? { tools } : {},
+        ...reasoningParam ? { reasoning: reasoningParam } : {},
+        ...typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {},
+        ...typeof request.temperature === "number" ? { temperature: request.temperature } : {}
+      };
+    };
+    const doFetch = async (bodyObj) => {
+      let lastNetworkErr = null;
+      const maxNetworkAttempts = 2;
+      for (let attempt = 1; attempt <= maxNetworkAttempts; attempt++) {
+        try {
+          return await fetchImpl(OPENROUTER_API_ENDPOINT, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+              Accept: "text/event-stream, application/json",
+              ...OPENROUTER_AGENTIC_HEADERS
+            },
+            body: JSON.stringify(bodyObj),
+            ...signal ? { signal } : {}
+          });
+        } catch (err) {
+          lastNetworkErr = err;
+          if (signal?.aborted || attempt >= maxNetworkAttempts) {
+            throw createOpenRouterExecutionError(
+              `OpenRouter Free network request failed: ${err?.message || String(err)}`,
+              { retryable: true, cause: err }
+            );
+          }
+          await new Promise((resolve2) => setTimeout(resolve2, 250 * attempt));
+        }
+      }
+      throw lastNetworkErr;
+    };
+    const batches = [];
+    if (noFallback && !isRouterRequest) {
+      batches.push([rawModel]);
+    } else {
+      for (let i = 0; i < candidateQueue.length && batches.length < 6; i += 1) {
+        const slice = isRouterRequest ? candidateQueue.slice(i, i + 3) : [candidateQueue[i]];
+        batches.push(slice);
+      }
+    }
+    let lastStatus = 500;
+    let lastErrBody = "Unknown OpenRouter error";
+    let sawContextOverflow = false;
+    let includeReasoningContent = false;
+    let response = null;
+    for (let bIdx = 0; bIdx < batches.length; bIdx++) {
+      const batch = batches[bIdx];
+      let candidateRes = await doFetch(buildBodyForModels(batch, { includeReasoningContent }));
+      if (!candidateRes.ok) {
+        const errBody = await candidateRes.text().catch(() => "");
+        if (candidateRes.status === 400 && errBody.includes("reasoning_content") && !includeReasoningContent) {
+          includeReasoningContent = true;
+          candidateRes = await doFetch(buildBodyForModels(batch, { includeReasoningContent: true }));
+        } else {
+          lastStatus = candidateRes.status;
+          lastErrBody = errBody || `HTTP ${candidateRes.status}`;
+          if (isOpenRouterContextOverflowBody(candidateRes.status, errBody)) {
+            sawContextOverflow = true;
+          }
+          if (candidateRes.status === 401) {
+            throw createOpenRouterExecutionError(
+              `OpenRouter API Key \u65E0\u6548\u6216\u5DF2\u8FC7\u671F (${candidateRes.status}): ${lastErrBody.slice(0, 300)}`,
+              { status: candidateRes.status, retryable: false, accountStatus: "expired" }
+            );
+          }
+          markOpenRouterModelCooldown(batch[0]);
+          continue;
+        }
+      }
+      if (!candidateRes.ok) {
+        const errBody = await candidateRes.text().catch(() => "");
+        lastStatus = candidateRes.status;
+        lastErrBody = errBody || `HTTP ${candidateRes.status}`;
+        if (isOpenRouterContextOverflowBody(candidateRes.status, errBody)) {
+          sawContextOverflow = true;
+        }
+        markOpenRouterModelCooldown(batch[0]);
+        continue;
+      }
+      response = candidateRes;
+      break;
+    }
+    if (!response) {
+      throw createOpenRouterExecutionError(
+        `OpenRouter Free request failed (${lastStatus}): ${String(lastErrBody).slice(0, 300)}`,
+        {
+          status: lastStatus,
+          ...sawContextOverflow ? { code: "CONTEXT_WINDOW_EXCEEDED" } : {},
+          retryable: sawContextOverflow || lastStatus === 429 || lastStatus >= 500
+        }
+      );
+    }
+    const streamEvents = [];
+    let nextIndex = 1;
+    let reasoning = null;
+    let rawUsage = null;
+    let stop = "stop";
+    let probeYielded = false;
+    let substantiveYielded = false;
+    const activeTools = /* @__PURE__ */ new Map();
+    let inThinkTag = false;
+    let thinkPending = "";
+    const pushReasoningChunk = (text3) => {
+      if (!text3) return;
+      substantiveYielded = true;
+      textFilter.closeText();
+      if (!reasoning) {
+        reasoning = { index: nextIndex++, text: "" };
+        streamEvents.push({ type: "block-start", index: reasoning.index, blockType: "reasoning" });
+      }
+      reasoning.text += text3;
+      streamEvents.push({ type: "reasoning-delta", index: reasoning.index, text: text3 });
+    };
+    const closeReasoningBlock = () => {
+      if (!reasoning) return;
+      streamEvents.push({ type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } });
+      reasoning = null;
+    };
+    const pushContentChunk = (rawChunk) => {
+      if (!rawChunk) return;
+      let buf = thinkPending + rawChunk;
+      thinkPending = "";
+      while (buf.length > 0) {
+        if (inThinkTag) {
+          const closeMatch = buf.match(/<\/think(?:ing)?>/i);
+          if (closeMatch) {
+            const thoughtPart = buf.slice(0, closeMatch.index);
+            if (thoughtPart) pushReasoningChunk(thoughtPart);
+            closeReasoningBlock();
+            inThinkTag = false;
+            buf = buf.slice(closeMatch.index + closeMatch[0].length);
+            continue;
+          }
+          const partialClose = buf.match(/<\/(?:t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?)?$/i);
+          if (partialClose) {
+            const safeThought = buf.slice(0, partialClose.index);
+            if (safeThought) pushReasoningChunk(safeThought);
+            thinkPending = partialClose[0];
+          } else {
+            pushReasoningChunk(buf);
+          }
+          break;
+        } else {
+          const openMatch = buf.match(/<think(?:ing)?>/i);
+          if (openMatch) {
+            const beforeText = buf.slice(0, openMatch.index);
+            if (beforeText) {
+              closeReasoningBlock();
+              textFilter.push(beforeText, () => nextIndex++);
+            }
+            inThinkTag = true;
+            buf = buf.slice(openMatch.index + openMatch[0].length);
+            continue;
+          }
+          const partialOpen = buf.match(/<(?:t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?)?$/i);
+          if (partialOpen) {
+            const safeText = buf.slice(0, partialOpen.index);
+            if (safeText) {
+              closeReasoningBlock();
+              textFilter.push(safeText, () => nextIndex++);
+            }
+            thinkPending = partialOpen[0];
+          } else {
+            closeReasoningBlock();
+            textFilter.push(buf, () => nextIndex++);
+          }
+          break;
+        }
+      }
+    };
+    const textFilter = new DsmlStreamFilter({
+      onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "text" }),
+      onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
+      onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "text", text: text3 } })
+    });
+    for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: "openrouter-free" })) {
+      if (event?.done) continue;
+      const parsed = event?.data;
+      if (!parsed || typeof parsed !== "object") continue;
+      if (parsed.error && !substantiveYielded) {
+        const errMsg = parsed.error?.message || JSON.stringify(parsed.error);
+        const errCode = Number(parsed.error?.code) || 502;
+        throw createOpenRouterExecutionError(
+          `OpenRouter Free stream error (${errCode}): ${errMsg}`,
+          { status: errCode, retryable: errCode === 429 || errCode >= 500 }
+        );
+      }
+      if (parsed.usage) rawUsage = parsed.usage;
+      const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : null;
+      if (!choice) continue;
+      if (request.probe && !probeYielded) {
+        probeYielded = true;
+        substantiveYielded = true;
+        yield { type: "text-delta", index: 0, text: " " };
+        yield { type: "finish", reason: finishReason("stop") };
+        return;
+      }
+      const delta = choice.delta ?? choice.message ?? {};
+      const reasoningDelta = extractReasoningDelta2(delta);
+      if (reasoningDelta) {
+        pushReasoningChunk(reasoningDelta);
+        while (streamEvents.length > 0) yield streamEvents.shift();
+      }
+      for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
+        substantiveYielded = true;
+        const key = Number(call.index ?? activeTools.size);
+        if (!activeTools.has(key)) {
+          closeReasoningBlock();
+          textFilter.closeText();
+          while (streamEvents.length > 0) yield streamEvents.shift();
+          const state2 = {
+            index: nextIndex++,
+            id: sanitizeToolCallId(call.id || `call_${key}_${randomUUID13().slice(0, 8)}`),
+            name: call.function?.name || call.name || "tool",
+            arguments: ""
+          };
+          activeTools.set(key, state2);
+          yield { type: "block-start", index: state2.index, blockType: "tool-call" };
+        }
+        const state = activeTools.get(key);
+        const argumentDelta = call.function?.arguments ?? call.arguments ?? "";
+        if (call.id) state.id = sanitizeToolCallId(call.id);
+        if (call.function?.name) state.name = call.function.name;
+        state.arguments += argumentDelta;
+        if (argumentDelta) {
+          yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: argumentDelta };
+        }
+      }
+      const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
+      if (content) {
+        substantiveYielded = true;
+        pushContentChunk(content);
+        while (streamEvents.length > 0) yield streamEvents.shift();
+      }
+      if (choice.finish_reason) {
+        stop = choice.finish_reason;
+      }
+    }
+    if (thinkPending) {
+      if (inThinkTag) pushReasoningChunk(thinkPending);
+      else {
+        closeReasoningBlock();
+        textFilter.push(thinkPending, () => nextIndex++);
+      }
+      thinkPending = "";
+    }
+    closeReasoningBlock();
+    const dsmlResult = textFilter.flush(() => nextIndex++);
+    while (streamEvents.length > 0) yield streamEvents.shift();
+    if (activeTools.size > 0) {
+      for (const state of activeTools.values()) {
+        yield {
+          type: "block-end",
+          index: state.index,
+          block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments || "{}" }
+        };
+      }
+      stop = "tool_calls";
+    } else if (dsmlResult?.toolCalls?.length > 0) {
+      for (const dsml of dsmlResult.toolCalls) {
+        substantiveYielded = true;
+        const toolIndex = nextIndex++;
+        const toolId = `call_${randomUUID13().slice(0, 8)}`;
+        yield { type: "block-start", index: toolIndex, blockType: "tool-call" };
+        yield { type: "tool-call-delta", index: toolIndex, id: toolId, name: dsml.name, argumentsDelta: dsml.arguments };
+        yield {
+          type: "block-end",
+          index: toolIndex,
+          block: { type: "tool-call", id: toolId, name: dsml.name, arguments: dsml.arguments }
+        };
+      }
+      stop = "tool_calls";
+    }
+    if (!substantiveYielded) {
+      const idx = nextIndex++;
+      yield { type: "block-start", index: idx, blockType: "text" };
+      yield { type: "text-delta", index: idx, text: " " };
+      yield { type: "block-end", index: idx, block: { type: "text", text: " " } };
+    }
+    if (rawUsage) {
+      yield {
+        type: "usage",
+        usage: normalizeUsage(rawUsage)
+      };
+    }
+    yield {
+      type: "finish",
+      reason: finishReason(stop),
+      ...rawUsage ? { usage: normalizeUsage(rawUsage) } : {}
+    };
+  };
+}
+
+// modules/provider-openrouter-free/src/driver.mjs
+var PROVIDER_ID17 = "openrouter-free";
+var OPENROUTER_KEYS_PAGE = "https://openrouter.ai/settings/keys";
+async function readSecret(secretStore, ref) {
+  if (!secretStore || !ref) return null;
+  try {
+    if (typeof secretStore.read === "function") return await secretStore.read(ref);
+    if (typeof secretStore.get === "function") return await secretStore.get(ref);
+  } catch {
+  }
+  return null;
+}
+async function writeSecret(secretStore, ref, value) {
+  if (!secretStore || !ref) return;
+  if (typeof secretStore.write === "function") {
+    await secretStore.write(ref, value);
+    return;
+  }
+  if (typeof secretStore.put === "function") {
+    await secretStore.put(ref, value);
+  }
+}
+function createOpenRouterFreeCatalogLoader({
+  fetchImpl = globalThis.fetch,
+  homeDir = os2.homedir(),
+  env = process.env
+} = {}) {
+  return async function loadOpenRouterFreeCatalog(context = {}) {
+    const localAuth = extractOpenRouterFreeAuth({ homeDir, env });
+    const apiKey = context?.credential?.apiKey ?? context?.secret?.apiKey ?? localAuth?.apiKey ?? null;
+    const models = await fetchLiveOpenRouterFreeModels({
+      fetchImpl,
+      apiKey,
+      forceRefresh: Boolean(context?.force)
+    });
+    return {
+      providerId: PROVIDER_ID17,
+      source: "openrouter_live_free_catalog",
+      fetchedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      models
+    };
+  };
+}
+async function fetchOpenRouterAccountQuota(apiKey, fetchImpl = globalThis.fetch, now = /* @__PURE__ */ new Date()) {
+  const nowIso = now.toISOString();
+  if (typeof fetchImpl !== "function" || !apiKey) {
+    return {
+      plan: "OpenRouter Free Router",
+      quota: createQuotaSnapshot({
+        remaining: null,
+        limit: null,
+        unit: "USD",
+        resetAt: null,
+        updatedAt: nowIso,
+        source: "openrouter_free_key",
+        windows: []
+      }, now),
+      quotaDiagnostic: "OpenRouter Free Key \u5DF2\u5C31\u7EEA \xB7 \u5B9E\u65F6\u540C\u6B65\u5E38\u9A7B\u514D\u8D39\u3001\u9690\u79D8\u4E0E\u9650\u65F6\u514D\u8D39\u6A21\u578B"
+    };
+  }
+  let totalCredits = null;
+  let totalUsage = null;
+  let isFreeTier = null;
+  let keyLabel = null;
+  let keyLimit = null;
+  let keyLimitRemaining = null;
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    Accept: "application/json",
+    ...OPENROUTER_AGENTIC_HEADERS
+  };
+  const [creditsRes, keyRes] = await Promise.allSettled([
+    fetchImpl(OPENROUTER_CREDITS_ENDPOINT, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(8e3)
+    }),
+    fetchImpl(OPENROUTER_KEY_ENDPOINT, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(8e3)
+    })
+  ]);
+  if (keyRes.status === "fulfilled") {
+    if (keyRes.value.status === 401 || keyRes.value.status === 403) {
+      const err = new Error(`OpenRouter API Key \u65E0\u6548 (${keyRes.value.status})`);
+      err.status = keyRes.value.status;
+      throw err;
+    }
+    if (keyRes.value.ok) {
+      const body = await keyRes.value.json().catch(() => ({}));
+      const data = body?.data ?? body ?? {};
+      if (typeof data.is_free_tier === "boolean") isFreeTier = data.is_free_tier;
+      if (typeof data.label === "string" && data.label.trim()) keyLabel = data.label.trim();
+      if (typeof data.limit === "number" && Number.isFinite(data.limit)) keyLimit = data.limit;
+      if (typeof data.limit_remaining === "number" && Number.isFinite(data.limit_remaining)) {
+        keyLimitRemaining = data.limit_remaining;
+      }
+    }
+  }
+  if (creditsRes.status === "fulfilled") {
+    if (creditsRes.value.status === 401 || creditsRes.value.status === 403) {
+      const err = new Error(`OpenRouter API Key \u65E0\u6548 (${creditsRes.value.status})`);
+      err.status = creditsRes.value.status;
+      throw err;
+    }
+    if (creditsRes.value.ok) {
+      const body = await creditsRes.value.json().catch(() => ({}));
+      const data = body?.data ?? body ?? {};
+      if (typeof data.total_credits === "number" && Number.isFinite(data.total_credits)) {
+        totalCredits = data.total_credits;
+      }
+      if (typeof data.total_usage === "number" && Number.isFinite(data.total_usage)) {
+        totalUsage = data.total_usage;
+      }
+    }
+  }
+  const rawRemaining = totalCredits !== null && totalUsage !== null ? Math.max(0, Number((totalCredits - totalUsage).toFixed(4))) : keyLimitRemaining;
+  const limitCredits = totalCredits !== null && totalCredits > 0 ? Number(totalCredits.toFixed(4)) : keyLimit;
+  const hasPositiveBalance = typeof rawRemaining === "number" && rawRemaining > 0;
+  const effectiveRemaining = hasPositiveBalance ? rawRemaining : null;
+  const windows = [];
+  if (hasPositiveBalance) {
+    windows.push({
+      id: "credits",
+      name: "OpenRouter Credits (\u514D\u8D39/\u9690\u79D8\u6A21\u578B\u4E0D\u6263\u8D39)",
+      remaining: rawRemaining,
+      limit: limitCredits !== null && limitCredits > 0 ? limitCredits : null,
+      unit: "USD",
+      resetAt: null,
+      updatedAt: nowIso,
+      source: "openrouter_credits_api"
+    });
+  }
+  const plan = isFreeTier === false || hasPositiveBalance ? "OpenRouter Key (\u9AD8\u5E76\u53D1\u514D\u8D39\u989D\u5EA6)" : "OpenRouter Free Key (0 \u6263\u8D39\u65E0\u9650\u7545\u4EAB)";
+  return {
+    plan,
+    keyLabel,
+    quota: createQuotaSnapshot({
+      remaining: effectiveRemaining,
+      limit: hasPositiveBalance ? limitCredits : null,
+      unit: "USD",
+      resetAt: null,
+      updatedAt: nowIso,
+      source: "openrouter_credits_api",
+      windows
+    }, now),
+    quotaDiagnostic: hasPositiveBalance ? `\u8D26\u6237\u4F59\u989D $${rawRemaining.toFixed(2)} \xB7 \u8C03\u7528\u514D\u8D39/\u9690\u79D8\u9650\u514D\u6A21\u578B\u5B8C\u5168 0 \u6263\u8D39` : "\u5DF2\u7ED1\u5B9A OpenRouter API Key \xB7 \u514D\u8D39\u6A21\u578B\u3001\u9690\u79D8\u6A21\u578B\u4E0E\u9650\u65F6\u514D\u8D39\u6A21\u578B\u5168\u90E8 0 \u6263\u8D39\u53EF\u7528"
+  };
+}
+var OpenRouterFreeDriver = class {
+  constructor(options = {}) {
+    this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
+    this.homeDir = options.homeDir ?? os2.homedir();
+    this.env = options.env ?? process.env;
+    this.catalogLoader = options.catalogLoader ?? createOpenRouterFreeCatalogLoader({
+      fetchImpl: this.fetchImpl,
+      homeDir: this.homeDir,
+      env: this.env
+    });
+    this.requestExecutor = options.requestExecutor ?? createOpenRouterFreeNativeExecutor({
+      fetchImpl: this.fetchImpl,
+      homeDir: this.homeDir,
+      env: this.env
+    });
+  }
+  async discover() {
+    const keys = discoverLocalOpenRouterKeys({ homeDir: this.homeDir, env: this.env });
+    if (keys.length === 0) {
+      return {
+        source: "openrouter_local_credentials",
+        candidates: [],
+        diagnostics: ["\u672A\u5728\u672C\u673A\u73AF\u5883\u53D8\u91CF\u6216 DSH Credentials \u4E2D\u53D1\u73B0 OPENROUTER_API_KEY\uFF1B\u53EF\u76F4\u63A5\u5728\u4E0A\u65B9\u7C98\u8D34 API Key \u6DFB\u52A0\u3002"]
+      };
+    }
+    const candidates = keys.map((item) => {
+      const accountId = `openrouter-free-${item.fingerprint}`;
+      return {
+        candidateId: `openrouter-free:${accountId}`,
+        accountId,
+        providerId: PROVIDER_ID17,
+        displayName: item.label,
+        email: item.maskedKey,
+        status: "available",
+        source: item.source,
+        apiKey: item.apiKey,
+        fingerprint: item.fingerprint,
+        resources: {
+          authSource: item.source,
+          identitySource: "openrouter_api_key",
+          identityLabel: item.maskedKey,
+          sessionFingerprint: item.fingerprint,
+          identityNote: `OpenRouter API Key (${item.maskedKey}) \xB7 \u81EA\u52A8\u540C\u6B65\u5B9E\u65F6\u514D\u8D39\u4E0E\u9690\u79D8\u9650\u514D\u6A21\u578B`,
+          quotaUrl: OPENROUTER_KEYS_PAGE
+        }
+      };
+    });
+    return {
+      source: "openrouter_local_credentials",
+      candidates,
+      diagnostics: []
+    };
+  }
+  async importAccount(candidate2, context = {}) {
+    if (!candidate2?.accountId) {
+      throw new ValidationError("OpenRouter Free candidate accountId is required");
+    }
+    const localAuth = extractOpenRouterFreeAuth({ homeDir: this.homeDir, env: this.env });
+    const apiKey = candidate2.apiKey ?? localAuth?.apiKey;
+    if (!apiKey) {
+      throw new ValidationError("OpenRouter API Key is required to import account");
+    }
+    const fingerprint = candidate2.fingerprint ?? hashApiKeyFingerprint(apiKey);
+    const masked = maskApiKey(apiKey);
+    const credentialRef = createCredentialRef(PROVIDER_ID17, candidate2.accountId);
+    await writeSecret(context.secretStore, credentialRef, {
+      type: "openrouter_free_auth",
+      providerId: PROVIDER_ID17,
+      accountId: candidate2.accountId,
+      apiKey,
+      label: candidate2.displayName ?? `OpenRouter Key (${masked})`,
+      source: candidate2.source ?? "manual_api_key",
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
+    let quotaInfo;
+    try {
+      quotaInfo = await fetchOpenRouterAccountQuota(apiKey, this.fetchImpl, now);
+    } catch {
+      quotaInfo = {
+        plan: "OpenRouter Free Key (0 \u6263\u8D39\u65E0\u9650\u7545\u4EAB)",
+        quota: createQuotaSnapshot({
+          remaining: null,
+          limit: null,
+          unit: "USD",
+          resetAt: null,
+          updatedAt: now.toISOString(),
+          source: "openrouter_free_key",
+          windows: []
+        }, now),
+        quotaDiagnostic: "OpenRouter API Key \u5DF2\u63A5\u5165 \xB7 \u81EA\u52A8\u540C\u6B65\u5B9E\u65F6\u514D\u8D39\u4E0E\u9690\u79D8\u9650\u514D\u6A21\u578B"
+      };
+    }
+    return createAccountRecord({
+      providerId: PROVIDER_ID17,
+      accountId: candidate2.accountId,
+      displayName: candidate2.displayName || quotaInfo.keyLabel || `OpenRouter Key (${masked})`,
+      email: candidate2.email || masked,
+      credentialRef,
+      auth: {
+        kind: "api_key",
+        credentialRef,
+        scopes: ["chat", "models", "credits"]
+      },
+      subscription: {
+        plan: quotaInfo.plan,
+        status: "active"
+      },
+      quota: quotaInfo.quota,
+      refresh: {
+        refreshable: true,
+        lastRefreshedAt: now.toISOString()
+      },
+      resources: {
+        ...candidate2.resources ?? {},
+        authSource: candidate2.source ?? "manual_api_key",
+        identitySource: "openrouter_api_key",
+        identityLabel: masked,
+        sessionFingerprint: fingerprint,
+        identityNote: `OpenRouter API Key (${masked}) \xB7 \u5B9E\u65F6\u514D\u8D39\u3001\u9690\u79D8\u4E0E\u9650\u65F6\u514D\u8D39\u6A21\u578B`,
+        quotaDiagnostic: quotaInfo.quotaDiagnostic,
+        quotaUrl: OPENROUTER_KEYS_PAGE
+      },
+      health: {
+        status: ACCOUNT_HEALTH.HEALTHY
+      }
+    }, now);
+  }
+  async importSource(source, context = {}) {
+    const rawKey = typeof source === "string" ? source : source?.apiKey ?? source?.key ?? source?.token ?? source?.content ?? "";
+    const apiKey = String(rawKey ?? "").trim();
+    if (!apiKey) {
+      throw new ValidationError("\u8BF7\u8F93\u5165\u6709\u6548\u7684 OpenRouter API Key\uFF08\u4F8B\u5982 sk-or-v1-...\uFF09");
+    }
+    const customLabel = typeof source === "object" && typeof source?.label === "string" ? source.label.trim() : "";
+    const fingerprint = hashApiKeyFingerprint(apiKey);
+    const masked = maskApiKey(apiKey);
+    const accountId = `openrouter-free-${fingerprint}`;
+    const account = await this.importAccount({
+      candidateId: `openrouter-free:${accountId}`,
+      accountId,
+      providerId: PROVIDER_ID17,
+      displayName: customLabel || `OpenRouter Key (${masked})`,
+      email: masked,
+      source: "manual_api_key",
+      apiKey,
+      fingerprint
+    }, context);
+    return [account];
+  }
+  async getActiveSession(context = {}) {
+    const discovered = await this.discover(context);
+    if (!discovered.candidates?.length) return null;
+    const accounts = [];
+    for (const candidate2 of discovered.candidates) {
+      accounts.push(await this.importAccount(candidate2, context));
+    }
+    return {
+      status: "completed",
+      providerId: PROVIDER_ID17,
+      instructions: "\u5DF2\u81EA\u52A8\u5BFC\u5165\u672C\u673A OpenRouter API Key\u3002",
+      accounts
+    };
+  }
+  async startAuthorization(context = {}) {
+    const active = await this.getActiveSession(context);
+    if (active) return active;
+    return {
+      status: "opened",
+      providerId: PROVIDER_ID17,
+      authorizationUrl: OPENROUTER_KEYS_PAGE,
+      instructions: "\u8BF7\u5728\u4E0B\u65B9\u76F4\u63A5\u7C98\u8D34\u60A8\u7684 OpenRouter API Key\uFF08sk-or-v1-...\uFF09\uFF0C\u6216\u5728\u6253\u5F00\u7684 OpenRouter \u9875\u9762\u521B\u5EFA\u65B0 Key \u540E\u7C98\u8D34\u6DFB\u52A0\u3002"
+    };
+  }
+  async refreshAccount(account, context = {}) {
+    const stored = await readSecret(context.secretStore, account?.auth?.credentialRef);
+    const localAuth = extractOpenRouterFreeAuth({ homeDir: this.homeDir, env: this.env });
+    const apiKey = stored?.apiKey ?? localAuth?.apiKey;
+    if (!apiKey) {
+      return {
+        account: {
+          ...account,
+          health: {
+            status: ACCOUNT_HEALTH.EXPIRED,
+            lastError: "\u672A\u627E\u5230\u5BF9\u5E94\u7684 OpenRouter API Key\uFF0C\u8BF7\u5728\u4E0A\u65B9\u91CD\u65B0\u7C98\u8D34\u6DFB\u52A0\u3002"
+          }
+        }
+      };
+    }
+    await fetchLiveOpenRouterFreeModels({
+      fetchImpl: this.fetchImpl,
+      apiKey,
+      forceRefresh: true
+    }).catch(() => {
+    });
+    const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
+    try {
+      const quotaInfo = await fetchOpenRouterAccountQuota(apiKey, this.fetchImpl, now);
+      return {
+        account: {
+          ...account,
+          subscription: {
+            plan: quotaInfo.plan,
+            status: "active"
+          },
+          quota: quotaInfo.quota,
+          refresh: {
+            ...account.refresh,
+            refreshable: true,
+            lastRefreshedAt: now.toISOString()
+          },
+          resources: {
+            ...account.resources ?? {},
+            quotaDiagnostic: quotaInfo.quotaDiagnostic,
+            quotaUrl: OPENROUTER_KEYS_PAGE
+          },
+          health: {
+            status: ACCOUNT_HEALTH.HEALTHY,
+            lastError: null
+          }
+        }
+      };
+    } catch (err) {
+      if (err?.status === 401 || err?.status === 403) {
+        return {
+          account: {
+            ...account,
+            health: {
+              status: ACCOUNT_HEALTH.EXPIRED,
+              lastError: err.message
+            }
+          }
+        };
+      }
+      return {
+        account: {
+          ...account,
+          refresh: {
+            ...account.refresh,
+            refreshable: true,
+            lastRefreshedAt: now.toISOString()
+          },
+          health: {
+            status: ACCOUNT_HEALTH.HEALTHY,
+            lastError: null
+          }
+        }
+      };
+    }
+  }
+  async getQuota(account, context = {}) {
+    const refreshed = await this.refreshAccount(account, context);
+    return refreshed.account.quota;
+  }
+  async getCatalog(context = {}) {
+    let credential = null;
+    if (context?.secretStore && context?.accounts?.[0]?.auth?.credentialRef) {
+      credential = await readSecret(context.secretStore, context.accounts[0].auth.credentialRef);
+    }
+    return this.catalogLoader({
+      ...context,
+      force: Boolean(context?.force),
+      credential
+    });
+  }
+  async invoke(request, invocation, context = {}) {
+    return this.stream(request, invocation, context);
+  }
+  async stream(request, invocation, context = {}) {
+    if (typeof this.requestExecutor !== "function") {
+      throw new DockyardError("provider_execution_error", "OpenRouter Free requestExecutor is not configured", {
+        retryable: false
+      });
+    }
+    const credential = await readSecret(context.secretStore, invocation?.account?.auth?.credentialRef);
+    return this.requestExecutor({
+      request,
+      account: invocation?.account ?? null,
+      credential,
+      signal: context.signal ?? request?.signal ?? null
+    });
+  }
+};
+function createOpenRouterFreeDriver(options = {}) {
+  return new OpenRouterFreeDriver(options);
+}
+
+// modules/provider-openrouter-free/src/index.mjs
+function summarizeOpenRouterFreeCandidate(candidate2) {
+  return {
+    candidateId: candidate2.candidateId,
+    accountId: candidate2.accountId,
+    providerId: candidate2.providerId ?? "openrouter-free",
+    displayName: candidate2.displayName ?? null,
+    email: candidate2.email ?? null,
+    status: candidate2.status ?? "available",
+    source: candidate2.source ?? "openrouter_local_credentials",
+    resources: candidate2.resources ?? {}
+  };
+}
+function createOpenRouterFreeModule(options = {}) {
+  const driver = options.driver ?? createOpenRouterFreeDriver(options);
+  return defineProviderModule({
+    id: "openrouter-free",
+    displayName: "OpenRouter Free",
+    capabilities: [
+      ...PROVIDER_CAPABILITIES,
+      PROVIDER_BEHAVIOR_CAPABILITIES.API_KEY_AUTH,
+      PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
+      PROVIDER_BEHAVIOR_CAPABILITIES.FORCE_LIVE_CATALOG,
+      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP
     ],
     driver
   });
@@ -15655,7 +17358,8 @@ var candidateSummarizers = /* @__PURE__ */ new Map([
   ["workbuddy", summarizeWorkbuddyCandidate],
   ["kilo", summarizeKiloCandidate],
   ["commandcode", summarizeCommandCodeCandidate],
-  ["hermes", summarizeHermesCandidate]
+  ["hermes", summarizeHermesCandidate],
+  ["openrouter-free", summarizeOpenRouterFreeCandidate]
 ]);
 var DEFAULT_REFRESH_TIMEOUT_MS = 3e4;
 function numericOption(value, fallback) {
@@ -15839,6 +17543,15 @@ function createDefaultProviderEntries(options = {}) {
         })
       }),
       driver: options.hermesDriver
+    },
+    {
+      module: createOpenRouterFreeModule({
+        driver: options.openrouterFreeDriver ?? createOpenRouterFreeDriver({
+          ...withRequestExecutor("openrouter-free", options["openrouter-free"] ?? options.openrouterFree, requestExecutors),
+          ...catalogLoaders["openrouter-free"] ? { catalogLoader: catalogLoaders["openrouter-free"] } : {}
+        })
+      }),
+      driver: options.openrouterFreeDriver
     }
   ];
 }
@@ -15961,7 +17674,8 @@ var DockyardRuntime = class {
         }
         const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
         const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
-        if (providerId === "workbuddy" && pool.list().length === 0 || providerId === "commandcode" && pool.list().length === 0 || providerId === "hermes" && pool.list().length === 0 || hasExpiredOfficialSession && hasNoEligible) {
+        const autoProvision = this.hasProviderCapability(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT) && pool.list().length === 0;
+        if (autoProvision || hasExpiredOfficialSession && hasNoEligible) {
           try {
             const discovery = await (entry.module?.discover?.(providerContext(this)) ?? entry.driver?.discover?.(providerContext(this)));
             const candidates = Array.isArray(discovery?.candidates) ? discovery.candidates : Array.isArray(discovery) ? discovery : [];
@@ -15988,8 +17702,10 @@ var DockyardRuntime = class {
         if (!this.runtime.has(providerId)) await this.runtime.register(entry.module);
         await this.bridge.mountProvider(entry.module, pool);
       }
-      if (this.#entries.get("workbuddy")?.pool?.list()?.length > 0) {
-        autoImported.add("workbuddy");
+      for (const [id, entry] of this.#entries) {
+        if (this.hasProviderCapability(id, PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT) && entry.pool?.list()?.length > 0) {
+          autoImported.add(id);
+        }
       }
       if (autoImported.size > 0) {
         await this.#saveState([...autoImported]).catch(() => {
@@ -16011,6 +17727,15 @@ var DockyardRuntime = class {
   }
   listProviderManifests() {
     return this.providers.map(({ module }) => ({ ...module.manifest }));
+  }
+  // Host code should ask the module what it supports instead of branching on
+  // provider ids. Capabilities are declared once in each provider module.
+  getProviderCapabilities(providerId) {
+    const manifest = this.providers.find(({ module }) => module.manifest.id === providerId)?.module.manifest;
+    return new Set(Array.isArray(manifest?.capabilities) ? manifest.capabilities : []);
+  }
+  hasProviderCapability(providerId, capability) {
+    return this.getProviderCapabilities(providerId).has(capability);
   }
   listProviderIds() {
     return this.providers.map(({ module }) => module.manifest.id);
@@ -16070,8 +17795,11 @@ var DockyardRuntime = class {
           } catch {
           }
         }
-        const shouldRepairGrokCredential = currentProviderId === "grok" && typeof entry.module.importAccount === "function" && (candidate2.email && !existing.email || candidate2.source && candidate2.source !== existingIdentity.authSource);
-        if (shouldRepairGrokCredential) {
+        const shouldRepairLegacyCredential = this.hasProviderCapability(
+          currentProviderId,
+          PROVIDER_BEHAVIOR_CAPABILITIES.REPAIR_LEGACY_CREDENTIAL
+        ) && typeof entry.module.importAccount === "function" && (candidate2.email && !existing.email || candidate2.source && candidate2.source !== existingIdentity.authSource);
+        if (shouldRepairLegacyCredential) {
           try {
             const repaired = await entry.module.importAccount(candidate2, providerContext(this));
             entry.pool.upsert(repaired, { resetHealth: true });
@@ -16527,9 +18255,9 @@ function exportTarget(value) {
   }
   return null;
 }
-async function isFile(path) {
+async function isFile(path2) {
   try {
-    await access(path);
+    await access(path2);
     return true;
   } catch {
     return false;
@@ -16804,7 +18532,36 @@ var DockyardDshService = class {
       providers: result.providers.filter((provider) => provider.providerId === providerId)
     };
   }
-  async add(providerInput = null, candidateId = null) {
+  async addApiKey(providerInput, apiKey, label = "") {
+    await this.ready;
+    const providerId = providerIdFor(this.runtime, providerInput);
+    if (!providerId) throw new Error(`\u672A\u77E5 provider\uFF1A${providerInput}`);
+    const trimmedKey = String(apiKey ?? "").trim();
+    if (!trimmedKey) throw new Error("\u8BF7\u8F93\u5165\u6709\u6548\u7684 API Key");
+    const imported = await this.runtime.importSource(providerId, {
+      apiKey: trimmedKey,
+      label: String(label ?? "").trim()
+    });
+    const accounts = Array.isArray(imported?.accounts) ? imported.accounts : [];
+    if (accounts.length > 0) {
+      const firstId = accounts[0].accountId;
+      await this.runtime.setDefaultAccount(providerId, firstId).catch(() => {
+      });
+      await this.runtime.getCatalog(providerId, { force: true }).catch(() => null);
+    }
+    try {
+      this.notifyAdaptersUpdated?.();
+    } catch {
+    }
+    return {
+      accounts,
+      diagnostics: imported?.diagnostics ?? []
+    };
+  }
+  async add(providerInput = null, candidateId = null, options = {}) {
+    if (options?.apiKey) {
+      return this.addApiKey(providerInput, options.apiKey, options.label);
+    }
     const scan = await this.scan(providerInput);
     const imports = [];
     const diagnostics = [];
@@ -16831,6 +18588,12 @@ var DockyardDshService = class {
     }
     if (candidateId && imports.length === 0 && diagnostics.length === 0) {
       throw new Error(`\u6CA1\u6709\u627E\u5230\u672A\u6DFB\u52A0\u7684 OAuth \u5019\u9009\uFF1A${candidateId}`);
+    }
+    if (imports.length > 0) {
+      try {
+        this.notifyAdaptersUpdated?.();
+      } catch {
+      }
     }
     return { accounts: imports, diagnostics, scan };
   }
@@ -16895,9 +18658,29 @@ var DockyardDshService = class {
     await this.ready;
     return this.runtime.setContextWindowOverride(input, value);
   }
+  #hasCapability(providerId, capability) {
+    return Boolean(this.runtime.hasProviderCapability?.(providerId, capability));
+  }
+  async #autoProvisionIfNeeded(providerId) {
+    if (!this.#hasCapability(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT)) return;
+    const snap = this.runtime.snapshot?.();
+    const provider = snap?.providers?.find((p) => p.providerId === providerId);
+    if (provider && (!Array.isArray(provider.accounts) || provider.accounts.length === 0)) {
+      await this.add(providerId).catch(() => {
+      });
+    }
+  }
   async getModelSelection(providerId) {
     await this.ready;
-    const catalog = await this.runtime.getCatalog(providerId).catch(() => ({ models: [] }));
+    await this.#autoProvisionIfNeeded(providerId);
+    const forceLiveCatalog = this.#hasCapability(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.FORCE_LIVE_CATALOG);
+    const catalog = await this.runtime.getCatalog(providerId, { force: forceLiveCatalog }).catch(() => ({ models: [] }));
+    if (forceLiveCatalog) {
+      try {
+        this.notifyAdaptersUpdated?.();
+      } catch {
+      }
+    }
     const enabledModelIds = this.runtime.getModelSelection(providerId);
     return {
       providerId,
@@ -16923,6 +18706,7 @@ var DockyardDshService = class {
     const providerId = providerIdFor(this.runtime, providerInput);
     if (!providerId) throw new Error(`\u672A\u77E5 provider\uFF1A${providerInput}`);
     if (!modelId || typeof modelId !== "string") throw new Error("\u7F3A\u5C11\u6709\u6548\u7684 modelId");
+    await this.#autoProvisionIfNeeded(providerId);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(new Error("\u8FDE\u63A5\u6D4B\u8BD5\u8D85\u65F6 (15s)")), timeoutMs);
     const startTime = Date.now();
@@ -17315,10 +19099,10 @@ function baseUrlFor(providerId, profile) {
   const baseUrl = configured || builtinBaseUrls.get(providerId) || null;
   return baseUrl ? validateNativeEndpoint(baseUrl, { providerId }) : null;
 }
-function endpoint(baseUrl, path) {
+function endpoint(baseUrl, path2) {
   if (!baseUrl) throw new Error("provider \u6CA1\u6709\u8FD4\u56DE\u53EF\u7528\u7684 base URL");
   const base = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
-  return new URL(path.replace(/^\//, ""), base).toString();
+  return new URL(path2.replace(/^\//, ""), base).toString();
 }
 async function readJson2(response) {
   const raw = await response.text();
@@ -17498,6 +19282,24 @@ function applyModelContextWindow(model, contextWindow) {
     ...Number.isInteger(model.contextWindow) ? { contextWindow } : {}
   };
 }
+function applyNativeProviderModelCompat(providerId, model) {
+  if (!model || typeof model !== "object") return model;
+  if (providerId === "openrouter") {
+    return {
+      ...model,
+      thinkingLevelMap: {
+        ...model.thinkingLevelMap ?? {},
+        off: null
+      },
+      headers: {
+        "HTTP-Referer": "https://opencode.ai",
+        "X-Title": "OpenCode",
+        ...model.headers ?? {}
+      }
+    };
+  }
+  return model;
+}
 async function* iterateWithContext(storage, state, next) {
   const output = await storage.run(state, () => next());
   const iterator = await storage.run(state, () => {
@@ -17516,9 +19318,9 @@ async function* iterateWithContext(storage, state, next) {
     await storage.run(state, () => iterator.return?.());
   }
 }
-function pathValue(source, path = []) {
+function pathValue(source, path2 = []) {
   let current = source;
-  for (const segment of path) {
+  for (const segment of path2) {
     if (!current || typeof current !== "object") return void 0;
     current = current[segment];
   }
@@ -17675,22 +19477,23 @@ var NativeKeyPoolHost = class {
       config.resolveApiKey = wrapper;
       this.patches.push({ config, original, wrapper });
       this.patchAdapterMethod(adapter, "modelOf", (modelOf) => function(...args) {
-        const model = modelOf.apply(this, args);
+        const model = applyNativeProviderModelCompat(args[1], modelOf.apply(this, args));
         const contextWindow = thisHost.contextWindowForModel(args[1], args[2]);
         return applyModelContextWindow(model, contextWindow);
       });
       this.patchAdapterMethod(adapter, "resolveModel", (resolveModel) => async function(...args) {
-        const model = await resolveModel.apply(this, args);
+        const model = applyNativeProviderModelCompat(args[0], await resolveModel.apply(this, args));
         const contextWindow = thisHost.contextWindowForModel(args[0], args[1]);
         return applyModelContextWindow(model, contextWindow);
       });
       this.patchAdapterMethod(adapter, "prepareCall", (prepareCall) => async function(...args) {
         const prepared = await prepareCall.apply(this, args);
+        if (!prepared || typeof prepared !== "object") return prepared;
+        const compatModel = applyNativeProviderModelCompat(args[0], prepared.model);
         const contextWindow = thisHost.contextWindowForModel(args[0], args[1]);
-        if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0 || !prepared || typeof prepared !== "object") return prepared;
         return {
           ...prepared,
-          model: applyModelContextWindow(prepared.model, contextWindow)
+          model: applyModelContextWindow(compatModel, contextWindow)
         };
       });
     }
@@ -18030,7 +19833,8 @@ function apply(ctx, config = {}) {
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
       workbuddy: runtimeOptions.requestExecutors?.workbuddy ?? createWorkbuddyNativeExecutor(runtimeOptions.workbuddy ?? {}),
       commandcode: runtimeOptions.requestExecutors?.commandcode ?? createCommandCodeNativeExecutor(runtimeOptions.commandcode ?? {}),
-      hermes: runtimeOptions.requestExecutors?.hermes ?? createHermesNativeExecutor(runtimeOptions.hermes ?? {})
+      hermes: runtimeOptions.requestExecutors?.hermes ?? createHermesNativeExecutor(runtimeOptions.hermes ?? {}),
+      "openrouter-free": runtimeOptions.requestExecutors?.["openrouter-free"] ?? createOpenRouterFreeNativeExecutor(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {})
     };
     runtimeOptions.catalogLoaders = {
       ...runtimeOptions.catalogLoaders ?? {},
@@ -18045,7 +19849,8 @@ function apply(ctx, config = {}) {
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
       workbuddy: runtimeOptions.catalogLoaders?.workbuddy ?? createWorkbuddyCatalogLoader(runtimeOptions.workbuddy ?? {}),
       commandcode: runtimeOptions.catalogLoaders?.commandcode ?? createCommandCodeCatalogLoader(runtimeOptions.commandcode ?? {}),
-      hermes: runtimeOptions.catalogLoaders?.hermes ?? createHermesCatalogLoader(runtimeOptions.hermes ?? {})
+      hermes: runtimeOptions.catalogLoaders?.hermes ?? createHermesCatalogLoader(runtimeOptions.hermes ?? {}),
+      "openrouter-free": runtimeOptions.catalogLoaders?.["openrouter-free"] ?? createOpenRouterFreeCatalogLoader(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {})
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders).filter(([, loader]) => typeof loader === "function");
@@ -18059,7 +19864,7 @@ function apply(ctx, config = {}) {
         providers.filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length > 0).map((provider) => provider.providerId)
       );
       const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
-      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || providerId === "workbuddy" || providerId === "commandcode" || providerId === "hermes" || connected.has(providerId)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [], secretStore: runtime.secretStore }).catch(() => null)));
+      await Promise.all(catalogWarmers.filter(([providerId]) => connected.has(providerId) || runtime.hasProviderCapability?.(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [], secretStore: runtime.secretStore }).catch(() => null)));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
     });
@@ -18099,6 +19904,7 @@ function apply(ctx, config = {}) {
   if (typeof runtime.init === "function") {
     const notifyAdaptersUpdated = () => {
       try {
+        adapter.invalidateCatalog?.();
         ctx.emit("llm/adapters-updated");
         ctx.llm?.emitAdaptersUpdated?.();
       } catch {

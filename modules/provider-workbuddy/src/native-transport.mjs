@@ -350,12 +350,14 @@ export function createWorkbuddyNativeExecutor({
       ...(uid ? { "X-User-Id": uid } : {}),
     };
 
+    const effort = req.reasoningEffort ?? req.reasoning_effort ?? req.reasoning?.effort;
     const body = {
       model: req.model ?? "deepseek-v4.1-flash",
       messages,
       stream: true,
       ...(typeof req.temperature === "number" ? { temperature: req.temperature } : {}),
       ...(typeof req.maxTokens === "number" ? { max_tokens: req.maxTokens } : {}),
+      ...(effort ? { reasoning_effort: effort, reasoning: { effort } } : {}),
       ...(tools ? { tools } : {}),
     };
 

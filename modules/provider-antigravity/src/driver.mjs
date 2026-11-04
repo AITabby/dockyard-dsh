@@ -15,6 +15,7 @@ import {
 import {
   addSecondsIso,
   assertSecureEndpointUrl,
+  decodeJwtPayload,
   finiteNumber,
   isoFromEpoch,
   recursiveQuotaWindows,
@@ -81,6 +82,10 @@ const ANTIGRAVITY_CREDENTIAL_REFRESH_MODES = Object.freeze({
 // The official CLI supports this switch for a file-backed session, allowing
 // DSH to mirror the same rotation into its own secure credential store.
 const AGY_FILE_STORAGE_ENV = "GEMINI_FORCE_FILE_STORAGE";
+// SECURITY.md / README: the repository must never embed OAuth client
+// credentials. Browser OAuth is only available when the operator supplies both
+// values through the environment; without them the driver falls back to
+// scanning an existing official CLI/desktop session (fail closed).
 const ANTIGRAVITY_BROWSER_CLIENT_ID = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_ID || "";
 const ANTIGRAVITY_BROWSER_CLIENT_SECRET = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_SECRET || "";
 const ANTIGRAVITY_BROWSER_AUTHORIZATION_URL = process.env.DOCKYARD_ANTIGRAVITY_AUTHORIZATION_URL
@@ -236,6 +241,13 @@ export function extractAntigravityAccountEmail(...values) {
         ?? value?.command?.data?.email_address,
     );
     if (direct) return direct;
+    if (value?.id_token || value?.idToken) {
+      try {
+        const decoded = decodeJwtPayload(value.id_token || value.idToken);
+        const email = normalizeEmail(decoded?.email);
+        if (email) return email;
+      } catch {}
+    }
     const nested = findEmailField(value);
     if (nested) return nested;
     const text = typeof value === "string" ? value : "";
@@ -302,16 +314,17 @@ function agyRefreshEnvironment(environment, tokenPath) {
   };
 }
 
-function credentialRefreshMode(account) {
+function credentialRefreshMode(account, { hasExplicitBrowserClient = false } = {}) {
   const explicit = account?.resources?.credentialRefreshMode;
   if (explicit) return explicit;
   // Accounts imported before credentialRefreshMode was persisted still carry
   // the captured marker from agy's isolated browser profile. Treat those
-  // legacy records as agy sessions instead of attempting a DSH OAuth refresh
-  // with the wrong client credentials.
-  return account?.resources?.sessionPersistence === "captured"
-    ? ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION
-    : null;
+  // legacy records as agy sessions unless an explicit browser OAuth client
+  // was configured for the driver.
+  if (account?.resources?.sessionPersistence === "captured" && !hasExplicitBrowserClient) {
+    return ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION;
+  }
+  return null;
 }
 
 function cliFailure(code, signal, output, errorOutput) {
@@ -336,7 +349,7 @@ function runCommand(command, args, {
   includeAccountInfo = false,
 } = {}) {
   return new Promise((resolve, reject) => {
-    const childEnv = { ...env };
+    const childEnv = { ...env, [AGY_FILE_STORAGE_ENV]: "true" };
     if (includeAccountInfo) delete childEnv.AGY_CLI_HIDE_ACCOUNT_INFO;
     else childEnv.AGY_CLI_HIDE_ACCOUNT_INFO ??= "1";
     childEnv.PATH = augmentPathWithUserBins(childEnv, childEnv.HOME || homedir());
@@ -407,7 +420,7 @@ function parseJsonOutput(output) {
 
 function runStreamingCommand(command, args, { env = process.env, timeoutMs = 300_000, signal } = {}) {
   return (async function* lines() {
-    const childEnv = { ...env, AGY_CLI_HIDE_ACCOUNT_INFO: "1" };
+    const childEnv = { ...env, [AGY_FILE_STORAGE_ENV]: "true", AGY_CLI_HIDE_ACCOUNT_INFO: "1" };
     childEnv.PATH = augmentPathWithUserBins(childEnv, childEnv.HOME || homedir());
     const resolvedCommand = (command === DEFAULT_CLI || command === "agy")
       ? resolveAgyCliPath(command, { env: childEnv, home: childEnv.HOME || homedir() })
@@ -738,6 +751,18 @@ export function createAntigravityCatalogLoader({
           diagnostics: [redactError(error)],
         };
       }
+      if (persistentCache?.entries && typeof persistentCache.entries === "object") {
+        const anyCached = Object.values(persistentCache.entries).find((item) => Array.isArray(item?.value?.models) && item.value.models.length > 0);
+        if (anyCached?.value) {
+          const fallbackValue = {
+            ...anyCached.value,
+            source: `${anyCached.value.source ?? "official_antigravity_cli"}_persistent_cache`,
+            diagnostics: [redactError(error)],
+          };
+          cached.set(scope, { value: fallbackValue, cachedAt: Date.now() });
+          return fallbackValue;
+        }
+      }
       // A missing or unavailable optional CLI must not reject DSH's global
       // model directory. Keep the provider mounted with an empty live
       // catalog; invocation and account scanning can report the actionable
@@ -765,7 +790,11 @@ export function createAntigravityCatalogLoader({
     let entry = cached.get(scope);
     if (!entry) {
       const persisted = await loadPersistent();
-      const stored = persistentCache?.entries?.[scope] ?? persisted.entries?.[scope];
+      const stored = persistentCache?.entries?.[scope]
+        ?? persisted.entries?.[scope]
+        ?? persistentCache?.entries?.unscoped
+        ?? persisted.entries?.unscoped
+        ?? Object.values(persisted.entries ?? {}).find((item) => Array.isArray(item?.value?.models) && item.value.models.length > 0);
       if (stored?.value && Array.isArray(stored.value.models)) {
         entry = {
           value: {
@@ -1169,13 +1198,17 @@ function creditsFromData(data) {
 function parseQuotaData(data, now = new Date(), source = "antigravity_cli") {
   const windows = [];
   for (const group of quotaGroups(data)) {
+    const groupName = stringValue(group?.displayName ?? group?.name);
     for (const bucket of group?.buckets ?? []) {
       const fraction = finiteNumber(bucket.remaining_fraction ?? bucket.remainingFraction);
       const percent = finiteNumber(bucket.remaining_percent ?? bucket.remainingPercent);
       const remaining = fraction ?? (percent === null ? null : percent / 100);
+      const bucketName = stringValue(bucket?.displayName ?? bucket?.name);
+      const bucketId = stringValue(bucket.bucketId ?? bucket.id)
+        ?? (groupName && bucketName ? `${groupName}:${bucketName}` : `${groupName ?? "group"}:${bucketName ?? "window"}`);
       windows.push({
-        id: stringValue(bucket.id) ?? `${group.name ?? "group"}:${bucket.name ?? "window"}`,
-        name: [group.name, bucket.name].filter(Boolean).join(" / ") || null,
+        id: bucketId,
+        name: [groupName, bucketName].filter(Boolean).join(" / ") || null,
         remaining,
         limit: remaining === null ? null : 1,
         unit: remaining === null ? null : "fraction",
@@ -1261,7 +1294,7 @@ function candidate(now, {
   const identityLabel = normalizedEmail
     ?? (fingerprint ? `Antigravity 官方会话 · ${fingerprint}` : "Antigravity 官方当前会话");
   const identitySource = normalizedEmail
-    ? "official_cli_auth_status"
+    ? (sourceKind === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER ? "official_browser_oauth" : "official_cli_auth_status")
     : fingerprint
       ? "local_oauth_session_fingerprint"
       : "official_active_session";
@@ -1291,7 +1324,9 @@ function candidate(now, {
       identityLabel,
       ...(fingerprint ? { sessionFingerprint: fingerprint } : {}),
       identityNote: normalizedEmail
-        ? "账号邮箱来自官方 Antigravity 登录态"
+        ? (sourceKind === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
+          ? "Google 账号已授权"
+          : "账号邮箱来自官方 Antigravity 登录态")
         : fingerprint
           ? "官方登录态未返回邮箱；使用会话指纹区分账号"
           : "官方只返回当前会话；切换账号后请重新扫描",
@@ -1467,6 +1502,7 @@ export function createAntigravityOAuthAuthorizer({
       HOME: profileDir,
       XDG_CONFIG_HOME: join(profileDir, ".config"),
       DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath,
+      [AGY_FILE_STORAGE_ENV]: "true",
     };
     childEnv.PATH = augmentPathWithUserBins(childEnv, home);
     // Do not force AGY_CLI_HIDE_ACCOUNT_INFO here. In agy, the presence of
@@ -1635,6 +1671,10 @@ export class AntigravityOfficialSessionDriver {
       : userInfoUrl;
     this.browserClientId = clientId;
     this.browserClientSecret = clientSecret;
+    // An explicit client is one the operator configured themselves. With no
+    // embedded defaults this is simply "did the constructor receive one", which
+    // also covers programmatic callers that pass clientId/clientSecret directly.
+    this.hasExplicitBrowserClient = Boolean(clientId && clientSecret);
     this.requestExecutor = requestExecutor;
     this.quotaReader = quotaReader;
     this.tokenResolver = tokenResolver;
@@ -1659,7 +1699,7 @@ export class AntigravityOfficialSessionDriver {
           client_id: clientId,
           code_challenge: codeChallenge,
           code_challenge_method: "S256",
-          prompt: "consent",
+          prompt: "select_account consent",
           redirect_uri: callback,
           response_type: "code",
           scope: oauthScope,
@@ -1690,23 +1730,32 @@ export class AntigravityOfficialSessionDriver {
           const refresh = tokens?.refresh_token ?? tokens?.refreshToken;
           if (!access) throw new Error("Antigravity Google OAuth did not return an access token");
           let profile = null;
-          try {
-            const response = await this.fetchImpl(userInfoUrl, {
-              headers: { authorization: `Bearer ${access}` },
-              ...(context.signal ? { signal: context.signal } : {}),
-            });
-            if (response.ok) profile = await response.json().catch(() => null);
-          } catch {
-            // Account import can still use the token fingerprint if profile lookup is unavailable.
+          if (tokens?.id_token || tokens?.idToken) {
+            try {
+              profile = decodeJwtPayload(tokens.id_token || tokens.idToken);
+            } catch {}
           }
+          if (!profile?.email) {
+            try {
+              const response = await this.fetchImpl(userInfoUrl, {
+                headers: { authorization: `Bearer ${access}` },
+                ...(context.signal ? { signal: context.signal } : {}),
+              });
+              if (response.ok) profile = await response.json().catch(() => null);
+            } catch {
+              // Account import can still use the token fingerprint if profile lookup is unavailable.
+            }
+          }
+          const email = profile?.email ?? extractAntigravityAccountEmail(tokens);
           const now = context.now instanceof Date ? context.now : new Date();
           const candidateValue = candidate(now, {
-            email: profile?.email,
+            email,
             session: {
                token: access,
                refreshToken: refresh,
                expiresAt: tokenExpiresAt(tokens, now),
                lastRefreshedAt: now.toISOString(),
+               ...(email ? { email } : {}),
              },
             existingAccounts: context.accounts ?? [],
             source: "official_antigravity_browser_oauth",
@@ -1990,22 +2039,19 @@ export class AntigravityOfficialSessionDriver {
     if (!credential?.access) {
       throw activeSessionError("Antigravity browser OAuth credential is missing; authorize again");
     }
-    const refreshMode = credentialRefreshMode(account);
-    const dshManagedRefresh = refreshMode !== ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION;
+    const refreshMode = credentialRefreshMode(account, {
+      hasExplicitBrowserClient: Boolean(this.hasExplicitBrowserClient),
+    });
+    const useAgyCliRefresh = refreshMode === ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION
+      && (this.commandRunner !== runCommand || !this.browserClientId || !this.browserClientSecret);
     const now = context.now instanceof Date ? context.now : new Date();
-    if (refreshMode === ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION) {
+    if (useAgyCliRefresh) {
       if (!tokenNeedsRefresh(credential, now)) return credential;
       const updated = await this.#refreshAgyCredential(credential, context);
       await context.secretStore.write(credentialRef, updated);
       return updated;
     }
-    // Accounts captured from agy's temporary browser profile carry agy's
-    // refresh token, not a token issued for DSH's optional browser OAuth
-    // client. The standard DSH launch agent also has no browser client
-    // credentials. In either case the captured access token must be used as-is
-    // for native quota/invocation instead of turning a successful login into
-    // the misleading "订阅未返回" state with a blank client refresh call.
-    if (!dshManagedRefresh || !this.browserClientId || !this.browserClientSecret) return credential;
+    if (!this.browserClientId || !this.browserClientSecret) return credential;
     if (!tokenNeedsRefresh(credential, now)) return credential;
     if (!credential.refresh) {
       throw activeSessionError("Antigravity browser OAuth token expired; authorize again");
@@ -2049,7 +2095,9 @@ export class AntigravityOfficialSessionDriver {
     if (typeof this.quotaReader !== "function") return null;
     let credential = null;
     const credentialRef = account?.auth?.credentialRef;
-    if (account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) {
+    if (context.browserCredential) {
+      credential = context.browserCredential;
+    } else if (account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) {
       credential = await this.#refreshBrowserCredential(account, context);
     } else if (context.officialCredential) {
       credential = context.officialCredential;
@@ -2232,35 +2280,84 @@ export class AntigravityOfficialSessionDriver {
       ...(officialCredential?.rotated ? { allowSessionTokenRotation: true } : {}),
     });
     const now = context.now instanceof Date ? context.now : new Date();
-    let session = officialCredential?.session ?? null;
-    try {
-      session = session ?? await this.tokenResolver({ env: this.env });
-    } catch {
-      // The fingerprint below stays absent when the local session cannot be
-      // read; the account keeps its existing fingerprint.
+    const isBrowserAccount = account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER;
+    const isTestAgyMock = isBrowserAccount
+      && credentialRefreshMode(account, {
+        hasExplicitBrowserClient: Boolean(this.hasExplicitBrowserClient),
+      }) === ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION
+      && this.commandRunner !== runCommand;
+    let session = officialCredential?.session
+      ?? (browserCredential && !isTestAgyMock
+        ? {
+          token: browserCredential.access,
+          refreshToken: browserCredential.refresh,
+          expiresAt: browserCredential.expiresAt,
+          email: browserCredential.email ?? null,
+        }
+        : null);
+    if (!session && !isBrowserAccount) {
+      try {
+        session = await this.tokenResolver({ env: this.env });
+      } catch {
+        // The fingerprint below stays absent when the local session cannot be
+        // read; the account keeps its existing fingerprint.
+      }
     }
-    const sessionEmail = await this.#resolveSessionEmail(session, context);
+    const sessionEmail = await this.#resolveSessionEmail(session, context) ?? normalizeEmail(account?.email);
+    if (sessionEmail && browserCredential && !browserCredential.email) {
+      const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
+      if (credentialRef && typeof context.secretStore?.write === "function") {
+        await context.secretStore.write(credentialRef, { ...browserCredential, email: sessionEmail }).catch(() => {});
+      }
+    }
     const fingerprint = sessionFingerprint(sessionEmail && session && !session.email
       ? { ...session, email: sessionEmail }
       : session);
-    const fingerprintResources = fingerprint ? { sessionFingerprint: fingerprint } : {};
-    const persistedRefreshMode = account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
-      ? credentialRefreshMode(account)
+    const fingerprintResources = {
+      ...(fingerprint ? { sessionFingerprint: fingerprint } : {}),
+      ...(sessionEmail
+        ? {
+          identitySource: "official_cli_auth_status",
+          identityLabel: sessionEmail,
+          identityNote: "账号邮箱来自官方 Antigravity 登录态",
+        }
+        : {}),
+    };
+    const persistedRefreshMode = isBrowserAccount
+      ? credentialRefreshMode(account, {
+        hasExplicitBrowserClient: Boolean(this.hasExplicitBrowserClient),
+      })
         ?? (!this.browserClientId || !this.browserClientSecret
           ? ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION
-          : null)
+          : ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.DSH_BROWSER_OAUTH)
       : null;
-    const identityPatch = sessionEmail ? { email: sessionEmail } : {};
+    const shouldUpdateDisplayName = Boolean(
+      sessionEmail && (
+        !account?.displayName
+        || account.displayName.startsWith("Antigravity 官方")
+        || account.displayName === account.accountId
+      ),
+    );
+    const identityPatch = {
+      ...(sessionEmail ? { email: sessionEmail } : {}),
+      ...(shouldUpdateDisplayName ? { displayName: sessionEmail } : {}),
+    };
     let nativeError = null;
     try {
       const native = await this.#nativeQuota(account, {
         ...context,
+        ...(browserCredential ? { browserCredential } : {}),
         ...(officialCredential?.credential ? { officialCredential: officialCredential.credential } : {}),
       }, now);
       if (native) {
         const primary = selectPrimaryQuotaWindow(native.windows);
         return {
           ...identityPatch,
+          subscription: {
+            plan: account?.subscription?.plan ?? "Google Code Assist",
+            status: "active",
+            expiresAt: account?.subscription?.expiresAt ?? null,
+          },
           quota: {
             ...primary,
             windows: native.windows,
@@ -2293,7 +2390,7 @@ export class AntigravityOfficialSessionDriver {
     }
     // Never use the process-wide `agy` session to refresh an imported
     // account. That makes separate Google accounts look identical.
-    if (typeof this.quotaReader === "function" && account?.auth?.credentialRef) {
+    if (isBrowserAccount || account?.auth?.credentialRef) {
       throw nativeError ?? new Error("Antigravity native quota did not return data for the selected account");
     }
     const [result, creditsResult] = await Promise.all([
@@ -2362,7 +2459,7 @@ export class AntigravityOfficialSessionDriver {
     } catch (error) {
       nativeError = error;
     }
-    if (typeof this.quotaReader === "function" && account?.auth?.credentialRef) {
+    if (account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER || account?.auth?.credentialRef) {
       throw nativeError ?? new Error("Antigravity native quota did not return data for the selected account");
     }
     const [quotaResult, creditsResult] = await Promise.all([

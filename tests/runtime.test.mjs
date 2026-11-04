@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { ACCOUNT_SELECTION_POLICY, ModuleRuntime } from "../packages/core/src/index.mjs";
+import { ACCOUNT_SELECTION_POLICY, ModuleRuntime, PROVIDER_BEHAVIOR_CAPABILITIES } from "../packages/core/src/index.mjs";
 import { MemorySecretStore } from "../packages/vault/src/index.mjs";
 import { JsonStateStore } from "../packages/runtime/src/state-store.mjs";
 import { DockyardRuntime } from "../packages/runtime/src/dockyard-runtime.mjs";
@@ -178,7 +178,12 @@ test("runtime repairs a Grok account from the durable local OAuth source", async
       },
     });
     const module = {
-      manifest: { id: "grok", kind: "provider", displayName: "Grok" },
+      manifest: {
+        id: "grok",
+        kind: "provider",
+        displayName: "Grok",
+        capabilities: [PROVIDER_BEHAVIOR_CAPABILITIES.REPAIR_LEGACY_CREDENTIAL],
+      },
       async activate(context) { context.registerService("provider:grok", this); },
       async discover() {
         return {
@@ -222,6 +227,60 @@ test("runtime repairs a Grok account from the durable local OAuth source", async
     assert.equal(account.email, "grok@example.test");
     assert.equal(account.resources.authSource, "official_grok_oauth");
     assert.equal((await secretStore.read("keychain://grok-account")).access, "fresh-grok-token");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("runtime only repairs legacy credentials for providers that declare the capability", async () => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-runtime-capability-repair-"));
+  const secretStore = new MemorySecretStore();
+  let imports = 0;
+  try {
+    const stateStore = new JsonStateStore({ home });
+    await stateStore.save({
+      pools: {
+        "no-repair": {
+          accounts: [{
+            providerId: "no-repair",
+            accountId: "acct",
+            auth: { kind: "oauth", credentialRef: "keychain://acct", scopes: [] },
+            email: null,
+            resources: { authSource: "legacy" },
+          }],
+        },
+      },
+    });
+    const module = {
+      manifest: { id: "no-repair", kind: "provider", displayName: "No repair", capabilities: [] },
+      async activate(context) { context.registerService("provider:no-repair", this); },
+      async discover() {
+        return { candidates: [{
+          providerId: "no-repair",
+          candidateId: "no-repair:candidate",
+          source: "fresh",
+          accountId: "acct",
+          email: "new@example.test",
+          resources: { authSource: "fresh" },
+        }] };
+      },
+      async importAccount(candidate) {
+        imports += 1;
+        return { providerId: "no-repair", accountId: candidate.accountId, email: candidate.email, resources: candidate.resources };
+      },
+      async refreshAccount() { return {}; },
+      async getQuota() { return {}; },
+      async getCatalog() { return { models: [] }; },
+      async invoke() { return {}; },
+    };
+    const runtime = new DockyardRuntime({
+      providers: [{ module }],
+      runtime: new ModuleRuntime({ logger: { error() {}, warn() {}, info() {} } }),
+      stateStore,
+      secretStore,
+    });
+    await runtime.scan("no-repair");
+    assert.equal(imports, 0, "a provider without repair_legacy_credential must not be repaired");
   } finally {
     await rm(home, { recursive: true, force: true });
   }

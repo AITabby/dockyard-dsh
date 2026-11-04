@@ -1,10 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { patchConversationSource, patchPiAiSource } from "../scripts/patch-dsh-latency.mjs";
 
+function resolveSourceFile(relativeSubpath) {
+  const candidates = [
+    new URL(`../node_modules/${relativeSubpath}`, import.meta.url),
+    new URL(`../packages/dsh-plugin/node_modules/${relativeSubpath}`, import.meta.url),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return candidates[0];
+}
+
 test("third-party adapter starts API-key and context work together", async () => {
-  const file = new URL("../node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js", import.meta.url);
+  const file = resolveSourceFile("@deepseek-ai/dsh-llm-pi-ai/lib/index.js");
   const source = await readFile(file, "utf8");
   const patched = patchPiAiSource(source);
 
@@ -15,7 +29,7 @@ test("third-party adapter starts API-key and context work together", async () =>
 });
 
 test("conversation clock is visible before the first provider event", async () => {
-  const file = new URL("../node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js", import.meta.url);
+  const file = resolveSourceFile("@deepseek-ai/dsh-client-ui-conversation/lib/client.js");
   const source = await readFile(file, "utf8");
   const patched = patchConversationSource(source);
 

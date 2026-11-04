@@ -53,7 +53,14 @@ export class DockyardRemoteService extends TypertRemoteService {
   }
 
   async add(request = {}) {
-    const result = await this.dockyard.add(request?.providerId ?? null, request?.candidateId ?? null);
+    const result = await this.dockyard.add(
+      request?.providerId ?? null,
+      request?.candidateId ?? null,
+      {
+        apiKey: request?.apiKey ?? null,
+        label: request?.label ?? "",
+      },
+    );
     return envelope(result, await this.dockyard.snapshot());
   }
 

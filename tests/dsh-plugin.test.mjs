@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 
 import { apply } from "../packages/dsh-plugin/src/index.mjs";
 
@@ -147,4 +148,16 @@ test("model menu groups stay expanded by default and keep checked model visible"
   } finally {
     globalThis.document = prevDoc;
   }
+});
+
+test("root install entry and published subpackage declare the same dependencies and client injects", () => {
+  // GitHub installs use the root package.json; npm installs use
+  // packages/dsh-plugin/package.json. If their dependency versions or
+  // dsh.client.inject lists drift, the two install paths behave differently.
+  const root = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const published = JSON.parse(readFileSync(new URL("../packages/dsh-plugin/package.json", import.meta.url), "utf8"));
+
+  assert.deepEqual(root.dependencies, published.dependencies);
+  assert.deepEqual(root.dsh.client.inject, published.dsh.client.inject);
+  assert.equal(root.version, published.version);
 });

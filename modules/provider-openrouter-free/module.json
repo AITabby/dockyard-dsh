@@ -1,0 +1,16 @@
+{
+  "id": "openrouter-free",
+  "kind": "provider",
+  "dataSource": "live_catalog",
+  "capabilities": [
+    "oauth_discovery",
+    "oauth_import",
+    "oauth_authorization",
+    "oauth_refresh",
+    "quota",
+    "catalog",
+    "invoke",
+    "stream",
+    "api_key_auth"
+  ]
+}

@@ -27,6 +27,18 @@ export const PROVIDER_CAPABILITIES = Object.freeze([
   "stream",
 ]);
 
+// Host-behavior switches. A host must consult these through the runtime
+// (`runtime.hasProviderCapability`) instead of branching on provider ids.
+// Declaring them on the module keeps host code provider-neutral when a new
+// provider with the same behavior is added.
+export const PROVIDER_BEHAVIOR_CAPABILITIES = Object.freeze({
+  AUTO_PROVISION_FREE_ACCOUNT: "auto_provision_free_account",
+  FORCE_LIVE_CATALOG: "force_live_catalog",
+  CATALOG_WARMUP: "catalog_warmup",
+  API_KEY_AUTH: "api_key_auth",
+  REPAIR_LEGACY_CREDENTIAL: "repair_legacy_credential",
+});
+
 function isoOrNull(value, fieldName) {
   if (value === undefined || value === null || value === "") return null;
   const date = value instanceof Date ? value : new Date(value);

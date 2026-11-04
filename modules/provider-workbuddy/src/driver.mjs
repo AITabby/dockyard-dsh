@@ -25,6 +25,36 @@ const PROVIDER_ID = "workbuddy";
 
 export const BUILTIN_WORKBUDDY_FREE_MODELS = Object.freeze([
   {
+    id: "hy4free",
+    name: "Hy4 (WorkBuddy Free)",
+    contextWindow: 1000000,
+    maxTokens: 64000,
+    reasoning: {
+      efforts: [
+        { id: "minimal", name: "Minimal" },
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" },
+      ],
+      defaultEffort: "high",
+    },
+  },
+  {
+    id: "hy4",
+    name: "Hy4 (WorkBuddy Free)",
+    contextWindow: 1000000,
+    maxTokens: 64000,
+    reasoning: {
+      efforts: [
+        { id: "minimal", name: "Minimal" },
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" },
+      ],
+      defaultEffort: "high",
+    },
+  },
+  {
     id: "deepseek-v4.1-flash",
     name: "DeepSeek v4.1 Flash (WorkBuddy Free)",
     contextWindow: 1000000,

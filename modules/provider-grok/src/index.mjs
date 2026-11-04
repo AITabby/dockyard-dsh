@@ -1,4 +1,5 @@
 import { defineProviderModule } from "../../../packages/core/src/provider-module.mjs";
+import { PROVIDER_BEHAVIOR_CAPABILITIES } from "../../../packages/core/src/contracts.mjs";
 
 export function createGrokModule({ driver = {} } = {}) {
   return defineProviderModule({
@@ -13,6 +14,7 @@ export function createGrokModule({ driver = {} } = {}) {
       "catalog",
       "invoke",
       "stream",
+      PROVIDER_BEHAVIOR_CAPABILITIES.REPAIR_LEGACY_CREDENTIAL,
     ],
     driver,
   });

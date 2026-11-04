@@ -108,4 +108,18 @@ test("market/index.json conforms strictly to DSH plugin market format 1", async 
 
   const target = marketInstallTarget(dockyard.name, defaultVersion);
   assert.ok(target.spec.startsWith("git+https://github.com/AITabby/dockyard-dsh.git#"));
+
+  // Regression: v0.1.17 accidentally pointed 0.1.16 and 0.1.17 at the same
+  // pre-release commit, so installing from the market silently fetched old
+  // code. Every version must pin a distinct commit of its own.
+  const seenCommits = new Set();
+  for (const version of dockyard.versions) {
+    const commit = version.source.commit;
+    assert.match(commit, COMMIT_RE);
+    assert.ok(
+      !seenCommits.has(commit),
+      `version ${version.version} reuses commit ${commit} already used by another version`,
+    );
+    seenCommits.add(commit);
+  }
 });

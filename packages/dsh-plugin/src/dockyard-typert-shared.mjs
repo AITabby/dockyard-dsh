@@ -32,6 +32,8 @@ const authorizationCodeRequest = z.object({
 const addRequest = z.object({
   providerId: z.string().min(1),
   candidateId: z.string().min(1).optional(),
+  apiKey: z.string().min(1).optional(),
+  label: z.string().max(120).optional(),
 });
 
 const policyRequest = z.object({

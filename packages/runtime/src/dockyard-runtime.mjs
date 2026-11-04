@@ -1,4 +1,4 @@
-import { ACCOUNT_HEALTH, ACCOUNT_SELECTION_POLICY, ModuleRuntime } from "../../core/src/index.mjs";
+import { ACCOUNT_HEALTH, ACCOUNT_SELECTION_POLICY, ModuleRuntime, PROVIDER_BEHAVIOR_CAPABILITIES } from "../../core/src/index.mjs";
 import { AccountPool } from "../../account-pool/src/index.mjs";
 import { DshInjectionBridge } from "../../dsh-bridge/src/index.mjs";
 import { createDefaultSecretStore } from "../../vault/src/index.mjs";
@@ -27,6 +27,11 @@ import {
   createHermesModule,
   summarizeHermesCandidate,
 } from "../../../modules/provider-hermes/src/index.mjs";
+import {
+  createOpenRouterFreeDriver,
+  createOpenRouterFreeModule,
+  summarizeOpenRouterFreeCandidate,
+} from "../../../modules/provider-openrouter-free/src/index.mjs";
 import { redactError } from "../../providers/src/provider-utils.mjs";
 
 const candidateSummarizers = new Map([
@@ -40,6 +45,7 @@ const candidateSummarizers = new Map([
   ["kilo", summarizeKiloCandidate],
   ["commandcode", summarizeCommandCodeCandidate],
   ["hermes", summarizeHermesCandidate],
+  ["openrouter-free", summarizeOpenRouterFreeCandidate],
 ]);
 
 // Official provider CLIs may need a network round-trip to rotate OAuth
@@ -267,6 +273,15 @@ export function createDefaultProviderEntries(options = {}) {
       }),
       driver: options.hermesDriver,
     },
+    {
+      module: createOpenRouterFreeModule({
+        driver: options.openrouterFreeDriver ?? createOpenRouterFreeDriver({
+          ...withRequestExecutor("openrouter-free", options["openrouter-free"] ?? options.openrouterFree, requestExecutors),
+          ...(catalogLoaders["openrouter-free"] ? { catalogLoader: catalogLoaders["openrouter-free"] } : {}),
+        }),
+      }),
+      driver: options.openrouterFreeDriver,
+    },
   ];
 }
 
@@ -393,7 +408,9 @@ export class DockyardRuntime {
         }
         const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
         const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
-        if ((providerId === "workbuddy" && pool.list().length === 0) || (providerId === "commandcode" && pool.list().length === 0) || (providerId === "hermes" && pool.list().length === 0) || (hasExpiredOfficialSession && hasNoEligible)) {
+        const autoProvision = this.hasProviderCapability(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT)
+          && pool.list().length === 0;
+        if (autoProvision || (hasExpiredOfficialSession && hasNoEligible)) {
           try {
             const discovery = await (entry.module?.discover?.(providerContext(this)) ?? entry.driver?.discover?.(providerContext(this)));
             const candidates = Array.isArray(discovery?.candidates)
@@ -430,8 +447,14 @@ export class DockyardRuntime {
         if (!this.runtime.has(providerId)) await this.runtime.register(entry.module);
         await this.bridge.mountProvider(entry.module, pool);
       }
-      if (this.#entries.get("workbuddy")?.pool?.list()?.length > 0) {
-        autoImported.add("workbuddy");
+      // Free/zero-config providers start with an auto-provisioned account; make
+      // sure that initial state is persisted even when no new import happened
+      // during this boot. The set of such providers is declared, not hardcoded.
+      for (const [id, entry] of this.#entries) {
+        if (this.hasProviderCapability(id, PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT)
+          && entry.pool?.list()?.length > 0) {
+          autoImported.add(id);
+        }
       }
       if (autoImported.size > 0) {
         await this.#saveState([...autoImported]).catch(() => {});
@@ -454,6 +477,17 @@ export class DockyardRuntime {
 
   listProviderManifests() {
     return this.providers.map(({ module }) => ({ ...module.manifest }));
+  }
+
+  // Host code should ask the module what it supports instead of branching on
+  // provider ids. Capabilities are declared once in each provider module.
+  getProviderCapabilities(providerId) {
+    const manifest = this.providers.find(({ module }) => module.manifest.id === providerId)?.module.manifest;
+    return new Set(Array.isArray(manifest?.capabilities) ? manifest.capabilities : []);
+  }
+
+  hasProviderCapability(providerId, capability) {
+    return this.getProviderCapabilities(providerId).has(capability);
   }
 
   listProviderIds() {
@@ -545,11 +579,14 @@ export class DockyardRuntime {
         // (or without email metadata) from that source during discovery;
         // otherwise the UI can show a UUID while quota requests keep using a
         // stale Keychain credential.
-        const shouldRepairGrokCredential = currentProviderId === "grok"
+        const shouldRepairLegacyCredential = this.hasProviderCapability(
+          currentProviderId,
+          PROVIDER_BEHAVIOR_CAPABILITIES.REPAIR_LEGACY_CREDENTIAL,
+        )
           && typeof entry.module.importAccount === "function"
           && ((candidate.email && !existing.email)
             || (candidate.source && candidate.source !== existingIdentity.authSource));
-        if (shouldRepairGrokCredential) {
+        if (shouldRepairLegacyCredential) {
           try {
             const repaired = await entry.module.importAccount(candidate, providerContext(this));
             entry.pool.upsert(repaired, { resetHealth: true });

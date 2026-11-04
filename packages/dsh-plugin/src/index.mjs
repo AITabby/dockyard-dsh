@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { PROVIDER_BEHAVIOR_CAPABILITIES } from "../../core/src/contracts.mjs";
 import { createDefaultProviderEntries, DockyardRuntime } from "../../runtime/src/dockyard-runtime.mjs";
 import { createDockyardLlmAdapter, defaultCatalogCachePath } from "../../dsh-bridge/src/index.mjs";
 import {
@@ -14,6 +15,7 @@ import { createCursorCatalogLoader, createCursorNativeExecutor } from "../../../
 import { createWorkbuddyCatalogLoader, createWorkbuddyNativeExecutor } from "../../../modules/provider-workbuddy/src/index.mjs";
 import { createCommandCodeCatalogLoader, createCommandCodeNativeExecutor } from "../../../modules/provider-commandcode/src/index.mjs";
 import { createHermesCatalogLoader, createHermesNativeExecutor } from "../../../modules/provider-hermes/src/index.mjs";
+import { createOpenRouterFreeCatalogLoader, createOpenRouterFreeNativeExecutor } from "../../../modules/provider-openrouter-free/src/index.mjs";
 import { runCliCommand } from "../../providers/src/cli-agent-transport.mjs";
 import {
   createCodexDshCatalogLoader,
@@ -81,6 +83,7 @@ export function apply(ctx, config = {}) {
       workbuddy: runtimeOptions.requestExecutors?.workbuddy ?? createWorkbuddyNativeExecutor(runtimeOptions.workbuddy ?? {}),
       commandcode: runtimeOptions.requestExecutors?.commandcode ?? createCommandCodeNativeExecutor(runtimeOptions.commandcode ?? {}),
       hermes: runtimeOptions.requestExecutors?.hermes ?? createHermesNativeExecutor(runtimeOptions.hermes ?? {}),
+      "openrouter-free": runtimeOptions.requestExecutors?.["openrouter-free"] ?? createOpenRouterFreeNativeExecutor(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {}),
     };
     runtimeOptions.catalogLoaders = {
       ...(runtimeOptions.catalogLoaders ?? {}),
@@ -96,6 +99,7 @@ export function apply(ctx, config = {}) {
       workbuddy: runtimeOptions.catalogLoaders?.workbuddy ?? createWorkbuddyCatalogLoader(runtimeOptions.workbuddy ?? {}),
       commandcode: runtimeOptions.catalogLoaders?.commandcode ?? createCommandCodeCatalogLoader(runtimeOptions.commandcode ?? {}),
       hermes: runtimeOptions.catalogLoaders?.hermes ?? createHermesCatalogLoader(runtimeOptions.hermes ?? {}),
+      "openrouter-free": runtimeOptions.catalogLoaders?.["openrouter-free"] ?? createOpenRouterFreeCatalogLoader(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {}),
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders)
@@ -117,7 +121,8 @@ export function apply(ctx, config = {}) {
       );
       const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
       await Promise.all(catalogWarmers
-        .filter(([providerId]) => providerId === "openai-codex" || providerId === "workbuddy" || providerId === "commandcode" || providerId === "hermes" || connected.has(providerId))
+        .filter(([providerId]) => connected.has(providerId)
+          || runtime.hasProviderCapability?.(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP))
         .map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [], secretStore: runtime.secretStore }).catch(() => null)));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
@@ -162,6 +167,7 @@ export function apply(ctx, config = {}) {
   if (typeof runtime.init === "function") {
     const notifyAdaptersUpdated = () => {
       try {
+        adapter.invalidateCatalog?.();
         ctx.emit("llm/adapters-updated");
         ctx.llm?.emitAdaptersUpdated?.();
       } catch {}

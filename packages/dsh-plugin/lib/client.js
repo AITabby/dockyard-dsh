@@ -15445,7 +15445,9 @@ var authorizationCodeRequest = external_exports.object({
 });
 var addRequest = external_exports.object({
   providerId: external_exports.string().min(1),
-  candidateId: external_exports.string().min(1).optional()
+  candidateId: external_exports.string().min(1).optional(),
+  apiKey: external_exports.string().min(1).optional(),
+  label: external_exports.string().max(120).optional()
 });
 var policyRequest = external_exports.object({
   providerId: external_exports.string().min(1),
@@ -16840,6 +16842,7 @@ function providerDisplayName(providerId, manifest, t) {
   if (providerId === "minimax" || providerId === "minimax-cn") return "MiniMax";
   if (providerId === "deepseek" || providerId === "deepseek-official") return "DeepSeek";
   if (providerId === "openrouter") return "OpenRouter";
+  if (providerId === "openrouter-free") return "OpenRouter Free";
   return manifest?.displayName ?? providerId ?? text(t, "value.provider");
 }
 function displayModelId(providerId, modelId) {
@@ -16970,7 +16973,8 @@ var DockyardClientController = class {
       error: null,
       message: null,
       scan: null,
-      auth: null
+      auth: null,
+      catalogRevision: 0
     }));
     __publicField(this, "snapshotPromise", null);
     __publicField(this, "refreshPromises", /* @__PURE__ */ new Map());
@@ -17065,7 +17069,8 @@ var DockyardClientController = class {
       try {
         const value = await this.call("refresh", { providerId });
         const result = this.applyValue(value, providerId);
-        this.setState({ message: refreshResultMessage(result, this.t) });
+        const rev = (this.store.getSnapshot().catalogRevision ?? 0) + 1;
+        this.setState({ message: refreshResultMessage(result, this.t), catalogRevision: rev });
         return result;
       } catch (error51) {
         this.setState({ action: null, status: "error", providerId, error: errorText(error51, this.t) });
@@ -17129,7 +17134,37 @@ var DockyardClientController = class {
       const count = result?.accounts?.length ?? 0;
       const discovery = await this.refreshDiscovery(providerId);
       const scanNotice = discovery.error ? text(this.t, "status.discoveryRefreshFailed", { error: discovery.error }) : null;
-      this.setState({ message: scanNotice ?? (count ? text(this.t, "status.accountAdded", { count }) : text(this.t, "status.noNewOAuthCandidates")) });
+      const rev = (this.store.getSnapshot().catalogRevision ?? 0) + 1;
+      this.setState({
+        catalogRevision: rev,
+        message: scanNotice ?? (count ? text(this.t, "status.accountAdded", { count }) : text(this.t, "status.noNewOAuthCandidates"))
+      });
+      return result;
+    } catch (error51) {
+      this.setState({ action: null, status: "error", providerId, error: errorText(error51, this.t) });
+      return null;
+    }
+  }
+  async addApiKey(providerId, apiKey, label = "") {
+    const trimmed = String(apiKey ?? "").trim();
+    if (!trimmed) {
+      this.setState({ error: text(this.t, "native.error.enterApiKey") });
+      return null;
+    }
+    this.setState({ action: "add", status: "loading", providerId, error: null, message: null });
+    try {
+      const value = await this.call("add", {
+        providerId,
+        apiKey: trimmed,
+        ...label && String(label).trim() ? { label: String(label).trim() } : {}
+      });
+      const result = this.applyValue(value, providerId);
+      const count = result?.accounts?.length ?? 1;
+      const rev = (this.store.getSnapshot().catalogRevision ?? 0) + 1;
+      this.setState({
+        catalogRevision: rev,
+        message: text(this.t, "status.accountAdded", { count })
+      });
       return result;
     } catch (error51) {
       this.setState({ action: null, status: "error", providerId, error: errorText(error51, this.t) });
@@ -17435,7 +17470,7 @@ function ContextWindowSection({ providerId, current: current2, model, accountId 
     message ? h("div", { className: "dockyard-dsh-context-window-message", "data-error": message.error }, message.text) : null
   );
 }
-function ModelSelectionSection({ providerId, remote, directory, modelDirectories, t }) {
+function ModelSelectionSection({ providerId, remote, directory, modelDirectories, refreshToken = 0, t }) {
   const [state, setState] = useState({
     status: "loading",
     models: [],
@@ -17478,7 +17513,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
     return () => {
       cancelled = true;
     };
-  }, [providerId, remote, t]);
+  }, [providerId, remote, refreshToken, t]);
   const models = state.models;
   if (state.status === "loading") {
     return h(
@@ -17527,7 +17562,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
     setSaving(true);
     setMessage(null);
     try {
-      const enabledList = Array.from(selectedIds);
+      const enabledList = models.length > 0 && selectedIds.size === models.length ? null : Array.from(selectedIds);
       unwrapRemote(await remote.setModelSelection({
         providerId,
         enabledModelIds: enabledList
@@ -17669,9 +17704,14 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
       onClick: (e) => testConnection(modelId, e)
     }, `\u2715 ${errorLabel}`);
   };
+  const cleanDisplayName = (rawName, rawId) => {
+    const s = String(rawName || rawId || "");
+    return s.replace(/^\[隐秘限免\]\s*/g, "").replace(/^\[限时免费\]\s*/g, "").replace(/\s*\(智能路由全部免费\/隐秘\/限免\)\s*$/g, "").replace(/\s*\[Free\]\s*$/i, "").replace(/\s*\(free\)\s*$/i, "").trim() || rawId;
+  };
   const renderModelItem = (item) => {
     const checked = selectedIds.has(item.id);
     const meta3 = item.contextWindow ? ` \xB7 ${Math.round(item.contextWindow / 1024)}k context` : "";
+    const freeBadgeText = item.freeKind === "stealth" ? "STEALTH" : item.freeKind === "limited_free" ? "PROMO" : item.freeKind === "router" ? "AUTO" : "FREE";
     return h(
       "div",
       {
@@ -17695,8 +17735,8 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
           h(
             "div",
             { className: "dockyard-dsh-model-item-title" },
-            h("span", { className: "dockyard-dsh-model-item-name" }, item.name || item.id),
-            isFreeModel(item) ? h("span", { className: "dockyard-dsh-free-badge" }, "FREE") : null
+            h("span", { className: "dockyard-dsh-model-item-name" }, cleanDisplayName(item.name, item.id)),
+            isFreeModel(item) ? h("span", { className: "dockyard-dsh-free-badge" }, freeBadgeText) : null
           ),
           h("div", { className: "dockyard-dsh-model-item-id" }, `${item.id}${meta3}`)
         )
@@ -18382,6 +18422,8 @@ function SubscriptionSettingsSection({ close, controller, remote, modelDirectori
 }
 function DockyardPopup({ providerId, provider, directory, modelDirectories, directoryState, controlState, controller, remote, onOpenOverview, onClose, t }) {
   const [tierBusy, setTierBusy] = useState(false);
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [apiKeyLabelDraft, setApiKeyLabelDraft] = useState("");
   const { current: current2, group, model, efforts } = modelDetails(directoryState, providerId);
   const modelLabel = model?.name ?? current2?.model ?? text(t, "title.noModel");
   const compactModelId = displayModelId(providerId, current2?.model);
@@ -18393,6 +18435,7 @@ function DockyardPopup({ providerId, provider, directory, modelDirectories, dire
   const authInProgress = controlState.auth?.providerId === providerId && ["pending", "processing"].includes(controlState.auth?.status) && Boolean(controlState.auth?.sessionId);
   const needsReauthorization = accounts.some((account) => account?.health?.status === "expired");
   const supportsOAuthLogin = provider?.manifest?.capabilities?.includes("oauth_authorization");
+  const supportsApiKeyAuth = Boolean(provider?.manifest?.capabilities?.includes("api_key_auth"));
   const chooseTier = async (value) => {
     if (!current2 || !directory || tierBusy) return;
     setTierBusy(true);
@@ -18400,6 +18443,29 @@ function DockyardPopup({ providerId, provider, directory, modelDirectories, dire
       await directory.select({ ...current2, reasoningEffort: value });
     } finally {
       setTierBusy(false);
+    }
+  };
+  const submitApiKey = async () => {
+    if (!apiKeyDraft.trim() || busy) return;
+    const result = await controller.addApiKey(providerId, apiKeyDraft, apiKeyLabelDraft);
+    if (result) {
+      setApiKeyDraft("");
+      setApiKeyLabelDraft("");
+      try {
+        if (typeof modelDirectories?.catalog?.refresh === "function") {
+          modelDirectories.catalog.refresh();
+        } else if (typeof modelDirectories?.catalog?.invalidate === "function") {
+          modelDirectories.catalog.invalidate();
+          modelDirectories.catalog.load?.().catch(() => {
+          });
+        }
+      } catch {
+      }
+      try {
+        directory?.load?.()?.catch?.(() => {
+        });
+      } catch {
+      }
     }
   };
   return h(
@@ -18463,6 +18529,41 @@ function DockyardPopup({ providerId, provider, directory, modelDirectories, dire
           onChange: (event) => controller.setPolicy(providerId, event.target.value)
         }, Object.keys(POLICY_KEYS).map((value) => h("option", { value, key: value }, policyLabel(t, value))))
       ),
+      supportsApiKeyAuth ? h(
+        "div",
+        { className: "dockyard-dsh-key-form" },
+        h(
+          "div",
+          { className: "dockyard-dsh-section-title" },
+          h("span", null, text(t, "native.addKeyTitle")),
+          h("span", { className: "dockyard-dsh-section-value" }, text(t, "native.credentialsWrite"))
+        ),
+        h(
+          "div",
+          { className: "dockyard-dsh-key-form-row" },
+          h("input", {
+            className: "dockyard-dsh-key-input",
+            type: "password",
+            value: apiKeyDraft,
+            placeholder: providerId === "openrouter-free" ? `${text(t, "native.pasteApiKey")} (sk-or-v1-...)` : text(t, "native.pasteApiKey"),
+            autoComplete: "off",
+            onChange: (event) => setApiKeyDraft(event.target.value)
+          }),
+          h("button", {
+            type: "button",
+            className: "dockyard-dsh-key-save",
+            disabled: busy || !apiKeyDraft.trim(),
+            onClick: submitApiKey
+          }, controlState.action === "add" ? text(t, "native.saving") : text(t, "native.save"))
+        ),
+        h("input", {
+          className: "dockyard-dsh-key-input",
+          type: "text",
+          value: apiKeyLabelDraft,
+          placeholder: text(t, "native.optionalName"),
+          onChange: (event) => setApiKeyLabelDraft(event.target.value)
+        })
+      ) : null,
       efforts.length > 0 ? h(
         "div",
         { className: "dockyard-dsh-section" },
@@ -18490,6 +18591,7 @@ function DockyardPopup({ providerId, provider, directory, modelDirectories, dire
         remote,
         directory,
         modelDirectories,
+        refreshToken: controlState.catalogRevision ?? 0,
         t
       }),
       h(

@@ -84,9 +84,44 @@ const outputPath = resolve(marketDir, "index.json");
 const iconBuf = readFileSync(resolve(rootDir, "apps/macos/assets/AppIcon.iconset/icon_128x128.png"));
 const iconDataUrl = `data:image/png;base64,${iconBuf.toString("base64")}`;
 
-// Determine commit for 0.1.2: use current HEAD
-const currentCommit = execSync("git rev-parse HEAD", { cwd: rootDir, encoding: "utf8" }).trim();
-const v011Commit = "f2d4642bbe4815d8b7d0c4cdc95652c8ff62477e";
+// The current release points at the commit that is about to be pushed. Every
+// historical version keeps its own immutable SHA: never reuse `currentCommit`
+// for past versions, or the market installs old code for a newer version.
+const packageVersion = JSON.parse(
+  readFileSync(resolve(rootDir, "packages/dsh-plugin/package.json"), "utf8"),
+).version;
+// During a release the index is generated from the just-created release commit
+// and amended into it, so allow pinning the exact final SHA explicitly.
+const currentCommit = (process.env.DOCKYARD_RELEASE_COMMIT || execSync("git rev-parse HEAD", { cwd: rootDir, encoding: "utf8" }).trim());
+
+const RELEASE_HISTORY = [
+  { version: "0.1.17", publishTimestamp: 1793786618, commit: "e67b24cf4a0f4c3eaa2b8b0a2dc73e69f159f82f" },
+  { version: "0.1.16", publishTimestamp: 1793776800, commit: "28ef85a09aff6cd0f2077e2681f8b8f2d6f06408" },
+  { version: "0.1.15", publishTimestamp: 1793629755, commit: "c4a6d34ce823d6f93b0539e1b58b2b73114330d5" },
+  { version: "0.1.11", publishTimestamp: 1793547152, commit: "62e4ee0e4f6891e3788a4872b67e057e0c41253f" },
+  { version: "0.1.10", publishTimestamp: 1793545916, commit: "c7db0594420fe491445a243fab3ff4ec49393951" },
+  { version: "0.1.9", publishTimestamp: 1793545166, commit: "bbd66239eedba9e9e4e29dd09c1ba4b2e99f8fcd" },
+  { version: "0.1.8", publishTimestamp: 1793543000, commit: "ff39f7cf7c08a4f9e1fc4be6504a7e937dbe10bf" },
+  { version: "0.1.7", publishTimestamp: 1793514000, commit: "8c49cda9b6cf42735d4fa55c48b26ddfbece78d8" },
+  { version: "0.1.6", publishTimestamp: 1793421167, commit: "32af138d0d60027fe1d518f4f722c9b7b35c853b" },
+  { version: "0.1.5", publishTimestamp: 1793417682, commit: "8279e8d41803262b3e3403a55fb2ba1ffa656f56" },
+  { version: "0.1.4", publishTimestamp: 1793416447, commit: "ee5136e45c38cdd271813e2d680c26df053cb1e1" },
+  { version: "0.1.2", publishTimestamp: 1793187638, commit: "f9af7d99dc501d0489200d16cd1dcd177016fce3" },
+  { version: "0.1.1", publishTimestamp: 1787059239, commit: "f2d4642bbe4815d8b7d0c4cdc95652c8ff62477e" },
+];
+
+function marketVersion({ version, publishTimestamp, commit }) {
+  return {
+    version,
+    publishTimestamp,
+    source: {
+      type: "git",
+      url: "https://github.com/AITabby/dockyard-dsh",
+      commit,
+    },
+    engines: { dsh: ">=0.1.0" },
+  };
+}
 
 const indexDocument = {
   format: 1,
@@ -176,150 +211,12 @@ const indexDocument = {
         sortKeys: {},
       },
       versions: [
-        {
-          version: "0.1.16",
-          publishTimestamp: Math.floor(Date.now() / 1000),
-          source: {
-            type: "git",
-            url: "https://github.com/AITabby/dockyard-dsh",
-            commit: currentCommit,
-          },
-          engines: {
-            dsh: ">=0.1.0",
-          },
-        },
-        {
-          version: "0.1.15",
-          publishTimestamp: 1793629755,
-          source: {
-            type: "git",
-            url: "https://github.com/AITabby/dockyard-dsh",
-            commit: "c4a6d34ce823d6f93b0539e1b58b2b73114330d5",
-          },
-          engines: {
-            dsh: ">=0.1.0",
-          },
-        },
-        {
-          version: "0.1.11",
-          publishTimestamp: 1793547152,
-          source: {
-            type: "git",
-            url: "https://github.com/AITabby/dockyard-dsh",
-            commit: "62e4ee0e482352277d337ee9bf8ea70500bf68ef",
-          },
-          engines: {
-            dsh: ">=0.1.0",
-          },
-        },
-        {
-          version: "0.1.10",
-          publishTimestamp: 1793545916,
-          source: {
-            type: "git",
-            url: "https://github.com/AITabby/dockyard-dsh",
-            commit: "c7db059c22822d5ae8074d284a1e9444391696b9",
-          },
-          engines: {
-            dsh: ">=0.1.0",
-          },
-        },
-        {
-          version: "0.1.9",
-          publishTimestamp: 1793545166,
-          source: {
-            type: "git",
-            url: "https://github.com/AITabby/dockyard-dsh",
-            commit: "bbd66239eedba9e9e4e29dd09c1ba4b2e99f8fcd",
-          },
-          engines: {
-            dsh: ">=0.1.0",
-          },
-        },
-        {
-          version: "0.1.8",
-          publishTimestamp: 1793543000,
-          source: {
-            type: "git",
-            url: "https://github.com/AITabby/dockyard-dsh",
-            commit: "ff39f7cf7c08a4f9e1fc4be6504a7e937dbe10bf",
-          },
-          engines: {
-            dsh: ">=0.1.0",
-          },
-        },
-        {
-          version: "0.1.7",
-          publishTimestamp: 1793514000,
-          source: {
-            type: "git",
-            url: "https://github.com/AITabby/dockyard-dsh",
-            commit: "8c49cda9b6cf42735d4fa55c48b26ddfbece78d8",
-          },
-          engines: {
-            dsh: ">=0.1.0",
-          },
-        },
-        {
-          version: "0.1.6",
-          publishTimestamp: 1793421167,
-          source: {
-            type: "git",
-            url: "https://github.com/AITabby/dockyard-dsh",
-            commit: "32af138d0d60027fe1d518f4f722c9b7b35c853b",
-          },
-          engines: {
-            dsh: ">=0.1.0",
-          },
-        },
-        {
-          version: "0.1.5",
-          publishTimestamp: 1793417682,
-          source: {
-            type: "git",
-            url: "https://github.com/AITabby/dockyard-dsh",
-            commit: "8279e8d41803262b3e3403a55fb2ba1ffa656f56",
-          },
-          engines: {
-            dsh: ">=0.1.0",
-          },
-        },
-        {
-          version: "0.1.4",
-          publishTimestamp: 1793416447,
-          source: {
-            type: "git",
-            url: "https://github.com/AITabby/dockyard-dsh",
-            commit: "ee5136e45c38cdd271813e2d680c26df053cb1e1",
-          },
-          engines: {
-            dsh: ">=0.1.0",
-          },
-        },
-        {
-          version: "0.1.2",
-          publishTimestamp: 1793187638,
-          source: {
-            type: "git",
-            url: "https://github.com/AITabby/dockyard-dsh",
-            commit: "f9af7d99dc501d0489200d16cd1dcd177016fce3",
-          },
-          engines: {
-            dsh: ">=0.1.0",
-          },
-        },
-        {
-          version: "0.1.1",
-          publishTimestamp: 1787059239,
-          source: {
-            type: "git",
-            url: "https://github.com/AITabby/dockyard-dsh",
-            commit: v011Commit,
-          },
-          engines: {
-            dsh: ">=0.1.0",
-          },
-        },
+        marketVersion({ version: packageVersion, publishTimestamp: Math.floor(Date.now() / 1000), commit: currentCommit }),
+        // The current version is generated from HEAD; past versions use their
+        // own immutable SHAs from RELEASE_HISTORY so they can never drift.
+        ...RELEASE_HISTORY
+          .filter((entry) => entry.version !== packageVersion)
+          .map(marketVersion),
       ],
     },
   ],

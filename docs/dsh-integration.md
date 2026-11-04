@@ -23,6 +23,7 @@ The native command surface is:
 /dockyard models <provider>
 /dockyard policy <provider> <manual|sticky_session|round_robin|failover> [accountId]
 /dockyard use <provider> <accountId>
+/dockyard remove <provider> <accountId>
 ```
 
 `/dockyard login` opens the provider's official browser authorization page and imports the completed account into the pool without requiring a local CLI. Codex, Antigravity, Grok, Claude, and Cursor use provider-verified browser flows; CLI/desktop/OAuth-file sources remain compatibility or scan fallbacks. Claude can request a manual authorization-code paste when its official hosted callback does not return to localhost. The GUI Login/Add action always starts a new browser flow, even when accounts already exist, instead of silently re-importing the active account. Use `/dockyard scan` plus `/dockyard add` only when importing an existing local session. Completed credentials are written to macOS Keychain and only opaque references reach the account pool or page state.
@@ -43,4 +44,4 @@ DSH_HOME=/tmp/dockyard-dsh-home dsh web --dump-config
 DSH_HOME=/tmp/dockyard-dsh-home dsh web
 ```
 
-The repository root and `packages/dsh-plugin` both expose the same `@dockyard-dsh/plugin@0.1.2` bundle. `npm run build:plugin` produces the self-contained Node entry and browser client bundle; `npm pack --dry-run` should show only the release entry, client bundle, patch file, and package metadata. GitHub/npm installs use the prebuilt entry or the package `prepare` script.
+The repository root and `packages/dsh-plugin` both expose the same `@dockyard-dsh/plugin@0.1.18` bundle. `npm run build:plugin` produces the self-contained Node entry and browser client bundle; `npm pack --dry-run` should show only the release entry, client bundle, patch file, and package metadata. GitHub/npm installs use the prebuilt entry or the package `prepare` script.

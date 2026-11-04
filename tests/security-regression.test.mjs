@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -198,6 +198,45 @@ test("per-provider import serialization keeps a late rollback from erasing newer
   } finally {
     await rm(home, { recursive: true, force: true });
   }
+});
+
+test("repository and release bundle never embed a real Google OAuth client secret", async () => {
+  // README.md and SECURITY.md promise that no OAuth credentials are committed.
+  // A real Google client secret follows the GOCSPX- prefix; a regression that
+  // restores a hard-coded default must fail this test in both source and dist.
+  const paths = [
+    "../modules/provider-antigravity/src/driver.mjs",
+    "../packages/dsh-plugin/dist/index.mjs",
+  ];
+  for (const relative of paths) {
+    const source = await readFile(new URL(relative, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /GOCSPX-[A-Za-z0-9_-]{10,}/, `${relative} embeds a real OAuth client secret`);
+  }
+});
+
+test("Antigravity browser OAuth is disabled when the operator supplies no client credentials", async () => {
+  const { createAntigravityDriver } = await import("../modules/provider-antigravity/src/index.mjs");
+  const driver = createAntigravityDriver({
+    env: {},
+    commandRunner: async () => ({ code: 0, stdout: "", stderr: "" }),
+    tokenResolver: () => null,
+    cacheFilePath: null,
+  });
+  assert.equal(driver.browserClientId, "");
+  assert.equal(driver.browserClientSecret, "");
+  assert.equal(driver.hasExplicitBrowserClient, false);
+  assert.equal(driver.browserAuthorizer, null, "browser OAuth must fail closed without env credentials");
+
+  const configured = createAntigravityDriver({
+    env: {
+      DOCKYARD_ANTIGRAVITY_CLIENT_ID: "operator-client-id",
+      DOCKYARD_ANTIGRAVITY_CLIENT_SECRET: "operator-client-secret",
+    },
+    commandRunner: async () => ({ code: 0, stdout: "", stderr: "" }),
+    tokenResolver: () => null,
+    cacheFilePath: null,
+  });
+  assert.equal(configured.hasExplicitBrowserClient, true);
 });
 
 test("corrupt state files are archived and recovery re-reads under the lock", async () => {

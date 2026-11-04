@@ -4,7 +4,7 @@
 
 [中文](#中文) · [English](#english)
 
-> **Current status / 当前状态:** Developer preview · **macOS DMG available** · **Windows EXE built; upload in progress.**
+> **Current status / 当前状态:** Developer preview · **macOS DMG available** · **Windows EXE built; upload in progress.** · **Current release: v0.1.18**
 
 ## 中文
 
@@ -19,8 +19,12 @@ Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harnes
 - **Grok** — xAI 官方浏览器 OAuth、CLI fallback、实时模型目录、官方 Build credits 周期和 provider-native streaming 请求。额度读取使用官方 `/billing?format=credits`（转发 `GetGrokCreditsConfig`）；若上游只返回周期，剩余值保持未知。
 - **Claude** — Claude 官方浏览器 OAuth（支持带 state 的手动回调地址/授权码）、CLI fallback 与原生请求适配。
 - **Cursor** — Cursor 官方浏览器登录轮询、CLI fallback 与原生请求适配。
-- **WorkBuddy** — WorkBuddy 国际版桌面端会话自动检测、零成本免费模型发现（`deepseek-v4.1-flash`、`hy3`）、实时模型按需选择与官方端点原生流式请求。
+- **WorkBuddy** — WorkBuddy 国际版桌面端会话自动检测、零成本免费模型发现（`hy4free`、`hy4`、`deepseek-v4.1-flash`、`hy3`）、实时模型按需选择、推理档位与官方端点原生流式请求。
 - **Command Code** — Command Code 官方网关直接接入，支持 100+ 款开源及旗舰大模型（DeepSeek V4.1 Flash/Pro、Claude Sonnet 5.5/4.6、Grok 4.7、Muse Spark 1.2、Mistral Large 4 等），自动读取本地认证、套餐订阅与多窗口额度（5 小时 / 每周），支持原生流式与 Native Tool Calling。
+- **OpenRouter Free** — 从本机 DSH 凭据与环境变量发现 OpenRouter API key，动态拉取 `:free` 模型目录、按上下文窗口匹配、实时额度路由，使用官方端点原生流式请求。
+- **Hermes** — Hermes 官方会话接入、实时模型目录与原生流式请求。
+- **Kilo** — Kilo 官方会话接入、实时模型目录与原生流式请求。
+- **OpenCode** — OpenCode 官方会话接入（provider id `opencode`）、实时模型目录与原生流式请求。
 
 如果对应的官方客户端、CLI 或 OAuth 源没有安装、没有登录，Dockyard 会返回明确的 unavailable/degraded 状态；不会用硬编码的账号、模型、版本、套餐或额度伪造可用结果。
 
@@ -35,7 +39,7 @@ Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harnes
 
 ### 平台支持：macOS 已发布，Windows 构建完成
 
-**当前 0.1.2 版本正在整理；macOS DMG 已提供，Windows EXE 已完成构建，待上传到 v0.1.2 Release。**
+**当前版本为 0.1.18；macOS DMG 已提供，Windows EXE 已完成构建，待上传到对应 Release 并完成下载验证。**
 
 macOS 完整功能依赖以下原生能力：
 
@@ -43,7 +47,7 @@ macOS 完整功能依赖以下原生能力：
 - 浏览器 OAuth 由 DSH GUI 打开 provider 官方授权页面，并使用 PKCE、state 校验和 loopback/manual-code 回调；CLI fallback 才使用官方 CLI。
 - 扫描模式仍可读取 Cursor、Antigravity 等 provider 的 macOS 官方桌面端或本机 CLI 会话状态。
 
-Windows 版本已完成 EXE 构建，待上传到 v0.1.2 Release；上传完成后再进行发布页下载验证。
+Windows 版本已完成 EXE 构建，待上传到对应 Release；上传完成后再进行发布页下载验证。
 
 ### macOS 独立应用与 DMG
 
@@ -247,8 +251,12 @@ Current provider modules:
 - **Grok** — xAI browser OAuth, CLI fallback, live model catalog, official Build credits periods, and provider-native streaming. Quota uses the official `/billing?format=credits` surface (forwarding `GetGrokCreditsConfig`); if the upstream only returns a period, the remaining value stays unknown.
 - **Claude** — official browser OAuth (including state-bound manual callback/code entry), CLI fallback, and native request adapter.
 - **Cursor** — official browser login polling, CLI fallback, and native request adapter.
-- **WorkBuddy** — WorkBuddy international desktop session auto-detection, zero-credit free model discovery (`deepseek-v4.1-flash`, `hy3`), real-time model selection, and official streaming completions.
+- **WorkBuddy** — WorkBuddy international desktop session auto-detection, zero-credit free model discovery (`hy4free`, `hy4`, `deepseek-v4.1-flash`, `hy3`), real-time model selection, reasoning tiers, and official streaming completions.
 - **Command Code** — direct integration with Command Code official gateway, supporting 100+ open-source and flagship LLMs (DeepSeek V4.1 Flash/Pro, Claude Sonnet 5.5/4.6, Grok 4.7, Muse Spark 1.2, Mistral Large 4, etc.), auto-detecting local credentials, subscription plans, multi-window quotas (5-hour / weekly), and full streaming with native tool-calling.
+- **OpenRouter Free** — discovers OpenRouter API keys from local DSH credentials and the environment, fetches a live `:free` model catalog, matches context windows, applies live quota routing, and streams through the official endpoint.
+- **Hermes** — official Hermes session integration, live model catalog, and native streaming.
+- **Kilo** — official Kilo session integration, live model catalog, and native streaming.
+- **OpenCode** — official OpenCode session integration (provider id `opencode`), live model catalog, and native streaming.
 
 When an official client, CLI, or OAuth source is missing or not signed in, Dockyard reports an explicit unavailable/degraded state. It does not invent accounts, models, versions, plans, or quota values.
 
@@ -263,7 +271,7 @@ When an official client, CLI, or OAuth source is missing or not signed in, Docky
 
 ### Platform support: macOS released, Windows build complete
 
-**The 0.1.2 release is being prepared. The macOS DMG is available; the Windows EXE is built and waiting to be uploaded to the v0.1.2 release.**
+**The current release is 0.1.18. The macOS DMG is available; the Windows EXE is built and waiting to be uploaded to the matching release.**
 
 The macOS integration depends on native behavior:
 
@@ -271,7 +279,7 @@ The macOS integration depends on native behavior:
 - Browser OAuth is opened by the DSH GUI and uses PKCE, state validation, loopback callbacks, or manual-code entry; the official CLI is only a fallback.
 - Scan mode still reads macOS desktop or local CLI session state for providers that expose it.
 
-The Windows EXE build is complete and waiting to be uploaded to the v0.1.2 release; download verification will follow after the upload finishes.
+The Windows EXE build is complete and waiting to be uploaded to the matching release; download verification will follow after the upload finishes.
 
 ### Standalone macOS app and DMG
 

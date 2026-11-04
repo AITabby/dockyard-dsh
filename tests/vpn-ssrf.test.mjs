@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import ipaddr from "ipaddr.js";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const ipaddr = (() => {
+  try {
+    return require("ipaddr.js");
+  } catch {
+    return require("../packages/dsh-plugin/node_modules/ipaddr.js");
+  }
+})();
 import { patchFakeIpVpnSupport } from "../packages/dsh-plugin/src/vpn-ssrf-patch.mjs";
 
 test("patchFakeIpVpnSupport enables Fake-IP 198.18.0.0/15 for VPN while preserving private IP blocks", () => {

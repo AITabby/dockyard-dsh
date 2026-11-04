@@ -48,7 +48,7 @@ Selection happens in the runtime, not in the menu bar, so concurrent DSH session
 
 ### Provider modules
 
-`provider-codex`, `provider-antigravity`, `provider-grok`, `provider-claude`, and `provider-cursor` are the current modules. Each module receives a provider driver for:
+The registered modules (see `scripts/build.mjs` and `packages/runtime/src/dockyard-runtime.mjs`) are `provider-codex` (id `openai-codex`), `provider-antigravity`, `provider-grok`, `provider-claude`, `provider-cursor`, `provider-opencode`, `provider-workbuddy`, `provider-kilo`, `provider-commandcode`, `provider-hermes`, and `provider-openrouter-free`. Each module receives a provider driver for:
 
 - OAuth discovery and provider-native official authorization;
 - refresh and re-authentication;
@@ -62,10 +62,15 @@ The module manifest contains only stable technical identity and capabilities. It
 
 The macOS menu bar is a host. It presents live state and sends commands, but it does not implement provider OAuth or account selection. A future CLI or web host can consume the same runtime services.
 
-## First implementation slice
+## Implemented surface
 
-1. Connect the Codex driver to the local secure OAuth source.
-2. Connect the Antigravity driver to its local secure OAuth source.
-3. Import accounts into `AccountPool` with live subscription, quota, and refresh metadata.
-4. Mount both provider routes into the DSH adapter.
-5. Add the menu bar host after the runtime path is observable and testable.
+The first slice (Codex + Antigravity OAuth, `AccountPool` import, DSH route
+mounting, and the macOS menu bar host) is long complete. The current runtime
+registers eleven provider modules (listed above); the DSH Web plugin is the
+primary host and the macOS menu bar remains an optional host. The
+`host consumes stable contracts` rule still applies: provider-specific
+behavior belongs in each module's manifest/capabilities, not in host-side
+`providerId === ...` branches. Security-relevant invariants (no embedded
+OAuth client credentials, fail-closed credential storage off macOS, HTTPS-only
+remote endpoints) are enforced by `tests/security-regression.test.mjs` and
+`tests/security.test.mjs`.

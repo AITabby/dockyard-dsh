@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-import { ACCOUNT_SELECTION_POLICY } from "../../core/src/contracts.mjs";
+import { ACCOUNT_SELECTION_POLICY, PROVIDER_BEHAVIOR_CAPABILITIES } from "../../core/src/contracts.mjs";
 import { redactError } from "../../providers/src/provider-utils.mjs";
 
 const DEFAULT_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
@@ -190,7 +190,35 @@ export class DockyardDshService {
     };
   }
 
-  async add(providerInput = null, candidateId = null) {
+  async addApiKey(providerInput, apiKey, label = "") {
+    await this.ready;
+    const providerId = providerIdFor(this.runtime, providerInput);
+    if (!providerId) throw new Error(`未知 provider：${providerInput}`);
+    const trimmedKey = String(apiKey ?? "").trim();
+    if (!trimmedKey) throw new Error("请输入有效的 API Key");
+    const imported = await this.runtime.importSource(providerId, {
+      apiKey: trimmedKey,
+      label: String(label ?? "").trim(),
+    });
+    const accounts = Array.isArray(imported?.accounts) ? imported.accounts : [];
+    if (accounts.length > 0) {
+      const firstId = accounts[0].accountId;
+      await this.runtime.setDefaultAccount(providerId, firstId).catch(() => {});
+      await this.runtime.getCatalog(providerId, { force: true }).catch(() => null);
+    }
+    try {
+      this.notifyAdaptersUpdated?.();
+    } catch {}
+    return {
+      accounts,
+      diagnostics: imported?.diagnostics ?? [],
+    };
+  }
+
+  async add(providerInput = null, candidateId = null, options = {}) {
+    if (options?.apiKey) {
+      return this.addApiKey(providerInput, options.apiKey, options.label);
+    }
     const scan = await this.scan(providerInput);
     const imports = [];
     const diagnostics = [];
@@ -219,6 +247,11 @@ export class DockyardDshService {
     }
     if (candidateId && imports.length === 0 && diagnostics.length === 0) {
       throw new Error(`没有找到未添加的 OAuth 候选：${candidateId}`);
+    }
+    if (imports.length > 0) {
+      try {
+        this.notifyAdaptersUpdated?.();
+      } catch {}
     }
     return { accounts: imports, diagnostics, scan };
   }
@@ -290,9 +323,29 @@ export class DockyardDshService {
     return this.runtime.setContextWindowOverride(input, value);
   }
 
+  #hasCapability(providerId, capability) {
+    return Boolean(this.runtime.hasProviderCapability?.(providerId, capability));
+  }
+
+  async #autoProvisionIfNeeded(providerId) {
+    if (!this.#hasCapability(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT)) return;
+    const snap = this.runtime.snapshot?.();
+    const provider = snap?.providers?.find((p) => p.providerId === providerId);
+    if (provider && (!Array.isArray(provider.accounts) || provider.accounts.length === 0)) {
+      await this.add(providerId).catch(() => {});
+    }
+  }
+
   async getModelSelection(providerId) {
     await this.ready;
-    const catalog = await this.runtime.getCatalog(providerId).catch(() => ({ models: [] }));
+    await this.#autoProvisionIfNeeded(providerId);
+    const forceLiveCatalog = this.#hasCapability(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.FORCE_LIVE_CATALOG);
+    const catalog = await this.runtime.getCatalog(providerId, { force: forceLiveCatalog }).catch(() => ({ models: [] }));
+    if (forceLiveCatalog) {
+      try {
+        this.notifyAdaptersUpdated?.();
+      } catch {}
+    }
     const enabledModelIds = this.runtime.getModelSelection(providerId);
     return {
       providerId,
@@ -319,6 +372,8 @@ export class DockyardDshService {
     const providerId = providerIdFor(this.runtime, providerInput);
     if (!providerId) throw new Error(`未知 provider：${providerInput}`);
     if (!modelId || typeof modelId !== "string") throw new Error("缺少有效的 modelId");
+
+    await this.#autoProvisionIfNeeded(providerId);
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(new Error("连接测试超时 (15s)")), timeoutMs);

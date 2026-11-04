@@ -1,4 +1,5 @@
 import { defineProviderModule } from "../../../packages/core/src/provider-module.mjs";
+import { PROVIDER_BEHAVIOR_CAPABILITIES } from "../../../packages/core/src/contracts.mjs";
 
 export function createCommandCodeModule({ driver = {} } = {}) {
   return defineProviderModule({
@@ -9,6 +10,8 @@ export function createCommandCodeModule({ driver = {} } = {}) {
       "catalog",
       "invoke",
       "stream",
+      PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
+      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP,
     ],
     driver,
   });

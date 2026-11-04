@@ -33,7 +33,7 @@ test("WorkBuddy provider module manifest and builtin models", async () => {
   assert.ok(mod.manifest.capabilities.includes("catalog"));
   assert.ok(mod.manifest.capabilities.includes("stream"));
 
-  assert.equal(BUILTIN_WORKBUDDY_FREE_MODELS.length, 2);
+  assert.equal(BUILTIN_WORKBUDDY_FREE_MODELS.length, 4);
   const deepseek = BUILTIN_WORKBUDDY_FREE_MODELS.find((m) => m.id === "deepseek-v4.1-flash");
   assert.ok(deepseek);
   assert.equal(deepseek.name, "DeepSeek v4.1 Flash (WorkBuddy Free)");
@@ -45,6 +45,16 @@ test("WorkBuddy provider module manifest and builtin models", async () => {
   assert.equal(hy3.name, "Hunyuan 3 (WorkBuddy Free)");
   assert.equal(hy3.contextWindow, 192000);
   assert.equal(hy3.maxTokens, 64000);
+
+  const hy4free = BUILTIN_WORKBUDDY_FREE_MODELS.find((m) => m.id === "hy4free");
+  assert.ok(hy4free);
+  assert.ok(hy4free.reasoning);
+  assert.equal(hy4free.reasoning.defaultEffort, "high");
+
+  const hy4 = BUILTIN_WORKBUDDY_FREE_MODELS.find((m) => m.id === "hy4");
+  assert.ok(hy4);
+  assert.ok(hy4.reasoning);
+  assert.equal(hy4.reasoning.defaultEffort, "high");
 });
 
 test("parseWorkbuddyCatalog handles product snapshot format and flags free tier models", async () => {

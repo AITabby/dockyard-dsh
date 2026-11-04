@@ -80,6 +80,25 @@ function applyModelContextWindow(model, contextWindow) {
   };
 }
 
+function applyNativeProviderModelCompat(providerId, model) {
+  if (!model || typeof model !== "object") return model;
+  if (providerId === "openrouter") {
+    return {
+      ...model,
+      thinkingLevelMap: {
+        ...(model.thinkingLevelMap ?? {}),
+        off: null,
+      },
+      headers: {
+        "HTTP-Referer": "https://opencode.ai",
+        "X-Title": "OpenCode",
+        ...(model.headers ?? {}),
+      },
+    };
+  }
+  return model;
+}
+
 async function* iterateWithContext(storage, state, next) {
   const output = await storage.run(state, () => next());
   const iterator = await storage.run(state, () => {
@@ -291,23 +310,23 @@ export class NativeKeyPoolHost {
       // at the provider boundary while the session meter still shows the
       // catalog's stale 262K/272K capacity.
       this.patchAdapterMethod(adapter, "modelOf", (modelOf) => function (...args) {
-        const model = modelOf.apply(this, args);
+        const model = applyNativeProviderModelCompat(args[1], modelOf.apply(this, args));
         const contextWindow = thisHost.contextWindowForModel(args[1], args[2]);
         return applyModelContextWindow(model, contextWindow);
       });
       this.patchAdapterMethod(adapter, "resolveModel", (resolveModel) => async function (...args) {
-        const model = await resolveModel.apply(this, args);
+        const model = applyNativeProviderModelCompat(args[0], await resolveModel.apply(this, args));
         const contextWindow = thisHost.contextWindowForModel(args[0], args[1]);
         return applyModelContextWindow(model, contextWindow);
       });
       this.patchAdapterMethod(adapter, "prepareCall", (prepareCall) => async function (...args) {
         const prepared = await prepareCall.apply(this, args);
+        if (!prepared || typeof prepared !== "object") return prepared;
+        const compatModel = applyNativeProviderModelCompat(args[0], prepared.model);
         const contextWindow = thisHost.contextWindowForModel(args[0], args[1]);
-        if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0
-          || !prepared || typeof prepared !== "object") return prepared;
         return {
           ...prepared,
-          model: applyModelContextWindow(prepared.model, contextWindow),
+          model: applyModelContextWindow(compatModel, contextWindow),
         };
       });
     }

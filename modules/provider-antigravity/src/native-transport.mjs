@@ -52,7 +52,7 @@ function detectAntigravityUserAgent() {
       // CodexSplit omits User-Agent when the desktop bundle is unavailable.
     }
   }
-  return null;
+  return `antigravity/hub/2.29.0 ${process.platform}/${process.arch}`;
 }
 
 function firstString(...values) {
@@ -346,8 +346,9 @@ export function readAntigravityKeychainToken({ home = homedir() } = {}) {
     }
     return parsed;
   } catch {
-    // A locked or unavailable Keychain must fall through to the official file
-    // and eventually produce the normal "authorize again" diagnostic.
+    // Cache negative result too so a missing Keychain item does not repeatedly
+    // invoke `/usr/bin/security` on every poll or refresh.
+    lastKeychainReadTime = now;
     return null;
   }
 }

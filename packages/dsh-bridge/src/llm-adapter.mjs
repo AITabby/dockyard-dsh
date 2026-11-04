@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { ValidationError } from "../../core/src/errors.mjs";
+import { PROVIDER_BEHAVIOR_CAPABILITIES } from "../../core/src/contracts.mjs";
 
 export function defaultCatalogCachePath() {
   const home = process.env.DOCKYARD_DSH_HOME || join(homedir(), ".dockyard-dsh");
@@ -105,6 +106,17 @@ export function normalizeDshReasoning(reasoning) {
   };
 }
 
+function cleanModelDisplayName(name, id) {
+  if (typeof name !== "string" || name.length === 0) return id;
+  return name
+    .replace(/^\[隐秘限免\]\s*/g, "")
+    .replace(/^\[限时免费\]\s*/g, "")
+    .replace(/\s*\(智能路由全部免费\/隐秘\/限免\)\s*$/g, "")
+    .replace(/\s*\[Free\]\s*$/i, "")
+    .replace(/\s*\(free\)\s*$/i, "")
+    .trim() || id;
+}
+
 function providerCatalogModels(providerId, catalog) {
   if (!Array.isArray(catalog?.models)) return [];
   const seen = new Set();
@@ -132,7 +144,7 @@ function providerCatalogModels(providerId, catalog) {
       return {
         provider: providerId,
         id: model.id,
-        name: typeof model.name === "string" && model.name.length > 0 ? model.name : model.id,
+        name: cleanModelDisplayName(model.name, model.id),
         description: modelDescription(model),
         ...(Array.isArray(model.inputModalities) ? { inputModalities: [...model.inputModalities] } : {}),
         ...(contextWindow ? { context: { contextWindow } } : {}),
@@ -154,7 +166,10 @@ function manifestFor(runtime, providerId) {
  * Test doubles that do not expose a snapshot retain the old catalog behavior.
  */
 function providerHasConnectedAccount(runtime, providerId) {
-  if (providerId === "workbuddy") return true;
+  // Providers that auto-provision a free account expose their catalog even
+  // before the first account is imported. This is a declared capability, not
+  // a host-side provider-id exception.
+  if (runtime.hasProviderCapability?.(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT)) return true;
   if (typeof runtime.snapshot !== "function") return true;
   const snapshot = runtime.snapshot();
   if (!Array.isArray(snapshot?.providers)) return true;
@@ -322,6 +337,26 @@ export function resolveFallbackModelMetadata(provider, model) {
   } else if (provider === "commandcode" || provider === "hermes") {
     contextWindow = 1000000;
     maxTokens = 16384;
+  } else if (provider === "openrouter-free") {
+    if (id === "openrouter/free" || id === "free") {
+      contextWindow = 200000;
+      maxTokens = 16384;
+    } else if (id.includes("crouton") || id.includes("inkling")) {
+      contextWindow = 1048576;
+      maxTokens = 16384;
+    } else if (id.includes("nemotron-3.5-super") || id.includes("nemotron-3.5-lightning") || id.includes("nemotron-3-ultra")) {
+      contextWindow = 1000000;
+      maxTokens = 16384;
+    } else if (id.includes("dots-3")) {
+      contextWindow = 512000;
+      maxTokens = 16384;
+    } else if (id.includes("lfm-2.5")) {
+      contextWindow = 65536;
+      maxTokens = 8192;
+    } else {
+      contextWindow = 262144;
+      maxTokens = 16384;
+    }
   }
   return {
     provider,

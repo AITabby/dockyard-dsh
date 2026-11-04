@@ -93,6 +93,45 @@ export function resolveReasoningFromModel(model) {
     return model.reasoning;
   }
 
+  if (Array.isArray(model.reasoning?.supportedEfforts) && model.reasoning.supportedEfforts.length > 0) {
+    const raw = model.reasoning.supportedEfforts;
+    const standardEfforts = [
+      { id: "minimal", name: "Minimal" },
+      { id: "low", name: "Low" },
+      { id: "medium", name: "Medium" },
+      { id: "high", name: "High" },
+    ];
+    let efforts;
+    if (raw.length >= 2) {
+      efforts = raw.map((lvl) => {
+        const id = typeof lvl === "string" ? lvl : lvl?.id ?? lvl?.value;
+        if (!id) return null;
+        const name = (typeof lvl === "object" && (lvl.name ?? lvl.label))
+          ? (lvl.name ?? lvl.label)
+          : id.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+        return { id, name };
+      }).filter(Boolean);
+    } else {
+      efforts = standardEfforts;
+    }
+    const defaultEffort = model.reasoning.defaultEffort
+      ?? (efforts.some((e) => e.id === "high") ? "high" : efforts.some((e) => e.id === "medium") ? "medium" : efforts[0]?.id);
+    return { efforts, defaultEffort };
+  }
+
+  if (model.supportsReasoning === true || model.onlyReasoning === true) {
+    const defaultEffort = model.reasoning?.defaultEffort ?? "high";
+    return {
+      efforts: [
+        { id: "minimal", name: "Minimal" },
+        { id: "low", name: "Low" },
+        { id: "medium", name: "Medium" },
+        { id: "high", name: "High" },
+      ],
+      defaultEffort,
+    };
+  }
+
   if (Array.isArray(model.supported_reasoning_levels) && model.supported_reasoning_levels.length > 0) {
     const efforts = model.supported_reasoning_levels.map((lvl) => {
       const id = typeof lvl === "string" ? lvl : lvl?.id;
