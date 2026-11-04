@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
@@ -129,7 +129,9 @@ test("market/index.json conforms strictly to DSH plugin market format 1", async 
   const seenCommits = new Set();
   const commitExists = (commit) => {
     try {
-      execSync(`git cat-file -e ${commit}^{commit}`, { cwd: rootDir, stdio: "ignore" });
+      // execFileSync, not execSync: `^{commit}` reaches cmd.exe as a shell
+      // escape on Windows, and the revision would be mangled there.
+      execFileSync("git", ["cat-file", "-e", `${commit}^{commit}`], { cwd: rootDir, stdio: "ignore" });
       return true;
     } catch {
       return false;
