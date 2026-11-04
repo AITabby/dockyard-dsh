@@ -633,6 +633,9 @@ export class CommandCodeDriver {
       credential,
       signal: context.signal ?? null,
       sessionId: context.sessionId ?? request.sessionId ?? null,
+      // DSH passes the durable attachment service on the provider context; the
+      // transport needs it to turn opaque image references into real bytes.
+      attachments: context.attachments ?? invocation?.attachments ?? null,
     });
   }
 }

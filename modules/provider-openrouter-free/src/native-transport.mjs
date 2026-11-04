@@ -8,6 +8,7 @@ import {
   finishReason,
   normalizeUsage,
   readSseEvents,
+  resolveImageData,
   sanitizeToolCallId,
   textFromContent,
 } from "../../../packages/providers/src/native-transport.mjs";
@@ -512,7 +513,7 @@ function extractNormalizedToolCall(block, fallbackIndex = 1) {
   };
 }
 
-export function normalizeMessages(request = {}, { includeReasoningContent = false } = {}) {
+export async function normalizeMessages(request = {}, { includeReasoningContent = false, attachments = null } = {}) {
   const out = [];
   const sysText = request.system ?? request.systemPrompt ?? request.instructions;
   if (typeof sysText === "string" && sysText.trim()) {
@@ -611,7 +612,17 @@ export function normalizeMessages(request = {}, { includeReasoningContent = fals
         } else if (block?.type === "text" && block.text) {
           parts.push({ type: "text", text: block.text });
         } else if (block?.type === "image") {
-          const url = block.url ?? (block.data ? `data:${block.mimeType ?? "image/png"};base64,${block.data}` : null);
+          let url = block.url ?? (block.data ? `data:${block.mimeType ?? "image/png"};base64,${block.data}` : null);
+          if (!url && block.attachment) {
+            // DSH hands over an opaque attachment reference; resolve real bytes
+            // instead of silently dropping the image.
+            const resolved = await resolveImageData(block, attachments);
+            if (resolved) {
+              url = `data:${resolved.mediaType || "image/png"};base64,${resolved.data}`;
+            } else {
+              throw new Error("图片附件无法读取：缺少 DSH 附件服务或附件已失效，请重新粘贴图片");
+            }
+          }
           if (url) parts.push({ type: "image_url", image_url: { url } });
         } else if (block?.type === "image_url" && block.image_url) {
           parts.push({ type: "image_url", image_url: block.image_url });
@@ -833,6 +844,10 @@ export function createOpenRouterFreeNativeExecutor({
       ? (input.credential ?? input.secret ?? null)
       : (maybeInvocation?.secret ?? maybeInvocation?.credential ?? maybeContext?.secret ?? null);
     const signal = (isWrappedInput ? input.signal : null) ?? request.signal ?? maybeContext?.signal ?? null;
+    const attachments = (isWrappedInput ? input.attachments : null)
+      ?? maybeInvocation?.attachments
+      ?? maybeContext?.attachments
+      ?? null;
 
     const localAuth = extractOpenRouterFreeAuth({ homeDir, env });
     const apiKey = secret?.apiKey ?? secret?.accessToken ?? secret?.token ?? localAuth?.apiKey;
@@ -863,13 +878,21 @@ export function createOpenRouterFreeNativeExecutor({
 
     const reasoningParam = normalizeReasoningParam(request);
 
-    const buildBodyForModels = (modelsSlice, { includeReasoningContent = false } = {}) => {
+    const normalizedCache = new Map();
+    const normalizedMessagesFor = async (includeReasoningContent) => {
+      const key = includeReasoningContent ? "1" : "0";
+      if (!normalizedCache.has(key)) {
+        normalizedCache.set(key, await normalizeMessages(request, { includeReasoningContent, attachments }));
+      }
+      return normalizedCache.get(key);
+    };
+    const buildBodyForModels = async (modelsSlice, { includeReasoningContent = false } = {}) => {
       const primaryModel = modelsSlice[0];
       const fallbackModels = modelsSlice.slice(1, 3);
       return {
         model: primaryModel,
         ...(fallbackModels.length > 0 ? { models: [primaryModel, ...fallbackModels] } : {}),
-        messages: normalizeMessages(request, { includeReasoningContent }),
+        messages: await normalizedMessagesFor(includeReasoningContent),
         stream: true,
         ...(tools ? { tools } : {}),
         ...(reasoningParam ? { reasoning: reasoningParam } : {}),
@@ -928,13 +951,13 @@ export function createOpenRouterFreeNativeExecutor({
 
     for (let bIdx = 0; bIdx < batches.length; bIdx++) {
       const batch = batches[bIdx];
-      let candidateRes = await doFetch(buildBodyForModels(batch, { includeReasoningContent }));
+      let candidateRes = await doFetch(await buildBodyForModels(batch, { includeReasoningContent }));
 
       if (!candidateRes.ok) {
         const errBody = await candidateRes.text().catch(() => "");
         if (candidateRes.status === 400 && errBody.includes("reasoning_content") && !includeReasoningContent) {
           includeReasoningContent = true;
-          candidateRes = await doFetch(buildBodyForModels(batch, { includeReasoningContent: true }));
+          candidateRes = await doFetch(await buildBodyForModels(batch, { includeReasoningContent: true }));
         } else {
           lastStatus = candidateRes.status;
           lastErrBody = errBody || `HTTP ${candidateRes.status}`;

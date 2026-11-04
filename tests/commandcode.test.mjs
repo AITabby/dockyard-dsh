@@ -120,7 +120,7 @@ test("formatCommandCodePlan formats plan names properly", () => {
   assert.equal(formatCommandCodePlan(""), "Command Code Subscription");
 });
 
-test("buildCommandCodeMessages and toWireTools transform DSH payloads", () => {
+test("buildCommandCodeMessages and toWireTools transform DSH payloads", async () => {
   const request = {
     system: "You are a helpful assistant.",
     messages: [
@@ -151,7 +151,7 @@ test("buildCommandCodeMessages and toWireTools transform DSH payloads", () => {
     ],
   };
 
-  const { systemPrompt, wireMessages } = buildCommandCodeMessages(request);
+  const { systemPrompt, wireMessages } = await buildCommandCodeMessages(request);
   assert.equal(systemPrompt, "You are a helpful assistant.");
   assert.equal(wireMessages[0].role, "user");
   assert.equal(wireMessages[0].content, "Hello");
@@ -175,7 +175,7 @@ test("buildCommandCodeMessages and toWireTools transform DSH payloads", () => {
   assert.equal(tools[0].description, "A test tool");
 });
 
-test("buildCommandCodeMessages pads reasoning_content for reasoning models and sanitizes tool IDs", () => {
+test("buildCommandCodeMessages pads reasoning_content for reasoning models and sanitizes tool IDs", async () => {
   const codexId = "call_0194ff7b2b647bc58a184bf418431050|item_0194ff7b2b647bc58a184bf418431051";
   const request = {
     model: "reflection/beam:free",
@@ -192,7 +192,7 @@ test("buildCommandCodeMessages pads reasoning_content for reasoning models and s
     ],
   };
 
-  const { wireMessages } = buildCommandCodeMessages(request);
+  const { wireMessages } = await buildCommandCodeMessages(request);
   assert.equal(wireMessages.length, 3);
   const asst = wireMessages[1];
   assert.equal(asst.role, "assistant");
@@ -524,4 +524,43 @@ test("commandcode deepseek-v4.1-flash forwards image parts end to end", async ()
   assert.ok(forwarded, "the provider transport must receive the request");
   const types = (forwarded.messages?.at(-1)?.content ?? []).map((part) => part.type);
   assert.ok(types.includes("image"), `image part must survive the adapter, got: ${types.join(",")}`);
+});
+
+test("buildCommandCodeMessages resolves opaque image attachments into data URLs", async () => {
+  // The transport used to require a pre-resolved `block.image`, so a DSH
+  // attachment reference ({ type: "image", attachment: {...} }) was dropped and
+  // the model never saw the pasted image.
+  const png = Buffer.from("89504e470d0a1a0a", "hex");
+  const attachments = {
+    async readImage(ref) {
+      return { data: png, ref: { mediaType: ref?.mediaType ?? "image/png" } };
+    },
+  };
+  const { wireMessages } = await buildCommandCodeMessages({
+    messages: [{
+      role: "user",
+      content: [
+        { type: "image", attachment: { attachmentId: "sha256:abc", mediaType: "image/png" } },
+        { type: "text", text: "看图" },
+      ],
+    }],
+  }, attachments);
+
+  const parts = wireMessages[0].content;
+  const image = parts.find((part) => part.type === "image");
+  assert.ok(image, "image part must survive into the wire payload");
+  assert.match(image.image, /^data:image\/png;base64,/);
+  assert.equal(image.image, `data:image/png;base64,${png.toString("base64")}`);
+});
+
+test("buildCommandCodeMessages fails loudly when an image attachment cannot be resolved", async () => {
+  await assert.rejects(
+    () => buildCommandCodeMessages({
+      messages: [{
+        role: "user",
+        content: [{ type: "image", attachment: { attachmentId: "sha256:missing", mediaType: "image/png" } }],
+      }],
+    }, null),
+    /图片附件无法读取/,
+  );
 });

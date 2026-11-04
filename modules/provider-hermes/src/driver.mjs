@@ -456,6 +456,9 @@ export class HermesDriver {
       account: invocation?.account ?? null,
       credential,
       signal: context.signal ?? null,
+      // Images reach the provider as opaque attachment references; without the
+      // durable attachment service the transport silently drops them.
+      attachments: context.attachments ?? invocation?.attachments ?? null,
     });
   }
 }

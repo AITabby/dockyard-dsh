@@ -10,6 +10,7 @@ import {
   nativeProviderError,
   normalizeUsage,
   readSseEvents,
+  resolveImageData,
   sanitizeToolCallId,
   textFromContent,
   validateNativeEndpoint,
@@ -102,7 +103,7 @@ export function isLikelyReasoningModel(modelId = "") {
   );
 }
 
-export function buildCommandCodeMessages(request = {}) {
+export async function buildCommandCodeMessages(request = {}, attachments = null) {
   const rawMessages = Array.isArray(request.messages) ? request.messages : [];
   let systemPrompt = "";
   const wireMessages = [];
@@ -210,11 +211,20 @@ export function buildCommandCodeMessages(request = {}) {
       for (const block of msg.content) {
         if (block.type === "text" && block.text) {
           parts.push({ type: "text", text: block.text });
-        } else if (block.type === "image" && block.image) {
+        } else if (block.type === "image") {
+          // DSH hands us an opaque attachment reference; resolve it through the
+          // durable attachment service so the gateway receives real image bytes.
+          const resolved = await resolveImageData(block, attachments);
+          if (!resolved) {
+            throw nativeProviderError(
+              PROVIDER_ID,
+              "图片附件无法读取：缺少 DSH 附件服务或附件已失效，请重新粘贴图片",
+            );
+          }
           parts.push({
             type: "image",
-            image: block.image.startsWith("data:") ? block.image : `data:${block.mimeType || "image/png"};base64,${block.image}`,
-            mimeType: block.mimeType || "image/png",
+            image: `data:${resolved.mediaType || "image/png"};base64,${resolved.data}`,
+            mimeType: resolved.mediaType || "image/png",
           });
         }
       }
@@ -310,6 +320,7 @@ export function createCommandCodeNativeExecutor({
     credential = null,
     signal = null,
     sessionId: explicitSessionId = null,
+    attachments = null,
   } = {}) {
     const auth = credential || account?.auth || extractCommandCodeAuth();
     const apiKey = auth?.apiKey || auth?.access || auth?.token;
@@ -332,7 +343,7 @@ export function createCommandCodeNativeExecutor({
       Authorization: `Bearer ${apiKey}`,
     };
 
-    const { systemPrompt, wireMessages } = buildCommandCodeMessages(request);
+    const { systemPrompt, wireMessages } = await buildCommandCodeMessages(request, attachments);
     const wireTools = toWireTools(request.tools);
 
     const today = new Date().toISOString().split("T")[0];

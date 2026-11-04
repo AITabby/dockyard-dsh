@@ -333,3 +333,39 @@ test("DockyardRuntime auto-provisions Hermes accounts and exposes model catalog 
     try { unlinkSync(tempAuthPath); } catch {}
   }
 });
+
+test("hermes driver forwards the durable attachment service to the transport", async () => {
+  // Regression: the driver used to invoke the executor without `attachments`,
+  // so the transport could not resolve DSH's opaque image references and every
+  // pasted image was silently dropped (the model then reported seeing nothing).
+  let captured = null;
+  const driver = createHermesDriver({
+    requestExecutor: async function* (envelope) {
+      captured = envelope;
+      yield { type: "text", text: "ok" };
+    },
+  });
+
+  const attachments = {
+    async readImage(ref) {
+      return { data: Buffer.from("fake-bytes"), ref: { mediaType: ref?.mediaType ?? "image/webp" } };
+    },
+  };
+  const request = {
+    model: "deepseek/deepseek-v4.1-flash",
+    messages: [{
+      role: "user",
+      content: [
+        { type: "image", attachment: { attachmentId: "sha256:abc", mediaType: "image/webp" } },
+        { type: "text", text: "看图" },
+      ],
+    }],
+  };
+
+  for await (const _ of await driver.stream(request, { account: { auth: { credentialRef: null } } }, { attachments })) {
+    // drain
+  }
+
+  assert.ok(captured, "executor must be invoked");
+  assert.equal(captured.attachments, attachments, "driver must forward context.attachments");
+});

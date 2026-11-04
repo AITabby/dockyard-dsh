@@ -13966,7 +13966,7 @@ function isLikelyReasoningModel(modelId = "") {
   const m = String(modelId || "").toLowerCase();
   return m.includes("beam") || m.includes("r1") || m.includes("reason") || m.includes("reflection") || m.includes("deepseek-r") || m.includes("qwq") || m.includes("qvq") || m.includes("deepseek-reasoner");
 }
-function buildCommandCodeMessages(request = {}) {
+async function buildCommandCodeMessages(request = {}, attachments = null) {
   const rawMessages = Array.isArray(request.messages) ? request.messages : [];
   let systemPrompt = "";
   const wireMessages = [];
@@ -14069,11 +14069,18 @@ ${text3}` : text3;
       for (const block of msg.content) {
         if (block.type === "text" && block.text) {
           parts.push({ type: "text", text: block.text });
-        } else if (block.type === "image" && block.image) {
+        } else if (block.type === "image") {
+          const resolved = await resolveImageData(block, attachments);
+          if (!resolved) {
+            throw nativeProviderError(
+              PROVIDER_ID13,
+              "\u56FE\u7247\u9644\u4EF6\u65E0\u6CD5\u8BFB\u53D6\uFF1A\u7F3A\u5C11 DSH \u9644\u4EF6\u670D\u52A1\u6216\u9644\u4EF6\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u7C98\u8D34\u56FE\u7247"
+            );
+          }
           parts.push({
             type: "image",
-            image: block.image.startsWith("data:") ? block.image : `data:${block.mimeType || "image/png"};base64,${block.image}`,
-            mimeType: block.mimeType || "image/png"
+            image: `data:${resolved.mediaType || "image/png"};base64,${resolved.data}`,
+            mimeType: resolved.mediaType || "image/png"
           });
         }
       }
@@ -14160,7 +14167,8 @@ function createCommandCodeNativeExecutor({
     account = null,
     credential = null,
     signal = null,
-    sessionId: explicitSessionId = null
+    sessionId: explicitSessionId = null,
+    attachments = null
   } = {}) {
     const auth = credential || account?.auth || extractCommandCodeAuth();
     const apiKey = auth?.apiKey || auth?.access || auth?.token;
@@ -14180,7 +14188,7 @@ function createCommandCodeNativeExecutor({
       "x-api-key": apiKey,
       Authorization: `Bearer ${apiKey}`
     };
-    const { systemPrompt, wireMessages } = buildCommandCodeMessages(request);
+    const { systemPrompt, wireMessages } = await buildCommandCodeMessages(request, attachments);
     const wireTools = toWireTools(request.tools);
     const today = (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
     const threadId = toWireUuid(sessionId);
@@ -14988,7 +14996,10 @@ var CommandCodeDriver = class {
       account: invocation?.account ?? null,
       credential,
       signal: context.signal ?? null,
-      sessionId: context.sessionId ?? request.sessionId ?? null
+      sessionId: context.sessionId ?? request.sessionId ?? null,
+      // DSH passes the durable attachment service on the provider context; the
+      // transport needs it to turn opaque image references into real bytes.
+      attachments: context.attachments ?? invocation?.attachments ?? null
     });
   }
 };
@@ -15838,7 +15849,10 @@ var HermesDriver = class {
       request,
       account: invocation?.account ?? null,
       credential,
-      signal: context.signal ?? null
+      signal: context.signal ?? null,
+      // Images reach the provider as opaque attachment references; without the
+      // durable attachment service the transport silently drops them.
+      attachments: context.attachments ?? invocation?.attachments ?? null
     });
   }
 };
@@ -16275,7 +16289,7 @@ function extractNormalizedToolCall(block, fallbackIndex = 1) {
     }
   };
 }
-function normalizeMessages(request = {}, { includeReasoningContent = false } = {}) {
+async function normalizeMessages(request = {}, { includeReasoningContent = false, attachments = null } = {}) {
   const out = [];
   const sysText = request.system ?? request.systemPrompt ?? request.instructions;
   if (typeof sysText === "string" && sysText.trim()) {
@@ -16370,7 +16384,15 @@ function normalizeMessages(request = {}, { includeReasoningContent = false } = {
         } else if (block?.type === "text" && block.text) {
           parts.push({ type: "text", text: block.text });
         } else if (block?.type === "image") {
-          const url = block.url ?? (block.data ? `data:${block.mimeType ?? "image/png"};base64,${block.data}` : null);
+          let url = block.url ?? (block.data ? `data:${block.mimeType ?? "image/png"};base64,${block.data}` : null);
+          if (!url && block.attachment) {
+            const resolved = await resolveImageData(block, attachments);
+            if (resolved) {
+              url = `data:${resolved.mediaType || "image/png"};base64,${resolved.data}`;
+            } else {
+              throw new Error("\u56FE\u7247\u9644\u4EF6\u65E0\u6CD5\u8BFB\u53D6\uFF1A\u7F3A\u5C11 DSH \u9644\u4EF6\u670D\u52A1\u6216\u9644\u4EF6\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u7C98\u8D34\u56FE\u7247");
+            }
+          }
           if (url) parts.push({ type: "image_url", image_url: { url } });
         } else if (block?.type === "image_url" && block.image_url) {
           parts.push({ type: "image_url", image_url: block.image_url });
@@ -16557,6 +16579,7 @@ function createOpenRouterFreeNativeExecutor({
     const request = isWrappedInput ? input.request ?? {} : input ?? {};
     const secret = isWrappedInput ? input.credential ?? input.secret ?? null : maybeInvocation?.secret ?? maybeInvocation?.credential ?? maybeContext?.secret ?? null;
     const signal = (isWrappedInput ? input.signal : null) ?? request.signal ?? maybeContext?.signal ?? null;
+    const attachments = (isWrappedInput ? input.attachments : null) ?? maybeInvocation?.attachments ?? maybeContext?.attachments ?? null;
     const localAuth = extractOpenRouterFreeAuth({ homeDir, env });
     const apiKey = secret?.apiKey ?? secret?.accessToken ?? secret?.token ?? localAuth?.apiKey;
     if (!apiKey) {
@@ -16582,13 +16605,21 @@ function createOpenRouterFreeNativeExecutor({
       noFallback: noFallback && !isRouterRequest
     });
     const reasoningParam = normalizeReasoningParam(request);
-    const buildBodyForModels = (modelsSlice, { includeReasoningContent: includeReasoningContent2 = false } = {}) => {
+    const normalizedCache = /* @__PURE__ */ new Map();
+    const normalizedMessagesFor = async (includeReasoningContent2) => {
+      const key = includeReasoningContent2 ? "1" : "0";
+      if (!normalizedCache.has(key)) {
+        normalizedCache.set(key, await normalizeMessages(request, { includeReasoningContent: includeReasoningContent2, attachments }));
+      }
+      return normalizedCache.get(key);
+    };
+    const buildBodyForModels = async (modelsSlice, { includeReasoningContent: includeReasoningContent2 = false } = {}) => {
       const primaryModel = modelsSlice[0];
       const fallbackModels = modelsSlice.slice(1, 3);
       return {
         model: primaryModel,
         ...fallbackModels.length > 0 ? { models: [primaryModel, ...fallbackModels] } : {},
-        messages: normalizeMessages(request, { includeReasoningContent: includeReasoningContent2 }),
+        messages: await normalizedMessagesFor(includeReasoningContent2),
         stream: true,
         ...tools ? { tools } : {},
         ...reasoningParam ? { reasoning: reasoningParam } : {},
@@ -16641,12 +16672,12 @@ function createOpenRouterFreeNativeExecutor({
     let response = null;
     for (let bIdx = 0; bIdx < batches.length; bIdx++) {
       const batch = batches[bIdx];
-      let candidateRes = await doFetch(buildBodyForModels(batch, { includeReasoningContent }));
+      let candidateRes = await doFetch(await buildBodyForModels(batch, { includeReasoningContent }));
       if (!candidateRes.ok) {
         const errBody = await candidateRes.text().catch(() => "");
         if (candidateRes.status === 400 && errBody.includes("reasoning_content") && !includeReasoningContent) {
           includeReasoningContent = true;
-          candidateRes = await doFetch(buildBodyForModels(batch, { includeReasoningContent: true }));
+          candidateRes = await doFetch(await buildBodyForModels(batch, { includeReasoningContent: true }));
         } else {
           lastStatus = candidateRes.status;
           lastErrBody = errBody || `HTTP ${candidateRes.status}`;
@@ -17316,7 +17347,10 @@ var OpenRouterFreeDriver = class {
       request,
       account: invocation?.account ?? null,
       credential,
-      signal: context.signal ?? request?.signal ?? null
+      signal: context.signal ?? request?.signal ?? null,
+      // Images reach the provider as opaque attachment references; without the
+      // durable attachment service the transport silently drops them.
+      attachments: context.attachments ?? invocation?.attachments ?? null
     });
   }
 };

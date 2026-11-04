@@ -323,7 +323,7 @@ test("DockyardDshService saves API Key with MemorySecretStore, refreshes live ca
 });
 
 test("normalizeMessages preserves DSH tool-call blocks, extracts tool-result blocks, and pairs orphaned tool outputs", async () => {
-  const normalized = normalizeMessages({
+  const normalized = await normalizeMessages({
     system: "You are a helpful coding assistant.",
     messages: [
       { role: "user", content: "List files" },
@@ -392,4 +392,25 @@ test("normalizeMessages preserves DSH tool-call blocks, extracts tool-result blo
   const finalText = chunks.filter((c) => c.type === "text-delta").map((c) => c.text).join("");
   assert.equal(reasoningText, "已写入记忆，准备输出结论");
   assert.equal(finalText, "这是最终干净的审核结论。");
+});
+
+test("openrouter-free driver forwards the durable attachment service to the transport", async () => {
+  let captured = null;
+  const { createOpenRouterFreeDriver } = await import("../modules/provider-openrouter-free/src/index.mjs");
+  const driver = createOpenRouterFreeDriver({
+    requestExecutor: async function* (envelope) {
+      captured = envelope;
+      yield { type: "text", text: "ok" };
+    },
+  });
+  const attachments = {
+    async readImage(ref) {
+      return { data: Buffer.from("bytes"), ref: { mediaType: ref?.mediaType ?? "image/png" } };
+    },
+  };
+  for await (const _ of await driver.stream({ messages: [{ role: "user", content: "hi" }] }, { account: null }, { attachments })) {
+    // drain
+  }
+  assert.ok(captured, "executor must be invoked");
+  assert.equal(captured.attachments, attachments, "driver must forward context.attachments");
 });
