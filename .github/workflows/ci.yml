@@ -56,6 +56,34 @@ jobs:
         working-directory: packages/dsh-plugin
         run: pnpm build
 
+  windows-tests:
+    # Windows surface: provider CLIs ship as `.cmd` shims there, which
+    # CreateProcess cannot launch directly, so the CLI transport has to route
+    # them through ComSpec. The full suite runs here so a POSIX-only assumption
+    # cannot creep back in unnoticed.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            packages/dsh-plugin/pnpm-lock.yaml
+      - name: Install root dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install plugin dependencies
+        working-directory: packages/dsh-plugin
+        run: pnpm install --frozen-lockfile
+      - name: Run test suite
+        run: pnpm test
+
   macos-gates:
     # Native surfaces that only exercise on macOS: the real Keychain helper
     # round-trip and Swift syntax gates for the app + keychain helper sources.

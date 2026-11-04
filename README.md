@@ -37,9 +37,9 @@ Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harnes
 - 读取 provider 返回的实时模型目录、推理档位、套餐和额度窗口。
 - 所有命令、模型选择和 LLM 生成都读取同一个 Dockyard runtime，不维护第二套账号池或额度缓存。
 
-### 平台支持：macOS 已发布，Windows 构建完成
+### 平台支持：macOS 与 Windows
 
-**当前版本为 0.1.18；macOS DMG 已提供，Windows EXE 已完成构建，待上传到对应 Release 并完成下载验证。**
+**当前版本为 0.1.18；macOS DMG 已提供，Windows EXE 已完成构建，待上传到对应 Release 并完成下载验证。插件本身在 Windows 上可直接安装使用。**
 
 macOS 完整功能依赖以下原生能力：
 
@@ -47,7 +47,13 @@ macOS 完整功能依赖以下原生能力：
 - 浏览器 OAuth 由 DSH GUI 打开 provider 官方授权页面，并使用 PKCE、state 校验和 loopback/manual-code 回调；CLI fallback 才使用官方 CLI。
 - 扫描模式仍可读取 Cursor、Antigravity 等 provider 的 macOS 官方桌面端或本机 CLI 会话状态。
 
-Windows 版本已完成 EXE 构建，待上传到对应 Release；上传完成后再进行发布页下载验证。
+Windows 上的实际行为：
+
+- **浏览器 OAuth 可用。** Codex、Antigravity、Grok、Claude、Cursor 的授权页由 DSH GUI 在新标签页打开，回调走同一条 loopback 链路，与 macOS 无差别。
+- **凭据存储走 DSH Credentials 服务。** 插件的 macOS Keychain 后端只在 darwin 上可用；Windows 上读写凭证统一由宿主 DSH 的 Credentials 服务完成。宿主没有该服务时会明确报错，不会静默丢弃登录态。
+- **CLI fallback 可用。** npm 全局安装的 provider CLI 在 Windows 上是 `.cmd` shim，插件会解析并经由 `%ComSpec%` 启动；停止时用 `taskkill` 清理整棵进程树。
+- **本机会话扫描仍仅限 macOS。** `/dockyard scan` 读不到 Windows 上的官方桌面端登录态，此时按不可用降级；请改用浏览器 OAuth 添加账号。
+- **WorkBuddy 与 OpenCode 在 Windows 上不可用**：这两个 provider 只能读取 macOS 官方桌面端的本机会话，没有浏览器 OAuth 入口，因此在 Windows 上会报告 unavailable。
 
 ### macOS 独立应用与 DMG
 
@@ -236,7 +242,7 @@ tests/                      安全、生命周期、provider 和 runtime 测试
 - DSH 本身仍处于 developer preview，上游可能发生 breaking changes。
 - provider 的官方 CLI、客户端路径、OAuth 返回字段和额度接口都可能变化；Dockyard 对缺失字段保持未知。
 - 浏览器 OAuth 多账号依赖 provider 官方授权页和 token response；如果 provider 暂停或改变该流程，必须重新验证 endpoint，而不是猜测协议。
-- Windows EXE 已完成构建但仍在上传和验证中；在发布页出现并完成验证前，请勿用于 Windows 生产环境。
+- Windows 上浏览器 OAuth、CLI fallback 与原生 HTTPS 请求均可用；本机会话扫描和 WorkBuddy / OpenCode 仍仅限 macOS。Windows EXE 已完成构建但仍在上传和验证中。
 
 ## English
 
@@ -269,9 +275,9 @@ When an official client, CLI, or OAuth source is missing or not signed in, Docky
 - Read live provider model catalogs, reasoning tiers, plans, and quota windows.
 - Keep commands, model selection, and generation on the same Dockyard runtime and source of truth.
 
-### Platform support: macOS released, Windows build complete
+### Platform support: macOS and Windows
 
-**The current release is 0.1.18. The macOS DMG is available; the Windows EXE is built and waiting to be uploaded to the matching release.**
+**The current release is 0.1.18. The macOS DMG is available; the Windows EXE is built and waiting to be uploaded to the matching release. The plugin itself installs and runs on Windows today.**
 
 The macOS integration depends on native behavior:
 
@@ -279,7 +285,13 @@ The macOS integration depends on native behavior:
 - Browser OAuth is opened by the DSH GUI and uses PKCE, state validation, loopback callbacks, or manual-code entry; the official CLI is only a fallback.
 - Scan mode still reads macOS desktop or local CLI session state for providers that expose it.
 
-The Windows EXE build is complete and waiting to be uploaded to the matching release; download verification will follow after the upload finishes.
+What Windows does today:
+
+- **Browser OAuth works.** The authorization page for Codex, Antigravity, Grok, Claude and Cursor opens in a new DSH GUI tab, and the callback uses the same loopback flow as on macOS.
+- **Credentials go through the host DSH Credentials service.** The plugin's macOS Keychain backend only exists on darwin; on Windows every credential read and write is delegated to DSH. A host without that service reports a clear error instead of silently dropping the login.
+- **CLI fallback works.** A provider CLI installed through npm is a `.cmd` shim on Windows; the plugin resolves the shim and launches it through `%ComSpec%`, and stops the whole tree with `taskkill`.
+- **Local session scanning stays macOS-only.** `/dockyard scan` cannot read a Windows desktop login, so it degrades to unavailable; add accounts with browser OAuth instead.
+- **WorkBuddy and OpenCode are unavailable on Windows.** Both providers can only read a macOS desktop session and have no browser OAuth entry point, so they report unavailable.
 
 ### Standalone macOS app and DMG
 
@@ -462,4 +474,4 @@ The core rule is simple: provider-specific logic stays in provider modules, acco
 - DeepSeek Harness is still a developer preview and may introduce breaking changes.
 - Official provider CLIs, desktop paths, OAuth fields, and quota APIs can change; missing fields remain unknown.
 - Browser account-pool behavior depends on each provider's official OAuth page and token response; endpoint changes require re-verification rather than guessed protocol fields.
-- The Windows EXE is built but is still being uploaded and verified; do not use it for production until the release asset is available and verified.
+- On Windows, browser OAuth, CLI fallback and the native HTTPS transports all work; local session scanning and WorkBuddy / OpenCode remain macOS-only. The Windows EXE is built but is still being uploaded and verified.

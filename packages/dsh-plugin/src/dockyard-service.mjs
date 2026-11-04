@@ -107,9 +107,25 @@ function commandError(text) {
 }
 
 function openDefaultBrowser(url) {
-  if (process.platform !== "darwin" || !url) return;
+  if (!url) return;
   try {
-    const child = spawn("open", [url], { detached: true, stdio: "ignore" });
+    let child;
+    if (process.platform === "darwin") {
+      child = spawn("open", [url], { detached: true, stdio: "ignore" });
+    } else if (process.platform === "win32") {
+      // `start` is a cmd.exe builtin, so it needs ComSpec rather than a binary
+      // on PATH. The empty quoted first argument is the window title, which
+      // `start` would otherwise take from the URL.
+      const comspec = process.env.ComSpec || process.env.COMSPEC || "cmd.exe";
+      child = spawn(comspec, ["/d", "/s", "/c", `start "" "${String(url).replace(/"/g, "")}"`], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+        windowsVerbatimArguments: true,
+      });
+    } else {
+      child = spawn("xdg-open", [url], { detached: true, stdio: "ignore" });
+    }
     child.unref();
   } catch {
     // The authorization URL is still returned in the command result.

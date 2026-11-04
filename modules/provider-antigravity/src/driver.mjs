@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -23,6 +22,9 @@ import {
   selectPrimaryQuotaWindow,
   stringValue,
 } from "../../../packages/providers/src/provider-utils.mjs";
+import { spawn } from "node:child_process";
+
+import { spawnCli } from "../../../packages/providers/src/win32-command.mjs";
 import {
   OFFICIAL_SESSION_AUTH_KIND,
   OFFICIAL_SESSION_SOURCE_KINDS,
@@ -38,25 +40,60 @@ import {
 const PROVIDER_ID = "antigravity";
 const DEFAULT_CLI = "agy";
 
-export function resolveAgyCliPath(configured, { env = process.env, home = homedir() } = {}) {
+/**
+ * Windows install locations for the `agy` CLI. npm-installed CLIs are `.cmd`
+ * shims under the per-user npm prefix; the desktop build lands an `.exe`
+ * under the per-user programs directory.
+ */
+function windowsAgyCandidates(env = process.env, home = homedir()) {
+  const appData = env.APPDATA || join(home, "AppData", "Roaming");
+  const localAppData = env.LOCALAPPDATA || join(home, "AppData", "Local");
+  return [
+    join(appData, "npm", "agy.cmd"),
+    join(appData, "npm", "agy.exe"),
+    join(localAppData, "Programs", "agy", "agy.exe"),
+    join(localAppData, "agy", "agy.exe"),
+    join(home, ".local", "bin", "agy.cmd"),
+    join(home, ".gemini", "antigravity", "bin", "agy.cmd"),
+    join(home, ".gemini", "antigravity", "bin", "agy.exe"),
+  ];
+}
+
+export function resolveAgyCliPath(configured, { env = process.env, home = homedir(), platform = process.platform } = {}) {
   const envPath = configured ?? env.DOCKYARD_ANTIGRAVITY_CLI;
   if (envPath && envPath !== "agy" && envPath !== DEFAULT_CLI) {
     return envPath;
   }
-  const candidates = [
-    join(home, ".local", "bin", "agy"),
-    join(home, ".gemini", "antigravity", "bin", "agy"),
-    "/usr/local/bin/agy",
-    "/opt/homebrew/bin/agy",
-    "/usr/bin/agy",
-  ];
+  const candidates = platform === "win32"
+    ? windowsAgyCandidates(env, home)
+    : [
+      join(home, ".local", "bin", "agy"),
+      join(home, ".gemini", "antigravity", "bin", "agy"),
+      "/usr/local/bin/agy",
+      "/opt/homebrew/bin/agy",
+      "/usr/bin/agy",
+    ];
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
   }
   return envPath || DEFAULT_CLI;
 }
 
-function augmentPathWithUserBins(env = process.env, home = homedir()) {
+function augmentPathWithUserBins(env = process.env, home = homedir(), platform = process.platform) {
+  if (platform === "win32") {
+    // Windows npm shims live in %APPDATA%\npm; homebrew and /usr/local do not exist.
+    const appData = env?.APPDATA || join(home, "AppData", "Roaming");
+    const extraPaths = [
+      join(appData, "npm"),
+      join(home, ".local", "bin"),
+      join(home, ".gemini", "antigravity", "bin"),
+    ];
+    const currentPath = env?.PATH || "";
+    const parts = currentPath.split(";");
+    const toPrepend = extraPaths.filter((p) => existsSync(p) && !parts.includes(p));
+    if (toPrepend.length === 0) return currentPath;
+    return [...toPrepend, currentPath].filter(Boolean).join(";");
+  }
   const extraPaths = [
     join(home, ".local", "bin"),
     join(home, ".gemini", "antigravity", "bin"),
@@ -352,11 +389,11 @@ function runCommand(command, args, {
     const childEnv = { ...env, [AGY_FILE_STORAGE_ENV]: "true" };
     if (includeAccountInfo) delete childEnv.AGY_CLI_HIDE_ACCOUNT_INFO;
     else childEnv.AGY_CLI_HIDE_ACCOUNT_INFO ??= "1";
-    childEnv.PATH = augmentPathWithUserBins(childEnv, childEnv.HOME || homedir());
+    childEnv.PATH = augmentPathWithUserBins(childEnv, childEnv.HOME || childEnv.USERPROFILE || homedir());
     const resolvedCommand = (command === DEFAULT_CLI || command === "agy")
-      ? resolveAgyCliPath(command, { env: childEnv, home: childEnv.HOME || homedir() })
+      ? resolveAgyCliPath(command, { env: childEnv, home: childEnv.HOME || childEnv.USERPROFILE || homedir() })
       : command;
-    const child = spawn(resolvedCommand, args, {
+    const child = spawnCli(resolvedCommand, args, {
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -421,11 +458,11 @@ function parseJsonOutput(output) {
 function runStreamingCommand(command, args, { env = process.env, timeoutMs = 300_000, signal } = {}) {
   return (async function* lines() {
     const childEnv = { ...env, [AGY_FILE_STORAGE_ENV]: "true", AGY_CLI_HIDE_ACCOUNT_INFO: "1" };
-    childEnv.PATH = augmentPathWithUserBins(childEnv, childEnv.HOME || homedir());
+    childEnv.PATH = augmentPathWithUserBins(childEnv, childEnv.HOME || childEnv.USERPROFILE || homedir());
     const resolvedCommand = (command === DEFAULT_CLI || command === "agy")
-      ? resolveAgyCliPath(command, { env: childEnv, home: childEnv.HOME || homedir() })
+      ? resolveAgyCliPath(command, { env: childEnv, home: childEnv.HOME || childEnv.USERPROFILE || homedir() })
       : command;
-    const child = spawn(resolvedCommand, args, {
+    const child = spawnCli(resolvedCommand, args, {
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,

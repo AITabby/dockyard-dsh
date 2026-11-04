@@ -1,9 +1,10 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import readline from "node:readline";
+import { spawnCli } from "../../../packages/providers/src/win32-command.mjs";
 import {
   fetchNativeResponse,
   finishReason,
@@ -245,7 +246,7 @@ function opencodeDebug(...args) {
 async function startOpencodeServer(cliPath) {
   opencodeDebug("starting local server", cliPath);
   const password = randomBytes(24).toString("base64url");
-  const child = spawn(cliPath, ["serve", "--hostname", "127.0.0.1", "--port", "0"], {
+  const child = spawnCli(cliPath, ["serve", "--hostname", "127.0.0.1", "--port", "0"], {
     stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env, OPENCODE_PASSWORD: password },
   });
@@ -749,7 +750,7 @@ export function createOpencodeNativeExecutor({
       }
       args.push("--format", "json", prompt);
 
-      const child = spawn(resolvedCliPath, args, {
+      const child = spawnCli(resolvedCliPath, args, {
         signal,
         stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env },

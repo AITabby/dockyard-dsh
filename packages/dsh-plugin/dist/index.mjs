@@ -1015,7 +1015,7 @@ var init_dockyard_remote_host = __esm({
 
 // packages/dsh-plugin/src/index.mjs
 import { existsSync as existsSync8, readFileSync as readFileSync8 } from "node:fs";
-import { join as join19 } from "node:path";
+import { join as join20 } from "node:path";
 
 // packages/core/src/errors.mjs
 var DockyardError = class extends Error {
@@ -3318,7 +3318,7 @@ var ModelSelectionStore = class {
 // modules/provider-codex/src/driver.mjs
 import { createHash as createHash3 } from "node:crypto";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname4, join as join5 } from "node:path";
+import { dirname as dirname5, join as join6 } from "node:path";
 
 // packages/oauth/src/browser-oauth-authorizer.mjs
 import { createHash as createHash2, randomBytes, randomUUID as randomUUID2 } from "node:crypto";
@@ -3684,8 +3684,122 @@ var browserOAuthAuthorizerConstants = Object.freeze({
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { mkdir as mkdir2, mkdtemp, readFile as readFile3, rm as rm2 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
+
+// packages/providers/src/win32-command.mjs
 import { spawn as spawn2 } from "node:child_process";
+import { statSync } from "node:fs";
+import { basename, delimiter, dirname as dirname4, extname, isAbsolute, join as join4, sep } from "node:path";
+var DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD";
+var SHELL_SCRIPT_EXTENSIONS = /* @__PURE__ */ new Set([".cmd", ".bat"]);
+var CMD_META_CHARS = /([()\][%!^"`<>&|;, *?])/g;
+function pathSeparators(platform) {
+  return platform === "win32" ? /* @__PURE__ */ new Set(["/", "\\"]) : /* @__PURE__ */ new Set([sep]);
+}
+function hasPathSeparator(command, platform) {
+  const separators = pathSeparators(platform);
+  for (const character of command) {
+    if (separators.has(character)) return true;
+  }
+  return false;
+}
+function searchPathDirectories(env, platform) {
+  const raw = platform === "win32" ? env.PATH ?? env.Path ?? env.path ?? "" : env.PATH ?? "";
+  const separator = platform === "win32" ? ";" : delimiter;
+  return String(raw).split(separator).filter(Boolean);
+}
+function extensionCandidates(command, env, platform) {
+  if (platform !== "win32") return [command];
+  if (extname(command) !== "") return [command];
+  const raw = env.PATHEXT ?? DEFAULT_PATHEXT;
+  const extensions = String(raw).split(";").map((value) => value.trim()).filter(Boolean);
+  const candidates = [];
+  for (const extension of extensions) {
+    candidates.push(`${command}${extension.toLowerCase()}`);
+    candidates.push(`${command}${extension}`);
+  }
+  candidates.push(command);
+  return candidates;
+}
+function isFile(candidate2) {
+  try {
+    return statSync(candidate2).isFile();
+  } catch {
+    return false;
+  }
+}
+function locateWindowsExecutable(command, { env = process.env } = {}) {
+  if (isAbsolute(command) || hasPathSeparator(command, "win32") || hasPathSeparator(command, process.platform)) {
+    const directory = dirname4(command);
+    const name2 = basename(command);
+    for (const candidate2 of extensionCandidates(name2, env, "win32")) {
+      const resolved = join4(directory, candidate2);
+      if (isFile(resolved)) return resolved;
+    }
+    return null;
+  }
+  for (const directory of searchPathDirectories(env, "win32")) {
+    for (const candidate2 of extensionCandidates(command, env, "win32")) {
+      const resolved = join4(directory, candidate2);
+      if (isFile(resolved)) return resolved;
+    }
+  }
+  return null;
+}
+function resolveCliCommand(command, { platform = process.platform, env = process.env } = {}) {
+  const name2 = String(command ?? "");
+  if (platform !== "win32" || name2.length === 0) {
+    return { file: name2, viaShell: false, resolved: name2 };
+  }
+  const resolved = locateWindowsExecutable(name2, { env }) ?? name2;
+  const extension = extname(resolved).toLowerCase();
+  return {
+    file: resolved,
+    viaShell: SHELL_SCRIPT_EXTENSIONS.has(extension),
+    resolved
+  };
+}
+function escapeCmdArgument(value) {
+  let argument = String(value ?? "");
+  argument = argument.replace(/(\\*)"/g, '$1$1\\"');
+  argument = argument.replace(/(\\*)$/, "$1$1");
+  argument = `"${argument}"`;
+  return argument.replace(CMD_META_CHARS, "^$1");
+}
+function escapeCmdCommand(value) {
+  return String(value ?? "").replace(CMD_META_CHARS, "^$1");
+}
+function buildCmdInvocation(scriptPath, args = [], { env = process.env } = {}) {
+  const comspec = env.ComSpec ?? env.COMSPEC ?? env.comspec ?? "cmd.exe";
+  const line = [escapeCmdCommand(scriptPath), ...args.map(escapeCmdArgument)].join(" ");
+  return {
+    file: comspec,
+    args: ["/d", "/s", "/c", `"${line}"`],
+    windowsVerbatimArguments: true
+  };
+}
+function spawnCli(command, args = [], options = {}) {
+  const {
+    platform = process.platform,
+    spawnImpl = spawn2,
+    env = process.env,
+    ...spawnOptions
+  } = options;
+  const target = resolveCliCommand(command, { platform, env });
+  if (!target.viaShell) {
+    return spawnImpl(target.file, args, { env, ...spawnOptions });
+  }
+  const invocation = buildCmdInvocation(target.file, args, { env });
+  return spawnImpl(invocation.file, invocation.args, {
+    env,
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+    ...spawnOptions
+  });
+}
+var win32CommandConstants = Object.freeze({
+  defaultPathExt: DEFAULT_PATHEXT,
+  shellScriptExtensions: Object.freeze([...SHELL_SCRIPT_EXTENSIONS])
+});
 
 // packages/oauth/src/cli-url-sanitizer.mjs
 var URL_PATTERN = /https?:\/\/[^\s"'<>]+/gi;
@@ -3856,7 +3970,7 @@ function createCliOAuthAuthorizer({
         }
         let raw;
         try {
-          raw = JSON.parse(await readFile3(join4(session.profileDir, authFileName), "utf8"));
+          raw = JSON.parse(await readFile3(join5(session.profileDir, authFileName), "utf8"));
         } catch (error) {
           session.status = "failed";
           session.diagnostic = `\u5B98\u65B9\u767B\u5F55\u5B8C\u6210\uFF0C\u4F46\u6CA1\u6709\u627E\u5230\u53EF\u8BFB\u53D6\u7684 OAuth \u72B6\u6001\uFF1A${redactError(error)}`;
@@ -3887,7 +4001,7 @@ function createCliOAuthAuthorizer({
   }
   async function begin() {
     const cleanupProfile = !profileDirectory;
-    const profileDir = profileDirectory ?? await mkdtemp(join4(tmpdir(), profilePrefix));
+    const profileDir = profileDirectory ?? await mkdtemp(join5(tmpdir(), profilePrefix));
     if (!cleanupProfile) await mkdir2(profileDir, { recursive: true });
     const session = {
       sessionId: `${providerId}:${randomUUID3()}`,
@@ -3911,7 +4025,7 @@ function createCliOAuthAuthorizer({
     };
     sessions.set(session.sessionId, session);
     try {
-      const child = spawn2(cliPath, loginArgs, {
+      const child = spawnCli(cliPath, loginArgs, {
         env: { ...environment, [environmentKey]: profileDir },
         stdio: ["ignore", "pipe", "pipe"]
       });
@@ -4037,13 +4151,13 @@ function hash(value) {
 }
 function codexHomePath({ env = process.env, home = homedir3(), codexHome, authFilePath } = {}) {
   if (codexHome) return codexHome;
-  if (authFilePath) return dirname4(authFilePath);
-  return env.CODEX_HOME || join5(home, ".codex");
+  if (authFilePath) return dirname5(authFilePath);
+  return env.CODEX_HOME || join6(home, ".codex");
 }
 function codexAuthPath({ env = process.env, home = homedir3(), authFilePath, codexHome } = {}) {
   if (authFilePath) return authFilePath;
   const baseHome = codexHomePath({ env, home, codexHome, authFilePath });
-  return join5(baseHome, "auth.json");
+  return join6(baseHome, "auth.json");
 }
 function profileClaims(payload) {
   return payload?.["https://api.openai.com/profile"] ?? payload?.profile ?? {};
@@ -4228,7 +4342,7 @@ function createCodexCatalogLoader({
 } = {}) {
   const resolvedHome = codexHomePath({ env, home, codexHome, authFilePath });
   const resolvedAuthPath = codexAuthPath({ env, home, authFilePath, codexHome: resolvedHome });
-  const resolvedCachePath = modelsCachePath || join5(resolvedHome, "models_cache.json");
+  const resolvedCachePath = modelsCachePath || join6(resolvedHome, "models_cache.json");
   let cached = null;
   let cachedAt = 0;
   let pending = null;
@@ -4790,15 +4904,14 @@ function createCodexModule({ driver = {} } = {}) {
 }
 
 // modules/provider-antigravity/src/driver.mjs
-import { spawn as spawn4 } from "node:child_process";
 import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
 import { existsSync as existsSync2 } from "node:fs";
 import { mkdir as mkdir3, mkdtemp as mkdtemp2, readFile as readFile4, rename as rename2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir5, tmpdir as tmpdir2 } from "node:os";
-import { dirname as dirname5, join as join7 } from "node:path";
+import { dirname as dirname6, join as join8 } from "node:path";
 
 // packages/providers/src/cli-agent-transport.mjs
-import { spawn as spawn3 } from "node:child_process";
+import { execFileSync, spawn as spawn3 } from "node:child_process";
 var MAX_CLI_OUTPUT_BYTES = 4 * 1024 * 1024;
 var PROCESS_GROUP_PLATFORM = process.platform !== "win32";
 var KILL_GRACE_MS = 1e3;
@@ -4836,6 +4949,22 @@ function cliAbortError(providerId, output, errorOutput) {
 }
 function killProcessTree(child, sig, { detached = PROCESS_GROUP_PLATFORM } = {}) {
   const pid = child?.pid;
+  if (process.platform === "win32") {
+    if (Number.isFinite(pid)) {
+      try {
+        execFileSync("taskkill", ["/pid", String(pid), "/t", "/f"], {
+          stdio: "ignore",
+          windowsHide: true
+        });
+      } catch {
+      }
+    }
+    try {
+      child.kill(sig);
+    } catch {
+    }
+    return;
+  }
   if (detached && Number.isFinite(pid)) {
     try {
       process.kill(-pid, sig);
@@ -4877,7 +5006,7 @@ function runCliCommand(command, args, {
 } = {}) {
   return new Promise((resolve2, reject) => {
     const detached = PROCESS_GROUP_PLATFORM;
-    const child = spawn3(command, args, {
+    const child = spawnCli(command, args, {
       env,
       ...cwd ? { cwd } : {},
       stdio: ["ignore", "pipe", "pipe"],
@@ -4958,11 +5087,14 @@ var cliAgentTransportConstants = Object.freeze({
   defaultOutputFormat: "stream-json"
 });
 
+// modules/provider-antigravity/src/driver.mjs
+import { spawn as spawn4 } from "node:child_process";
+
 // modules/provider-antigravity/src/native-transport.mjs
 import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join6 } from "node:path";
-import { execFileSync } from "node:child_process";
+import { join as join7 } from "node:path";
+import { execFileSync as execFileSync2 } from "node:child_process";
 
 // packages/providers/src/native-transport.mjs
 function numericStatus(value) {
@@ -5615,7 +5747,7 @@ var AGY_KEYCHAIN_ACCOUNT = "antigravity";
 var AGY_KEYCHAIN_VALUE_PREFIX = "go-keyring-base64:";
 var ANTIGRAVITY_INFO_PATHS = [
   "/Applications/Antigravity.app/Contents/Info.plist",
-  join6(homedir4(), "Applications/Antigravity.app/Contents/Info.plist")
+  join7(homedir4(), "Applications/Antigravity.app/Contents/Info.plist")
 ];
 function normalizeAntigravityClientVersion(value) {
   const version = String(value ?? "").trim();
@@ -5624,7 +5756,7 @@ function normalizeAntigravityClientVersion(value) {
 function detectAntigravityUserAgent() {
   for (const infoPath of ANTIGRAVITY_INFO_PATHS) {
     try {
-      const version = normalizeAntigravityClientVersion(execFileSync(
+      const version = normalizeAntigravityClientVersion(execFileSync2(
         "/usr/libexec/PlistBuddy",
         ["-c", "Print :CFBundleShortVersionString", infoPath],
         { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
@@ -5821,7 +5953,7 @@ function readOfficialTokenFile(path2) {
 }
 function readAntigravityTokenFile({ env = process.env, home = homedir4() } = {}) {
   return readOfficialTokenFile(
-    env.DOCKYARD_ANTIGRAVITY_TOKEN_FILE || join6(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+    env.DOCKYARD_ANTIGRAVITY_TOKEN_FILE || join7(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
   );
 }
 function parseAntigravityKeychainValue(value) {
@@ -5852,8 +5984,8 @@ function readAntigravityKeychainToken({ home = homedir4() } = {}) {
     return cachedKeychainToken;
   }
   try {
-    const keychainPath = join6(home, "Library", "Keychains", "login.keychain-db");
-    const value = execFileSync(MACOS_SECURITY_BIN, [
+    const keychainPath = join7(home, "Library", "Keychains", "login.keychain-db");
+    const value = execFileSync2(MACOS_SECURITY_BIN, [
       "find-generic-password",
       "-s",
       AGY_KEYCHAIN_SERVICE,
@@ -6301,10 +6433,10 @@ function saveInlineImageToArtifacts(inlineData, workingDir = process.cwd()) {
     const base64Data = inlineData?.data;
     if (!base64Data || typeof base64Data !== "string") return null;
     const ext = extensionFromMimeType(mediaType);
-    const artifactsDir = join6(workingDir, "artifacts");
+    const artifactsDir = join7(workingDir, "artifacts");
     mkdirSync2(artifactsDir, { recursive: true });
     const filename = `imagen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-    const filePath = join6(artifactsDir, filename);
+    const filePath = join7(artifactsDir, filename);
     writeFileSync2(filePath, Buffer.from(base64Data, "base64"));
     return `/artifacts/${filename}`;
   } catch {
@@ -6680,14 +6812,27 @@ var antigravityNativeTransportConstants = Object.freeze({
 // modules/provider-antigravity/src/driver.mjs
 var PROVIDER_ID3 = "antigravity";
 var DEFAULT_CLI = "agy";
-function resolveAgyCliPath(configured, { env = process.env, home = homedir5() } = {}) {
+function windowsAgyCandidates(env = process.env, home = homedir5()) {
+  const appData = env.APPDATA || join8(home, "AppData", "Roaming");
+  const localAppData = env.LOCALAPPDATA || join8(home, "AppData", "Local");
+  return [
+    join8(appData, "npm", "agy.cmd"),
+    join8(appData, "npm", "agy.exe"),
+    join8(localAppData, "Programs", "agy", "agy.exe"),
+    join8(localAppData, "agy", "agy.exe"),
+    join8(home, ".local", "bin", "agy.cmd"),
+    join8(home, ".gemini", "antigravity", "bin", "agy.cmd"),
+    join8(home, ".gemini", "antigravity", "bin", "agy.exe")
+  ];
+}
+function resolveAgyCliPath(configured, { env = process.env, home = homedir5(), platform = process.platform } = {}) {
   const envPath = configured ?? env.DOCKYARD_ANTIGRAVITY_CLI;
   if (envPath && envPath !== "agy" && envPath !== DEFAULT_CLI) {
     return envPath;
   }
-  const candidates = [
-    join7(home, ".local", "bin", "agy"),
-    join7(home, ".gemini", "antigravity", "bin", "agy"),
+  const candidates = platform === "win32" ? windowsAgyCandidates(env, home) : [
+    join8(home, ".local", "bin", "agy"),
+    join8(home, ".gemini", "antigravity", "bin", "agy"),
     "/usr/local/bin/agy",
     "/opt/homebrew/bin/agy",
     "/usr/bin/agy"
@@ -6697,10 +6842,23 @@ function resolveAgyCliPath(configured, { env = process.env, home = homedir5() } 
   }
   return envPath || DEFAULT_CLI;
 }
-function augmentPathWithUserBins(env = process.env, home = homedir5()) {
+function augmentPathWithUserBins(env = process.env, home = homedir5(), platform = process.platform) {
+  if (platform === "win32") {
+    const appData = env?.APPDATA || join8(home, "AppData", "Roaming");
+    const extraPaths2 = [
+      join8(appData, "npm"),
+      join8(home, ".local", "bin"),
+      join8(home, ".gemini", "antigravity", "bin")
+    ];
+    const currentPath2 = env?.PATH || "";
+    const parts2 = currentPath2.split(";");
+    const toPrepend2 = extraPaths2.filter((p) => existsSync2(p) && !parts2.includes(p));
+    if (toPrepend2.length === 0) return currentPath2;
+    return [...toPrepend2, currentPath2].filter(Boolean).join(";");
+  }
   const extraPaths = [
-    join7(home, ".local", "bin"),
-    join7(home, ".gemini", "antigravity", "bin"),
+    join8(home, ".local", "bin"),
+    join8(home, ".gemini", "antigravity", "bin"),
     "/opt/homebrew/bin",
     "/usr/local/bin"
   ];
@@ -6887,7 +7045,7 @@ function tokenNeedsRefresh(credential, now, leewayMs = 6e4) {
 }
 function officialAntigravityTokenPath(environment) {
   const home = environment?.HOME || homedir5();
-  return environment?.DOCKYARD_ANTIGRAVITY_TOKEN_FILE || join7(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+  return environment?.DOCKYARD_ANTIGRAVITY_TOKEN_FILE || join8(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
 }
 function agyRefreshEnvironment(environment, tokenPath) {
   return {
@@ -6923,9 +7081,9 @@ function runCommand(command, args, {
     const childEnv = { ...env, [AGY_FILE_STORAGE_ENV]: "true" };
     if (includeAccountInfo) delete childEnv.AGY_CLI_HIDE_ACCOUNT_INFO;
     else childEnv.AGY_CLI_HIDE_ACCOUNT_INFO ??= "1";
-    childEnv.PATH = augmentPathWithUserBins(childEnv, childEnv.HOME || homedir5());
-    const resolvedCommand = command === DEFAULT_CLI || command === "agy" ? resolveAgyCliPath(command, { env: childEnv, home: childEnv.HOME || homedir5() }) : command;
-    const child = spawn4(resolvedCommand, args, {
+    childEnv.PATH = augmentPathWithUserBins(childEnv, childEnv.HOME || childEnv.USERPROFILE || homedir5());
+    const resolvedCommand = command === DEFAULT_CLI || command === "agy" ? resolveAgyCliPath(command, { env: childEnv, home: childEnv.HOME || childEnv.USERPROFILE || homedir5() }) : command;
+    const child = spawnCli(resolvedCommand, args, {
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -7051,8 +7209,8 @@ function catalogScopeKey(accounts) {
   return accountIds.length > 0 ? `accounts:${hash2(accountIds.join("\n")).slice(0, 32)}` : "unscoped";
 }
 function defaultAntigravityCatalogCachePath({ env = process.env, home = homedir5() } = {}) {
-  const dockyardHome = env.DOCKYARD_DSH_HOME || join7(home, ".dockyard-dsh");
-  return join7(dockyardHome, "antigravity-catalog.json");
+  const dockyardHome = env.DOCKYARD_DSH_HOME || join8(home, ".dockyard-dsh");
+  return join8(dockyardHome, "antigravity-catalog.json");
 }
 function persistableCatalog(value) {
   return {
@@ -7074,7 +7232,7 @@ async function readAntigravityCatalogCache(filePath) {
 }
 async function writeAntigravityCatalogCache(filePath, cache) {
   if (!filePath) return;
-  await mkdir3(dirname5(filePath), { recursive: true, mode: 448 });
+  await mkdir3(dirname6(filePath), { recursive: true, mode: 448 });
   const entries = Object.entries(cache.entries ?? {}).slice(-8);
   const tempPath = `${filePath}.${randomUUID4()}.tmp`;
   try {
@@ -7525,12 +7683,12 @@ function createAntigravityOAuthAuthorizer({
     return session.finalizing;
   }
   async function begin() {
-    const profileDir = await mkdtemp2(join7(tmpdir2(), "dockyard-antigravity-oauth-"));
-    const tokenPath = join7(profileDir, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+    const profileDir = await mkdtemp2(join8(tmpdir2(), "dockyard-antigravity-oauth-"));
+    const tokenPath = join8(profileDir, ".gemini", "antigravity-cli", "antigravity-oauth-token");
     const childEnv = {
       ...environment,
       HOME: profileDir,
-      XDG_CONFIG_HOME: join7(profileDir, ".config"),
+      XDG_CONFIG_HOME: join8(profileDir, ".config"),
       DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath,
       [AGY_FILE_STORAGE_ENV]: "true"
     };
@@ -7879,7 +8037,7 @@ var AntigravityOfficialSessionDriver = class {
     const officialHome = this.env.HOME || homedir5();
     const childEnv = agyRefreshEnvironment(this.env, officialTokenPath);
     try {
-      await mkdir3(dirname5(officialTokenPath), { recursive: true, mode: 448 });
+      await mkdir3(dirname6(officialTokenPath), { recursive: true, mode: 448 });
       const refreshCommand = this.usePtyForSessionRefresh ? this.ptyPythonPath : this.cliPath;
       const refreshArgs = this.usePtyForSessionRefresh ? ["-u", "-c", ANTIGRAVITY_PTY_SCRIPT, this.cliPath, "models"] : ["models"];
       await this.commandRunner(refreshCommand, refreshArgs, {
@@ -7906,7 +8064,7 @@ var AntigravityOfficialSessionDriver = class {
       if (nextCredential.access === credential.access && !expiryAdvanced) {
         throw new Error("agy did not advance the Antigravity OAuth token expiry");
       }
-      await mkdir3(dirname5(officialTokenPath), { recursive: true, mode: 448 });
+      await mkdir3(dirname6(officialTokenPath), { recursive: true, mode: 448 });
       const persistedPath = `${officialTokenPath}.${randomUUID4()}.tmp`;
       try {
         await writeFile2(persistedPath, JSON.stringify({
@@ -7944,7 +8102,7 @@ var AntigravityOfficialSessionDriver = class {
     const childEnv = agyRefreshEnvironment(this.env, tokenPath);
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
     try {
-      await mkdir3(dirname5(tokenPath), { recursive: true, mode: 448 });
+      await mkdir3(dirname6(tokenPath), { recursive: true, mode: 448 });
       if (!readAntigravityTokenFile({ env: childEnv, home: officialHome })?.token) {
         await writeFile2(tokenPath, JSON.stringify({
           auth_method: "consumer",
@@ -8442,7 +8600,7 @@ import { createHash as createHash5 } from "node:crypto";
 import { mkdtemp as mkdtemp3, readFile as readFile5, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
 import { homedir as homedir6 } from "node:os";
 import { tmpdir as tmpdir3 } from "node:os";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 var PROVIDER_ID4 = "grok";
 var DEFAULT_AUTHORIZATION_URL2 = "https://auth.x.ai/oauth2/authorize";
 var DEFAULT_TOKEN_URL2 = "https://auth.x.ai/oauth2/token";
@@ -8450,7 +8608,7 @@ var DEFAULT_USERINFO_URL = "https://auth.x.ai/oauth2/userinfo";
 var DEFAULT_GROK_MODELS_URL = "https://cli-chat-proxy.grok.com/v1/models";
 var DEFAULT_CLIENT_ID2 = "b1a00492-073a-47ea-816f-4c329264a828";
 var DEFAULT_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write workspaces:read workspaces:write";
-var DEFAULT_GROK_HOME = join8(homedir6(), ".grok");
+var DEFAULT_GROK_HOME = join9(homedir6(), ".grok");
 var DEFAULT_CATALOG_TTL_MS2 = 6e4;
 var DEFAULT_GROK_USAGE_URL = "https://grok.com/?_s=usage";
 var DEFAULT_GROK_CREDITS_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
@@ -8472,7 +8630,7 @@ function grokTokenNeedsRefresh(credential, now = /* @__PURE__ */ new Date(), lee
   return Number.isFinite(expiresAt) && expiresAt <= now.getTime() + leewayMs;
 }
 function grokHomePath({ env = process.env, home = homedir6(), grokHome } = {}) {
-  return grokHome ?? env.GROK_HOME ?? join8(home, ".grok");
+  return grokHome ?? env.GROK_HOME ?? join9(home, ".grok");
 }
 function grokCommandEnvironment(env, grokHome) {
   return { ...env, GROK_HOME: grokHome };
@@ -8875,7 +9033,7 @@ function createGrokCatalogLoader({
     if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
     if (pending) return pending;
     pending = (async () => {
-      const cache = await readJson3(join8(resolvedHome, "models_cache.json"));
+      const cache = await readJson3(join9(resolvedHome, "models_cache.json"));
       let discoveredModels = [];
       let source = "official_grok_cli";
       let cliError = null;
@@ -9013,7 +9171,7 @@ var GrokOAuthDriver = class {
   } = {}) {
     this.env = env;
     this.grokHome = grokHomePath({ env, home, grokHome });
-    this.authFilePath = authFilePath ?? join8(this.grokHome, "auth.json");
+    this.authFilePath = authFilePath ?? join9(this.grokHome, "auth.json");
     this.cliPath = cliPath;
     this.commandRunner = commandRunner;
     this.requestExecutor = requestExecutor;
@@ -9279,8 +9437,8 @@ var GrokOAuthDriver = class {
   }
   async #prepareCredentialEnvironment(account, context = {}) {
     const credential = await this.#readCredential(account, context);
-    const profileDir = await mkdtemp3(join8(tmpdir3(), "dockyard-grok-run-"));
-    const authPath = join8(profileDir, "auth.json");
+    const profileDir = await mkdtemp3(join9(tmpdir3(), "dockyard-grok-run-"));
+    const authPath = join9(profileDir, "auth.json");
     const key = account.accountId ?? credential.accountId;
     const raw = {
       [key]: {
@@ -9774,7 +9932,6 @@ import { homedir as homedir8 } from "node:os";
 
 // packages/oauth/src/cli-status-authorizer.mjs
 import { randomUUID as randomUUID5 } from "node:crypto";
-import { spawn as spawn5 } from "node:child_process";
 var CHILD_STOP_GRACE_MS2 = 2e3;
 function publicSession3(session) {
   return {
@@ -9903,7 +10060,7 @@ function createCliStatusAuthorizer({
     };
     sessions.set(session.sessionId, session);
     try {
-      const child = spawn5(cliPath, loginArgs, {
+      const child = spawnCli(cliPath, loginArgs, {
         env: environment,
         stdio: ["ignore", "pipe", "pipe"]
       });
@@ -10062,7 +10219,7 @@ var officialSessionAuthorizerConstants = Object.freeze({
 // modules/provider-claude/src/native-transport.mjs
 import { readFile as readFile6 } from "node:fs/promises";
 import { homedir as homedir7 } from "node:os";
-import { join as join9 } from "node:path";
+import { join as join10 } from "node:path";
 var PROVIDER_ID6 = "claude";
 var DEFAULT_ENDPOINT3 = "https://api.anthropic.com/v1/messages";
 function firstString4(...values) {
@@ -10099,8 +10256,8 @@ function claudeOAuthCredentialFromJson(value) {
 }
 async function readClaudeOAuthCredential({ home = homedir7() } = {}) {
   for (const path2 of [
-    join9(home, ".claude", ".credentials.json"),
-    join9(home, ".opencodex", "claude_desktop_auth.json")
+    join10(home, ".claude", ".credentials.json"),
+    join10(home, ".opencodex", "claude_desktop_auth.json")
   ]) {
     const credential = claudeOAuthCredentialFromJson(await readJson(path2));
     if (credential) return credential;
@@ -10121,8 +10278,8 @@ async function resolveClaudeAccessToken({
   const envToken = firstString4(env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_AUTH_TOKEN);
   if (envToken) return { token: envToken, kind: "oauth" };
   for (const path2 of [
-    join9(home, ".claude", ".credentials.json"),
-    join9(home, ".opencodex", "claude_desktop_auth.json")
+    join10(home, ".claude", ".credentials.json"),
+    join10(home, ".opencodex", "claude_desktop_auth.json")
   ]) {
     const found = oauthTokenFromJson(await readJson(path2));
     if (found) return found;
@@ -11063,10 +11220,10 @@ import { createHash as createHash8, randomBytes as randomBytes3, randomUUID as r
 import { homedir as homedir10 } from "node:os";
 
 // modules/provider-cursor/src/native-transport.mjs
-import { execFileSync as execFileSync2 } from "node:child_process";
+import { execFileSync as execFileSync3 } from "node:child_process";
 import * as http2 from "node:http2";
 import { homedir as homedir9 } from "node:os";
-import { join as join10 } from "node:path";
+import { join as join11 } from "node:path";
 import { randomBytes as randomBytes2, randomUUID as randomUUID8 } from "node:crypto";
 
 // modules/provider-cursor/src/native-protocol.mjs
@@ -11654,10 +11811,10 @@ function readCursorDesktopSession({
   const fromEnv = firstString7(env.CURSOR_API_KEY, env.DOCKYARD_CURSOR_ACCESS_TOKEN);
   if (fromEnv) return { token: fromEnv, kind: "apiKey", source: "environment" };
   if (process.platform !== "darwin") return null;
-  const dbPath = join10(home, "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb");
+  const dbPath = join11(home, "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb");
   try {
     const quotedKeys = CURSOR_SESSION_KEYS.map((key) => `'${key}'`).join(",");
-    const output = execFileSync2("sqlite3", ["-json", dbPath, `SELECT key, CAST(value AS TEXT) AS value FROM ItemTable WHERE key IN (${quotedKeys});`], {
+    const output = execFileSync3("sqlite3", ["-json", dbPath, `SELECT key, CAST(value AS TEXT) AS value FROM ItemTable WHERE key IN (${quotedKeys});`], {
       encoding: "utf8",
       timeout: 5e3,
       stdio: ["ignore", "pipe", "ignore"]
@@ -12995,15 +13152,15 @@ function summarizeOpencodeCandidate(candidate2) {
 }
 
 // modules/provider-workbuddy/src/driver.mjs
-import { existsSync as existsSync4, readdirSync, readFileSync as readFileSync4, statSync } from "node:fs";
-import { join as join12 } from "node:path";
+import { existsSync as existsSync4, readdirSync, readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
+import { join as join13 } from "node:path";
 
 // modules/provider-workbuddy/src/native-transport.mjs
-import { execFileSync as execFileSync3 } from "node:child_process";
+import { execFileSync as execFileSync4 } from "node:child_process";
 import { randomBytes as randomBytes4, randomUUID as randomUUID10 } from "node:crypto";
 import { existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 function firstString9(...values) {
   for (const val of values) {
     if (typeof val === "string" && val.length > 0) return val;
@@ -13021,8 +13178,8 @@ function findWorkbuddyElectronPath() {
   const candidates = [
     "/Applications/WorkBuddy AI.app/Contents/MacOS/Electron",
     "/Applications/WorkBuddy.app/Contents/MacOS/Electron",
-    join11(homedir11(), "Applications/WorkBuddy AI.app/Contents/MacOS/Electron"),
-    join11(homedir11(), "Applications/WorkBuddy.app/Contents/MacOS/Electron")
+    join12(homedir11(), "Applications/WorkBuddy AI.app/Contents/MacOS/Electron"),
+    join12(homedir11(), "Applications/WorkBuddy.app/Contents/MacOS/Electron")
   ];
   for (const candidate2 of candidates) {
     if (existsSync3(candidate2)) return candidate2;
@@ -13033,7 +13190,7 @@ function findWorkbuddyAuthFilePath() {
   if (process.env.WORKBUDDY_AUTH_FILE_PATH && existsSync3(process.env.WORKBUDDY_AUTH_FILE_PATH)) {
     return process.env.WORKBUDDY_AUTH_FILE_PATH;
   }
-  const candidate2 = join11(
+  const candidate2 = join12(
     homedir11(),
     "Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop-ai.info"
   );
@@ -13045,8 +13202,8 @@ function findWorkbuddyConfigDir() {
     return process.env.WORKBUDDY_CONFIG_DIR;
   }
   const candidates = [
-    join11(homedir11(), ".workbuddy-ai"),
-    join11(homedir11(), ".workbuddy")
+    join12(homedir11(), ".workbuddy-ai"),
+    join12(homedir11(), ".workbuddy")
   ];
   for (const candidate2 of candidates) {
     if (existsSync3(candidate2)) return candidate2;
@@ -13122,7 +13279,7 @@ function extractWorkbuddySession({ force = false } = {}) {
     process.stdout.write(JSON.stringify(result));
   `;
   try {
-    const stdout = execFileSync3(
+    const stdout = execFileSync4(
       electronPath,
       ["-e", script],
       {
@@ -13501,19 +13658,19 @@ function findLocalWorkbuddySnapshot() {
   let latestFile = null;
   let latestMtime = 0;
   if (configDir) {
-    const storageDir = join12(configDir, "storage");
+    const storageDir = join13(configDir, "storage");
     if (existsSync4(storageDir)) {
       try {
         const userDirs = readdirSync(storageDir).filter((d) => d.startsWith("user-"));
         for (const userDir of userDirs) {
-          const scopedDir = join12(storageDir, userDir, "scoped");
+          const scopedDir = join13(storageDir, userDir, "scoped");
           if (existsSync4(scopedDir)) {
             const scopes = readdirSync(scopedDir);
             for (const scope of scopes) {
-              const configFile = join12(scopedDir, scope, "wb-product-config.json");
+              const configFile = join13(scopedDir, scope, "wb-product-config.json");
               if (existsSync4(configFile)) {
                 try {
-                  const mtime = statSync(configFile).mtimeMs;
+                  const mtime = statSync2(configFile).mtimeMs;
                   if (mtime > latestMtime) {
                     latestMtime = mtime;
                     latestFile = configFile;
@@ -13893,13 +14050,13 @@ function summarizeKiloCandidate(candidate2) {
 // modules/provider-commandcode/src/driver.mjs
 import { existsSync as existsSync6, readdirSync as readdirSync2, readFileSync as readFileSync6 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
-import { join as join14 } from "node:path";
+import { join as join15 } from "node:path";
 
 // modules/provider-commandcode/src/native-transport.mjs
 import { createHash as createHash9, randomBytes as randomBytes5, randomUUID as randomUUID11 } from "node:crypto";
 import { existsSync as existsSync5, readFileSync as readFileSync5 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
-import { join as join13 } from "node:path";
+import { join as join14 } from "node:path";
 function firstString10(...values) {
   for (const val of values) {
     if (typeof val === "string" && val.length > 0) return val;
@@ -13916,7 +14073,7 @@ function findCommandCodeAuthFilePath() {
   if (process.env.COMMAND_CODE_AUTH_PATH && existsSync5(process.env.COMMAND_CODE_AUTH_PATH)) {
     return process.env.COMMAND_CODE_AUTH_PATH;
   }
-  const candidate2 = join13(homedir12(), ".commandcode", "auth.json");
+  const candidate2 = join14(homedir12(), ".commandcode", "auth.json");
   if (existsSync5(candidate2)) return candidate2;
   return null;
 }
@@ -14589,17 +14746,17 @@ function summarizeCommandCodeCandidate(candidate2) {
   };
 }
 function findLocalCommandCodeCatalogFile() {
-  const dir = join14(homedir13(), ".commandcode", "cache", "model-catalog", "v1");
+  const dir = join15(homedir13(), ".commandcode", "cache", "model-catalog", "v1");
   if (existsSync6(dir)) {
     try {
       const files = readdirSync2(dir).filter((f) => f.startsWith("catalog-") && f.endsWith(".json"));
       if (files.length > 0) {
-        return join14(dir, files[0]);
+        return join15(dir, files[0]);
       }
     } catch {
     }
   }
-  const devJson = join14(homedir13(), ".commandcode", "cache", "models-dev.json");
+  const devJson = join15(homedir13(), ".commandcode", "cache", "models-dev.json");
   if (existsSync6(devJson)) return devJson;
   return null;
 }
@@ -15025,9 +15182,9 @@ function createCommandCodeModule({ driver = {} } = {}) {
 }
 
 // modules/provider-hermes/src/native-transport.mjs
-import { existsSync as existsSync7, readFileSync as readFileSync7, statSync as statSync2 } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync7, statSync as statSync3 } from "node:fs";
 import { homedir as homedir14 } from "node:os";
-import { join as join15 } from "node:path";
+import { join as join16 } from "node:path";
 import { randomUUID as randomUUID12 } from "node:crypto";
 function firstString11(...values) {
   for (const val of values) {
@@ -15044,9 +15201,9 @@ function findHermesAuthFilePath() {
   if (process.env.HERMES_AUTH_PATH && existsSync7(process.env.HERMES_AUTH_PATH)) {
     return process.env.HERMES_AUTH_PATH;
   }
-  const hermesPath = join15(homedir14(), ".hermes", "auth.json");
+  const hermesPath = join16(homedir14(), ".hermes", "auth.json");
   if (existsSync7(hermesPath)) return hermesPath;
-  const nousPath = join15(homedir14(), ".nous", "auth.json");
+  const nousPath = join16(homedir14(), ".nous", "auth.json");
   if (existsSync7(nousPath)) return nousPath;
   return null;
 }
@@ -15060,7 +15217,7 @@ function extractHermesAuth({ force = false } = {}) {
   const authFile = findHermesAuthFilePath();
   if (authFile) {
     try {
-      const stats = statSync2(authFile);
+      const stats = statSync3(authFile);
       if (force || !cachedAuth || stats.mtimeMs !== cachedAuthMtime) {
         const raw = readFileSync7(authFile, "utf8");
         const parsed = JSON.parse(raw);
@@ -18261,7 +18418,7 @@ var DockyardRuntime = class {
 // packages/dsh-plugin/src/codex-transport.mjs
 import { access, readFile as readFile7 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname as dirname6, join as join16, resolve } from "node:path";
+import { dirname as dirname7, join as join17, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 var activeCodexModels = /* @__PURE__ */ new Map();
 function recordCodexModels(models) {
@@ -18295,7 +18452,7 @@ function exportTarget(value) {
   }
   return null;
 }
-async function isFile(path2) {
+async function isFile2(path2) {
   try {
     await access(path2);
     return true;
@@ -18307,15 +18464,15 @@ async function findPackageRoot(startDirectory, packageName) {
   const packageParts = packageName.split("/");
   let current = resolve(startDirectory);
   while (true) {
-    const candidate2 = join16(current, "node_modules", ...packageParts);
-    if (await isFile(join16(candidate2, "package.json"))) return candidate2;
-    const parent = dirname6(current);
+    const candidate2 = join17(current, "node_modules", ...packageParts);
+    if (await isFile2(join17(candidate2, "package.json"))) return candidate2;
+    const parent = dirname7(current);
     if (parent === current) return null;
     current = parent;
   }
 }
 async function packageImportUrl(packageRoot, subpath = null) {
-  const packageJson = JSON.parse(await readFile7(join16(packageRoot, "package.json"), "utf8"));
+  const packageJson = JSON.parse(await readFile7(join17(packageRoot, "package.json"), "utf8"));
   const exports = packageJson.exports;
   let target = null;
   if (!subpath) {
@@ -18337,13 +18494,13 @@ async function packageImportUrl(packageRoot, subpath = null) {
   if (typeof target !== "string") {
     throw new Error(`Cannot resolve ${subpath ?? "."} from ${packageRoot}`);
   }
-  return pathToFileURL(join16(packageRoot, target)).href;
+  return pathToFileURL(join17(packageRoot, target)).href;
 }
 async function importFromDshInstall(moduleAnchor) {
   const anchor = moduleAnchor ?? process.env.DOCKYARD_DSH_CLI_PATH ?? process.argv[1] ?? import.meta.url;
   const dshRequire = createRequire(anchor);
   const dshLlmPath = dshRequire.resolve(DSH_LLM_PI_AI);
-  const dshPackageRoot = dirname6(dirname6(dshLlmPath));
+  const dshPackageRoot = dirname7(dirname7(dshLlmPath));
   const piRoot = await findPackageRoot(dshPackageRoot, PI_AI);
   if (!piRoot) throw new Error(`Cannot find ${PI_AI} beside ${DSH_LLM_PI_AI}`);
   const [{ PiAiAdapter }, { createProvider }, { openAICodexResponsesApi }, { openaiCodexProvider }, builtinProviders2] = await Promise.all([
@@ -18419,7 +18576,7 @@ function createCodexDshCatalogLoader({ moduleAnchor = null, ...options } = {}) {
 }
 
 // packages/dsh-plugin/src/dockyard-service.mjs
-import { spawn as spawn6 } from "node:child_process";
+import { spawn as spawn5 } from "node:child_process";
 var DEFAULT_REFRESH_INTERVAL_MS = 5 * 60 * 1e3;
 var AUTH_POLL_INTERVAL_MS = 750;
 var AUTH_URL_WAIT_MS = 2e3;
@@ -18499,9 +18656,22 @@ function commandError(text3) {
   return { kind: "error", text: text3 };
 }
 function openDefaultBrowser(url) {
-  if (process.platform !== "darwin" || !url) return;
+  if (!url) return;
   try {
-    const child = spawn6("open", [url], { detached: true, stdio: "ignore" });
+    let child;
+    if (process.platform === "darwin") {
+      child = spawn5("open", [url], { detached: true, stdio: "ignore" });
+    } else if (process.platform === "win32") {
+      const comspec = process.env.ComSpec || process.env.COMSPEC || "cmd.exe";
+      child = spawn5(comspec, ["/d", "/s", "/c", `start "" "${String(url).replace(/"/g, "")}"`], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+        windowsVerbatimArguments: true
+      });
+    } else {
+      child = spawn5("xdg-open", [url], { detached: true, stdio: "ignore" });
+    }
     child.unref();
   } catch {
   }
@@ -19124,7 +19294,7 @@ function createDockyardCredentialStore(credentials, fallback = null) {
 // packages/dsh-plugin/src/native-key-pool-host.mjs
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAgentLoopRequest, markAgentLoopRequest } from "@deepseek-ai/dsh-llm";
-import { join as join17 } from "node:path";
+import { join as join18 } from "node:path";
 
 // packages/dsh-plugin/src/native-usage.mjs
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -19422,7 +19592,7 @@ var NativeKeyPoolHost = class {
     this.logger = logger ?? console;
     this.contextWindowOverrides = contextWindowOverrides;
     this.stateStore = stateStore ?? new JsonStateStore({
-      filePath: join17(defaultDockyardHome(), "native-key-pools.json")
+      filePath: join18(defaultDockyardHome(), "native-key-pools.json")
     });
     this.readyPromise = this.loadState();
   }
@@ -19789,7 +19959,7 @@ var NativeKeyPoolHost = class {
 // packages/dsh-plugin/src/vpn-ssrf-patch.mjs
 var import_ipaddr = __toESM(require_ipaddr(), 1);
 import { createRequire as createRequire2 } from "node:module";
-import { dirname as dirname7, join as join18 } from "node:path";
+import { dirname as dirname8, join as join19 } from "node:path";
 var isPatched = false;
 function patchFakeIpVpnSupport() {
   if (isPatched) return true;
@@ -19815,7 +19985,7 @@ function patchFakeIpVpnSupport() {
   ];
   if (typeof process?.execPath === "string") {
     try {
-      candidates.push(join18(dirname7(dirname7(process.execPath)), "Resources/app.asar/dsh/node_modules/ipaddr.js"));
+      candidates.push(join19(dirname8(dirname8(process.execPath)), "Resources/app.asar/dsh/node_modules/ipaddr.js"));
     } catch {
     }
   }
@@ -20002,7 +20172,7 @@ function apply(ctx, config = {}) {
                   res.end("Forbidden");
                   return;
                 }
-                const filePath = join19(process.cwd(), "artifacts", cleanPath);
+                const filePath = join20(process.cwd(), "artifacts", cleanPath);
                 if (!existsSync8(filePath)) {
                   res.writeHead(404);
                   res.end("Not Found");

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawnCli } from "../../providers/src/win32-command.mjs";
 
 import { redactError } from "../../providers/src/provider-utils.mjs";
 import { extractSafeAuthorizationUrl } from "./cli-url-sanitizer.mjs";
@@ -145,7 +145,7 @@ export function createCliStatusAuthorizer({
     };
     sessions.set(session.sessionId, session);
     try {
-      const child = spawn(cliPath, loginArgs, {
+      const child = spawnCli(cliPath, loginArgs, {
         env: environment,
         stdio: ["ignore", "pipe", "pipe"],
       });

@@ -72,10 +72,31 @@ export function nodeVersionSupported(version = process.versions.node) {
   return major > 24 || (major === 24) || (major === 22 && minor >= 19);
 }
 
+// `cmd.exe` metacharacters, escaped the way the MSVCRT argument parser and
+// `cmd.exe` expect. Kept local so this package stays dependency-free when it is
+// published on its own; packages/providers/src/win32-command.mjs holds the
+// equivalent used by the plugin itself.
+const CMD_META_CHARS = /([()\][%!^"`<>&|;, *?])/g;
+
+function escapeCmdArgument(value) {
+  let argument = String(value ?? "");
+  argument = argument.replace(/(\\*)"/g, "$1$1\\\"");
+  argument = argument.replace(/(\\*)$/, "$1$1");
+  return `"${argument}"`.replace(CMD_META_CHARS, "^$1");
+}
+
+function escapeCmdCommand(value) {
+  return String(value ?? "").replace(CMD_META_CHARS, "^$1");
+}
+
 export function commandAvailable(command, env = process.env) {
+  // On Windows `dsh` and `pnpm` are `.cmd` shims, which CreateProcess cannot
+  // launch without a shell. The command here is always a literal, never user
+  // input, so enabling the shell cannot be steered.
   const result = spawnSync(command, ["--version"], {
     stdio: "ignore",
     env,
+    ...(process.platform === "win32" ? { shell: true } : {}),
   });
   return result.status === 0;
 }
@@ -94,12 +115,23 @@ export function buildInstallPlan(options, { dshAvailable = true, pnpmAvailable =
 
 function run(command, args, env) {
   console.log(`\n> ${commandText(command, args)}`);
-  const result = spawnSync(command, args, {
-    stdio: "inherit",
-    env,
-  });
+  const result = process.platform === "win32"
+    ? runThroughCmd(command, args, env)
+    : spawnSync(command, args, { stdio: "inherit", env });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} exited with code ${result.status ?? "unknown"}`);
+}
+
+/** Run a `.cmd` shim (npm, pnpm, dsh) through ComSpec so Windows can launch it. */
+function runThroughCmd(command, args, env, { stdio = "inherit" } = {}) {
+  const comspec = env.ComSpec || env.COMSPEC || "cmd.exe";
+  const line = [escapeCmdCommand(command), ...args.map(escapeCmdArgument)].join(" ");
+  return spawnSync(comspec, ["/d", "/s", "/c", `"${line}"`], {
+    stdio,
+    env,
+    windowsHide: true,
+    windowsVerbatimArguments: true,
+  });
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -115,8 +147,8 @@ export async function main(argv = process.argv.slice(2)) {
     printUsage();
     return 0;
   }
-  if (process.platform !== "darwin") {
-    console.error("Dockyard DSH currently supports macOS only.");
+  if (process.platform !== "darwin" && process.platform !== "win32") {
+    console.error(`Dockyard DSH supports macOS and Windows. Current platform: ${process.platform}.`);
     return 1;
   }
   if (!nodeVersionSupported()) {
