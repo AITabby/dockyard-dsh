@@ -7,6 +7,18 @@ import { fileURLToPath } from "node:url";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
+// A shallow clone (actions/checkout's default) only has the tip commit, so
+// historical release commits cannot be resolved even though they exist upstream.
+// CI checks out the full history for the test jobs; everywhere else degrade the
+// existence check gracefully instead of failing on an incomplete local clone.
+const hasFullHistory = (() => {
+  try {
+    return execSync("git rev-parse --is-shallow-repository", { cwd: rootDir, encoding: "utf8" }).trim() !== "true";
+  } catch {
+    return false;
+  }
+})();
+
 const SEMVER_RE =
   /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$/;
 const COMMIT_RE = /^[0-9a-f]{40}$/;
@@ -130,10 +142,12 @@ test("market/index.json conforms strictly to DSH plugin market format 1", async 
       !seenCommits.has(commit),
       `version ${version.version} reuses commit ${commit} already used by another version`,
     );
-    assert.ok(
-      commitExists(commit),
-      `version ${version.version} points at a missing commit ${commit}`,
-    );
+    if (hasFullHistory) {
+      assert.ok(
+        commitExists(commit),
+        `version ${version.version} points at a missing commit ${commit}`,
+      );
+    }
     seenCommits.add(commit);
   }
 });
