@@ -63,13 +63,15 @@ DMG 内置 Node.js、DSH CLI、完整 `web` profile 和 Dockyard 插件；双击
 
 ### 一条命令安装 Dockyard plugin
 
-如果已经有 Node.js，直接把下面这一行交给终端或智能体执行即可：
+已经有 DSH CLI 和 pnpm 时，把下面这一行交给终端或智能体执行即可：
 
 ```sh
-npx -y @dockyard-dsh/install@latest
+dsh plugin --profile web add github:AITabby/dockyard-dsh
 ```
 
-它会自动检查 DSH 和 pnpm，并把预构建的 Dockyard host/client bundle 安装到默认 `web` profile。安装完成后重启 DSH Web。
+它把仓库中已提交的预构建 host/client bundle 安装到默认 `web` profile，安装过程中不执行 `prepare`。安装完成后重启 DSH Web。
+
+> `@dockyard-dsh/install` 安装器尚未发布到 npm，因此这里改用 DSH 自带的安装命令。
 
 ### 从源码安装 Dockyard plugin / Web profile
 
@@ -121,7 +123,18 @@ dsh web --dump-config
 dsh plugin --profile web add github:AITabby/dockyard-dsh#<commit-sha>
 ```
 
-当前发布 commit 已提交可运行的 host/client bundle，安装时不执行 `prepare`，因此 GitHub 直装不需要额外的 `allowBuilds` 配置。若你 pin 到旧 commit，或 pnpm 明确报告了其他构建脚本，请只在检查源码后按终端提示配置对应 profile 的 `pnpm-workspace.yaml`。
+当前发布 commit 已提交可运行的 host/client bundle，安装时不执行 `prepare`。但 `@earendil-works/pi-ai` 的传递依赖 `@google/genai` 与 `protobufjs` 带有构建脚本，pnpm 10+ 默认拦截，第一次安装会以 `ERR_PNPM_IGNORED_BUILDS` 结束并在 `package.json` 留下依赖但不会把它加入 profile 的 bundle 列表。两种处理方式：
+
+- 在 DSH Web 的 **Plugins** 页面安装时，按提示点 **Allow these scripts and retry**；
+- 用命令行安装时，先在 profile 的 `pnpm-workspace.yaml` 里加上这两个名字，再重跑上面的命令：
+
+```yaml
+allowBuilds:
+  '@google/genai': true
+  protobufjs: true
+```
+
+若你 pin 到旧 commit，或 pnpm 报告了其他构建脚本，请只在检查源码后按终端提示配置。
 
 #### 需要本地修改时：克隆后安装
 
@@ -276,13 +289,15 @@ The DMG embeds Node.js, the DSH CLI, the complete `web` profile, and the Dockyar
 
 ### One-command Dockyard plugin install
 
-If Node.js is already available, give this single command to a terminal or an agent:
+With the DSH CLI and pnpm already available, give this single command to a terminal or an agent:
 
 ```sh
-npx -y @dockyard-dsh/install@latest
+dsh plugin --profile web add github:AITabby/dockyard-dsh
 ```
 
-It checks for DSH and pnpm, then installs the prebuilt Dockyard host/client bundle into the default `web` profile. Restart DSH Web after installation.
+It installs the prebuilt Dockyard host/client bundle committed in the repository into the default `web` profile, without running `prepare`. Restart DSH Web after installation.
+
+> The `@dockyard-dsh/install` installer is not published to npm yet, so this uses DSH's own install command instead.
 
 ### Installing the source plugin into an existing DSH Web profile
 
@@ -332,7 +347,18 @@ For a reproducible install, pin a verified commit:
 dsh plugin --profile web add github:AITabby/dockyard-dsh#<commit-sha>
 ```
 
-The current release commit includes the runnable host/client bundles and does not run `prepare` at install time, so a direct GitHub install does not need an extra `allowBuilds` setting. If you pin an older commit, or pnpm explicitly reports another build hook, inspect the source and follow the exact profile configuration printed by the command.
+The current release commit includes the runnable host/client bundles and does not run `prepare` at install time. However, `@earendil-works/pi-ai`'s transitive dependencies `@google/genai` and `protobufjs` ship build scripts that pnpm 10+ blocks by default, so the first install ends with `ERR_PNPM_IGNORED_BUILDS`, leaving the dependency in `package.json` but without adding it to the profile's bundle list. Two ways to handle it:
+
+- Installing from the DSH Web **Plugins** page: click **Allow these scripts and retry** when prompted;
+- Installing from the command line: add both names to the profile's `pnpm-workspace.yaml` first, then re-run the command:
+
+```yaml
+allowBuilds:
+  '@google/genai': true
+  protobufjs: true
+```
+
+If you pin an older commit, or pnpm reports a different build hook, inspect the source and follow the exact configuration it prints.
 
 #### When you need local changes: clone and install
 

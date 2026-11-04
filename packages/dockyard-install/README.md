@@ -2,6 +2,14 @@
 
 One-command installer for Dockyard DSH.
 
+> **Not published to npm yet.** `@dockyard-dsh/install` returns 404 on the
+> registry, so the command below does not work today. Until it is published,
+> install the plugin with DSH's own command instead:
+>
+> ```sh
+> dsh plugin --profile web add github:AITabby/dockyard-dsh
+> ```
+
 ```sh
 npx -y @dockyard-dsh/install@latest
 ```
