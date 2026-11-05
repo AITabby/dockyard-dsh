@@ -248,6 +248,10 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-key-ref{overflow:hidden;color:var(--dsw-alias-label-caption,#8b93a1);font:400 10px/14px ui-monospace,SFMono-Regular,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
 .dockyard-dsh-key-source{color:var(--dsw-alias-label-caption,#8b93a1);font-size:11px}
 @keyframes dockyard-dsh-pulse{0%,100%{opacity:.45}50%{opacity:1}}
+/* dshmarket draws its own block mark on the settings nav row, but the shell's
+   gear is still shown beside it (the gear is not a direct child svg of the
+   marked row). Hide every svg inside that one row so only the mark remains. */
+[data-dsh-market-nav-icon] svg{display:none!important}
 `;
 
 function installStyles() {
