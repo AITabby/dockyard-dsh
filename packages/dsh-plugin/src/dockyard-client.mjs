@@ -688,19 +688,24 @@ class DockyardClientController {
     return providerId ? providerFromSnapshot(current, providerId) ?? current : current;
   }
 
-  async refresh(providerId) {
+  async refresh(providerId, { quiet = false } = {}) {
     const existing = this.refreshPromises.get(providerId);
     if (existing) return existing;
 
     const promise = (async () => {
-      this.setState({ action: "refresh", status: "loading", providerId, error: null, message: null });
+      // A background poll refreshes quota without replacing the panel with a
+      // loading state or a "refreshed" toast: only the numbers below change.
+      if (quiet) this.setState({ providerId, error: null });
+      else this.setState({ action: "refresh", status: "loading", providerId, error: null, message: null });
       try {
         const value = await this.call("refresh", { providerId });
         const result = this.applyValue(value, providerId);
+        if (quiet) return result;
         const rev = (this.store.getSnapshot().catalogRevision ?? 0) + 1;
         this.setState({ message: refreshResultMessage(result, this.t), catalogRevision: rev });
         return result;
       } catch (error) {
+        if (quiet) return null;
         this.setState({ action: null, status: "error", providerId, error: errorText(error, this.t) });
         return null;
       }
@@ -1999,7 +2004,7 @@ function SubscriptionSettingsSection({ close, controller, remote, modelDirectori
     if (!selectedProviderId || !provider) return undefined;
     controller.ensure(selectedProviderId).catch(() => {});
     void controller.refresh(selectedProviderId);
-    const timer = setInterval(() => controller.refresh(selectedProviderId), 30_000);
+    const timer = setInterval(() => controller.refresh(selectedProviderId, { quiet: true }), 30_000);
     return () => clearInterval(timer);
   }, [controller, selectedProviderId, Boolean(provider)]);
 
@@ -2321,7 +2326,7 @@ function DockyardAccountControl({ directory, modelDirectory, modelDirectories, c
       } else {
         void controller.refresh(providerId);
       }
-      const timer = setInterval(() => controller.refresh(providerId), 30_000);
+      const timer = setInterval(() => controller.refresh(providerId, { quiet: true }), 30_000);
       return () => clearInterval(timer);
     }
     void nativeController.refresh(providerId);
