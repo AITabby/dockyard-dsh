@@ -494,6 +494,22 @@ export class DockyardRuntime {
     return this.providers.map(({ module }) => module.manifest.id);
   }
 
+  /**
+   * Ask a provider what the user has to do when it has no authorization entry
+   * point of its own (a desktop-session provider, for example). The host keeps
+   * one generic message for every provider that answers null.
+   */
+  async authorizationInstructions(providerId) {
+    const module = this.providers.find((entry) => entry.module.manifest.id === providerId)?.module;
+    if (typeof module?.authorizationInstructions !== "function") return null;
+    try {
+      const text = await module.authorizationInstructions(providerContext(this, {}));
+      return typeof text === "string" && text.trim().length > 0 ? text.trim() : null;
+    } catch {
+      return null;
+    }
+  }
+
   async scan(providerId = null) {
     await this.init();
     const entries = providerId

@@ -57,6 +57,18 @@ export function defineProviderModule({
         : null;
     },
 
+    /**
+     * What the user has to do for a provider that has no authorization entry
+     * point of its own (a desktop-session provider, for example). Returning
+     * null leaves the host's generic message in place, so a provider that does
+     * not care keeps working without a new branch here.
+     */
+    async authorizationInstructions(context) {
+      return typeof driver.authorizationInstructions === "function"
+        ? driver.authorizationInstructions(context)
+        : null;
+    },
+
     async startAuthorization(context) {
       return driver.startAuthorization
         ? driver.startAuthorization(context)

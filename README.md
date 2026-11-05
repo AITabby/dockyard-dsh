@@ -19,7 +19,7 @@ Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harnes
 - **Grok** — xAI 官方浏览器 OAuth、CLI fallback、实时模型目录、官方 Build credits 周期和 provider-native streaming 请求。额度读取使用官方 `/billing?format=credits`（转发 `GetGrokCreditsConfig`）；若上游只返回周期，剩余值保持未知。
 - **Claude** — Claude 官方浏览器 OAuth（支持带 state 的手动回调地址/授权码）、CLI fallback 与原生请求适配。
 - **Cursor** — Cursor 官方浏览器登录轮询、CLI fallback 与原生请求适配。
-- **WorkBuddy** — WorkBuddy 国际版桌面端会话自动检测（也可在面板里直接粘贴 access token，或设置 `WORKBUDDY_ACCESS_TOKEN`）、零成本免费模型发现（`hy4free`、`hy4`、`deepseek-v4.1-flash`、`hy3`）、实时模型按需选择、推理档位与官方端点原生流式请求。它没有 OAuth 授权页，也没有可粘贴的 API Key 表单之外的其他入口。
+- **WorkBuddy** — WorkBuddy 国际版官方桌面端账号会话自动检测、零成本免费模型发现（`hy4free`、`hy4`、`deepseek-v4.1-flash`、`hy3`）、实时模型按需选择、推理档位与官方端点原生流式请求。它没有 OAuth 授权页，也没有可填写的 API Key：账号必须先在官方桌面端登录，插件只负责读取该客户端保存的会话。
 - **Command Code** — Command Code 官方网关直接接入，支持 100+ 款开源及旗舰大模型（DeepSeek V4.1 Flash/Pro、Claude Sonnet 5.5/4.6、Grok 4.7、Muse Spark 1.2、Mistral Large 4 等），自动读取本地认证、套餐订阅与多窗口额度（5 小时 / 每周），支持原生流式与 Native Tool Calling。
 - **OpenRouter Free** — 从本机 DSH 凭据与环境变量发现 OpenRouter API key，动态拉取 `:free` 模型目录、按上下文窗口匹配、实时额度路由，使用官方端点原生流式请求。
 - **Hermes** — Hermes 官方会话接入、实时模型目录与原生流式请求。
@@ -53,7 +53,7 @@ Windows 上的实际行为：
 - **凭据存储走 DSH Credentials 服务。** 插件的 macOS Keychain 后端只在 darwin 上可用；Windows 上读写凭证统一由宿主 DSH 的 Credentials 服务完成。宿主没有该服务时会明确报错，不会静默丢弃登录态。
 - **CLI fallback 可用。** npm 全局安装的 provider CLI 在 Windows 上是 `.cmd` shim，插件会解析并经由 `%ComSpec%` 启动；停止时用 `taskkill` 清理整棵进程树。
 - **本机会话扫描仍仅限 macOS。** `/dockyard scan` 读不到 Windows 上的官方桌面端登录态，此时按不可用降级；请改用浏览器 OAuth 添加账号。
-- **WorkBuddy 在 Windows 上需要手动凭据**：它读的是 macOS 官方桌面端保存的会话，Windows 上读不到；在面板粘贴 access token 或设置 `WORKBUDDY_ACCESS_TOKEN` 后即可正常使用，否则报告 unavailable。**OpenCode 在 Windows 上不可用**，它只有 macOS 桌面端会话一条路径。
+- **WorkBuddy 与 OpenCode 在 Windows 上不可用**：两者的账号都只能从 macOS 官方桌面端的本机会话读取，既没有浏览器 OAuth，也没有可填写的 Key，因此在 Windows 上会报告 unavailable。WorkBuddy 另有一个面向自动化的 `WORKBUDDY_ACCESS_TOKEN` 环境变量，属高级用法，不是面向用户的登录方式。
 
 ### macOS 独立应用与 DMG
 
@@ -257,7 +257,7 @@ Current provider modules:
 - **Grok** — xAI browser OAuth, CLI fallback, live model catalog, official Build credits periods, and provider-native streaming. Quota uses the official `/billing?format=credits` surface (forwarding `GetGrokCreditsConfig`); if the upstream only returns a period, the remaining value stays unknown.
 - **Claude** — official browser OAuth (including state-bound manual callback/code entry), CLI fallback, and native request adapter.
 - **Cursor** — official browser login polling, CLI fallback, and native request adapter.
-- **WorkBuddy** — WorkBuddy international desktop session auto-detection (or a pasted access token in the panel, or `WORKBUDDY_ACCESS_TOKEN`), zero-credit free model discovery (`hy4free`, `hy4`, `deepseek-v4.1-flash`, `hy3`), real-time model selection, reasoning tiers, and official streaming completions. It has no OAuth page and no credential entry point other than that token.
+- **WorkBuddy** — WorkBuddy international desktop account-session auto-detection, zero-credit free model discovery (`hy4free`, `hy4`, `deepseek-v4.1-flash`, `hy3`), real-time model selection, reasoning tiers, and official streaming completions. It has neither an OAuth page nor an API Key field: the account has to be signed in to the official desktop client first, and the plugin only reads the session that client stores.
 - **Command Code** — direct integration with Command Code official gateway, supporting 100+ open-source and flagship LLMs (DeepSeek V4.1 Flash/Pro, Claude Sonnet 5.5/4.6, Grok 4.7, Muse Spark 1.2, Mistral Large 4, etc.), auto-detecting local credentials, subscription plans, multi-window quotas (5-hour / weekly), and full streaming with native tool-calling.
 - **OpenRouter Free** — discovers OpenRouter API keys from local DSH credentials and the environment, fetches a live `:free` model catalog, matches context windows, applies live quota routing, and streams through the official endpoint.
 - **Hermes** — official Hermes session integration, live model catalog, and native streaming.
@@ -291,7 +291,7 @@ What Windows does today:
 - **Credentials go through the host DSH Credentials service.** The plugin's macOS Keychain backend only exists on darwin; on Windows every credential read and write is delegated to DSH. A host without that service reports a clear error instead of silently dropping the login.
 - **CLI fallback works.** A provider CLI installed through npm is a `.cmd` shim on Windows; the plugin resolves the shim and launches it through `%ComSpec%`, and stops the whole tree with `taskkill`.
 - **Local session scanning stays macOS-only.** `/dockyard scan` cannot read a Windows desktop login, so it degrades to unavailable; add accounts with browser OAuth instead.
-- **WorkBuddy needs manual credentials on Windows.** It reads the session the official macOS desktop app stores, which Windows cannot provide; paste an access token in the panel or set `WORKBUDDY_ACCESS_TOKEN` and it works there, otherwise it reports unavailable. **OpenCode is unavailable on Windows** — a macOS desktop session is its only path.
+- **WorkBuddy and OpenCode are unavailable on Windows.** Both derive the account from a macOS desktop client session, and neither offers a browser OAuth flow or a key field, so they report unavailable there. WorkBuddy also honours a `WORKBUDDY_ACCESS_TOKEN` environment variable for automation; that is an advanced escape hatch, not a user-facing sign-in.
 
 ### Standalone macOS app and DMG
 

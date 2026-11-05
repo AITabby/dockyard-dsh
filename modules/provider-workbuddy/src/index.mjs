@@ -12,8 +12,6 @@ export function createWorkbuddyModule({ driver = {} } = {}) {
       "stream",
       PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
       PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP,
-      // Runs on an access token; the panel offers a field for it.
-      PROVIDER_BEHAVIOR_CAPABILITIES.API_KEY_AUTH,
     ],
     driver,
   });

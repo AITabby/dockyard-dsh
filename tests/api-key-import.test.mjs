@@ -16,6 +16,16 @@ import {
   createWorkbuddyDriver,
   createWorkbuddyModule,
 } from "../modules/provider-workbuddy/src/index.mjs";
+import { DockyardRuntime } from "../packages/runtime/src/dockyard-runtime.mjs";
+
+function memoryStateStore() {
+  let state = {};
+  return {
+    async load() { return structuredClone(state); },
+    async update(mutator) { state = await mutator(structuredClone(state)); return structuredClone(state); },
+    async save(next) { state = structuredClone(next); return structuredClone(state); },
+  };
+}
 
 function memorySecretStore() {
   const data = new Map();
@@ -136,39 +146,35 @@ test("hermes importSource stores the pasted key and derives a stable account id"
   });
 });
 
-// WorkBuddy has no OAuth and no user-facing API key either: it decrypts the
-// access token the official macOS desktop app keeps in its own storage. Without
-// that app the only entry point is a pasted token, which the panel now offers.
+// WorkBuddy is the opposite case: its account lives in the official desktop
+// client and the plugin reads that session. There is no key to paste, so the
+// panel must not offer a field and must not claim health it cannot verify.
 
-test("workbuddy declares api_key_auth", () => {
-  assert.ok(createWorkbuddyModule().manifest.capabilities.includes("api_key_auth"));
+test("workbuddy does not advertise a key field", () => {
+  const capabilities = createWorkbuddyModule().manifest.capabilities;
+  assert.ok(!capabilities.includes("api_key_auth"));
+  assert.ok(!capabilities.includes("oauth_authorization"));
 });
 
-test("workbuddy importSource rejects an empty token", async () => {
+test("workbuddy explains that the account comes from the desktop client", async () => {
   const driver = createWorkbuddyDriver();
-  await assert.rejects(() => driver.importSource({ accessToken: "  " }), /WorkBuddy access token/);
+  const instructions = await driver.authorizationInstructions();
+  // Both branches name the desktop client and the scan action; neither may tell
+  // the user to paste a key, because no such key exists.
+  assert.match(instructions, /桌面端/);
+  assert.match(instructions, /扫描本机登录态/);
+  assert.doesNotMatch(instructions, /粘贴/);
 });
 
-test("workbuddy importSource stores the pasted token and masks it in the label", async () => {
-  const driver = createWorkbuddyDriver({ fetchImpl: async () => { throw new Error("no network in tests"); } });
-  const secretStore = memorySecretStore();
-
-  const [account] = await driver.importSource({ accessToken: "wb-access-token-abcdef" }, { secretStore });
-
-  assert.equal(account.providerId, "workbuddy");
-  assert.ok(account.accountId.startsWith("workbuddy-"));
-  const stored = await secretStore.read(account.auth.credentialRef);
-  assert.equal(stored.access, "wb-access-token-abcdef");
-  assert.ok(!account.displayName.includes("wb-access-token-abcdef"));
-
-  const [again] = await driver.importSource({ accessToken: "wb-access-token-abcdef" }, { secretStore: memorySecretStore() });
-  assert.equal(account.accountId, again.accountId);
+test("workbuddy offers no importSource", () => {
+  assert.equal(createWorkbuddyDriver().importSource, undefined);
 });
 
 test("workbuddy refreshAccount reports healthy only when a token resolves", async () => {
   const driver = createWorkbuddyDriver();
   const secretStore = memorySecretStore();
-  const [account] = await driver.importSource({ accessToken: "wb-refresh-token-1234" }, { secretStore });
+  await secretStore.write("keychain://dockyard-dsh/workbuddy/manual", { access: "wb-token-1234" });
+  const account = { auth: { credentialRef: "keychain://dockyard-dsh/workbuddy/manual" } };
 
   const refreshed = await driver.refreshAccount(account, { secretStore });
   assert.equal(refreshed.health.status, "healthy");
@@ -181,4 +187,19 @@ test("workbuddy discover does not invent a quota", async () => {
   // It used to report a hard-coded 100/100 "requests" allowance on every scan.
   assert.equal(candidate.quota?.remaining, undefined);
   assert.equal(candidate.quota?.limit, undefined);
+});
+
+test("the runtime surfaces a provider's own authorization instructions", async () => {
+  const runtime = new DockyardRuntime({
+    stateStore: memoryStateStore(),
+    secretStore: memorySecretStore(),
+    providers: [{ module: createWorkbuddyModule({ driver: createWorkbuddyDriver() }) }],
+  });
+  await runtime.init();
+
+  const instructions = await runtime.authorizationInstructions("workbuddy");
+  assert.ok(typeof instructions === "string" && instructions.includes("桌面端"));
+
+  // A provider that says nothing keeps the host's generic sentence.
+  assert.equal(await runtime.authorizationInstructions("not-a-provider"), null);
 });

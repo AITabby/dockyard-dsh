@@ -317,7 +317,7 @@ export class WorkbuddyDriver {
 
       await context.secretStore.write(ref, {
         type: "workbuddy_free",
-        access: candidate?.accessToken || session?.accessToken || "free-tier",
+        access: session?.accessToken || "free-tier",
         uid: session?.uid || null,
         email: session?.email || null,
       }).catch(() => {});
@@ -345,6 +345,22 @@ export class WorkbuddyDriver {
 
   async getActiveSession() {
     return this.discover().then((res) => (Array.isArray(res?.candidates) ? res.candidates[0] : null));
+  }
+
+  /**
+   * WorkBuddy has no authorization page: the account lives in the official
+   * desktop client, and this plugin reads that session. Saying so is the whole
+   * instruction — there is no key the user could paste in its place.
+   */
+  async authorizationInstructions() {
+    const session = workbuddySession();
+    if (session?.accessToken) {
+      return "已检测到 WorkBuddy 官方桌面端会话，点「扫描本机登录态」即可添加该账号。";
+    }
+    return "WorkBuddy 使用官方桌面端的账号会话，没有 OAuth 授权页，也没有可填写的 API Key。"
+      + "请先安装并登录 WorkBuddy 官方桌面端，然后点「扫描本机登录态」；"
+      + "插件会读取该客户端的登录状态，不能凭空创建一个账号。"
+      + "（无法安装桌面端的高级用法：在启动 DSH 的 shell 中设置 WORKBUDDY_ACCESS_TOKEN。）";
   }
 
   /** Resolve a usable token from the imported credential, the environment or the desktop app. */
@@ -377,31 +393,6 @@ export class WorkbuddyDriver {
   async getQuota() {
     // WorkBuddy exposes no quota surface; leave the numbers unknown.
     return createQuotaSnapshot({ source: "unknown" });
-  }
-
-  /**
-   * Import an access token pasted into the panel. WorkBuddy has no OAuth, and
-   * the official desktop app is the only thing that normally produces one, so
-   * this is the entry point for a machine without that app installed.
-   */
-  async importSource(source, context = {}) {
-    const rawToken = typeof source === "string"
-      ? source
-      : (source?.accessToken ?? source?.token ?? source?.apiKey ?? "");
-    const token = String(rawToken ?? "").trim();
-    if (!token) throw new ValidationError("请输入有效的 WorkBuddy access token");
-    const label = typeof source === "object" && typeof source?.label === "string"
-      ? source.label.trim()
-      : "";
-    const masked = maskToken(token);
-    return [await this.importAccount({
-      accountId: `workbuddy-${fingerprintToken(token)}`,
-      accessToken: token,
-      source: "manual_access_token",
-      displayName: label || `WorkBuddy Key (${masked})`,
-      email: masked,
-      health: { status: "healthy" },
-    }, context)];
   }
 
   async getCatalog(context = {}) {

@@ -1387,6 +1387,15 @@ function defineProviderModule({
     async getActiveSession(context) {
       return typeof driver.getActiveSession === "function" ? driver.getActiveSession(context) : null;
     },
+    /**
+     * What the user has to do for a provider that has no authorization entry
+     * point of its own (a desktop-session provider, for example). Returning
+     * null leaves the host's generic message in place, so a provider that does
+     * not care keeps working without a new branch here.
+     */
+    async authorizationInstructions(context) {
+      return typeof driver.authorizationInstructions === "function" ? driver.authorizationInstructions(context) : null;
+    },
     async startAuthorization(context) {
       return driver.startAuthorization ? driver.startAuthorization(context) : missingDriver(id, "oauth_authorization")(context);
     },
@@ -13152,7 +13161,6 @@ function summarizeOpencodeCandidate(candidate2) {
 }
 
 // modules/provider-workbuddy/src/driver.mjs
-import { createHash as createHash9 } from "node:crypto";
 import { existsSync as existsSync4, readdirSync, readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
 import { join as join13 } from "node:path";
 
@@ -13589,14 +13597,6 @@ function createWorkbuddyNativeExecutor({
 
 // modules/provider-workbuddy/src/driver.mjs
 var PROVIDER_ID11 = "workbuddy";
-function fingerprintToken(token) {
-  return createHash9("sha256").update(String(token)).digest("hex").slice(0, 16);
-}
-function maskToken(token) {
-  const value = String(token ?? "");
-  if (value.length <= 8) return "\u2022\u2022\u2022\u2022";
-  return `${value.slice(0, 4)}\u2026${value.slice(-4)}`;
-}
 function workbuddySession() {
   try {
     return extractWorkbuddySession();
@@ -13839,7 +13839,7 @@ var WorkbuddyDriver = class {
       }
       await context.secretStore.write(ref, {
         type: "workbuddy_free",
-        access: candidate2?.accessToken || session?.accessToken || "free-tier",
+        access: session?.accessToken || "free-tier",
         uid: session?.uid || null,
         email: session?.email || null
       }).catch(() => {
@@ -13867,6 +13867,18 @@ var WorkbuddyDriver = class {
   async getActiveSession() {
     return this.discover().then((res) => Array.isArray(res?.candidates) ? res.candidates[0] : null);
   }
+  /**
+   * WorkBuddy has no authorization page: the account lives in the official
+   * desktop client, and this plugin reads that session. Saying so is the whole
+   * instruction — there is no key the user could paste in its place.
+   */
+  async authorizationInstructions() {
+    const session = workbuddySession();
+    if (session?.accessToken) {
+      return "\u5DF2\u68C0\u6D4B\u5230 WorkBuddy \u5B98\u65B9\u684C\u9762\u7AEF\u4F1A\u8BDD\uFF0C\u70B9\u300C\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\u300D\u5373\u53EF\u6DFB\u52A0\u8BE5\u8D26\u53F7\u3002";
+    }
+    return "WorkBuddy \u4F7F\u7528\u5B98\u65B9\u684C\u9762\u7AEF\u7684\u8D26\u53F7\u4F1A\u8BDD\uFF0C\u6CA1\u6709 OAuth \u6388\u6743\u9875\uFF0C\u4E5F\u6CA1\u6709\u53EF\u586B\u5199\u7684 API Key\u3002\u8BF7\u5148\u5B89\u88C5\u5E76\u767B\u5F55 WorkBuddy \u5B98\u65B9\u684C\u9762\u7AEF\uFF0C\u7136\u540E\u70B9\u300C\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\u300D\uFF1B\u63D2\u4EF6\u4F1A\u8BFB\u53D6\u8BE5\u5BA2\u6237\u7AEF\u7684\u767B\u5F55\u72B6\u6001\uFF0C\u4E0D\u80FD\u51ED\u7A7A\u521B\u5EFA\u4E00\u4E2A\u8D26\u53F7\u3002\uFF08\u65E0\u6CD5\u5B89\u88C5\u684C\u9762\u7AEF\u7684\u9AD8\u7EA7\u7528\u6CD5\uFF1A\u5728\u542F\u52A8 DSH \u7684 shell \u4E2D\u8BBE\u7F6E WORKBUDDY_ACCESS_TOKEN\u3002\uFF09";
+  }
   /** Resolve a usable token from the imported credential, the environment or the desktop app. */
   async #resolveAccessToken(account, context = {}) {
     if (context.secretStore && account?.auth?.credentialRef) {
@@ -13893,26 +13905,6 @@ var WorkbuddyDriver = class {
   }
   async getQuota() {
     return createQuotaSnapshot({ source: "unknown" });
-  }
-  /**
-   * Import an access token pasted into the panel. WorkBuddy has no OAuth, and
-   * the official desktop app is the only thing that normally produces one, so
-   * this is the entry point for a machine without that app installed.
-   */
-  async importSource(source, context = {}) {
-    const rawToken = typeof source === "string" ? source : source?.accessToken ?? source?.token ?? source?.apiKey ?? "";
-    const token = String(rawToken ?? "").trim();
-    if (!token) throw new ValidationError("\u8BF7\u8F93\u5165\u6709\u6548\u7684 WorkBuddy access token");
-    const label = typeof source === "object" && typeof source?.label === "string" ? source.label.trim() : "";
-    const masked = maskToken(token);
-    return [await this.importAccount({
-      accountId: `workbuddy-${fingerprintToken(token)}`,
-      accessToken: token,
-      source: "manual_access_token",
-      displayName: label || `WorkBuddy Key (${masked})`,
-      email: masked,
-      health: { status: "healthy" }
-    }, context)];
   }
   async getCatalog(context = {}) {
     return this.catalogLoader({ force: Boolean(context.force) });
@@ -13958,9 +13950,7 @@ function createWorkbuddyModule({ driver = {} } = {}) {
       "invoke",
       "stream",
       PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
-      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP,
-      // Runs on an access token; the panel offers a field for it.
-      PROVIDER_BEHAVIOR_CAPABILITIES.API_KEY_AUTH
+      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP
     ],
     driver
   });
@@ -14084,13 +14074,13 @@ function summarizeKiloCandidate(candidate2) {
 }
 
 // modules/provider-commandcode/src/driver.mjs
-import { createHash as createHash11 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 import { existsSync as existsSync6, readdirSync as readdirSync2, readFileSync as readFileSync6 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
 import { join as join15 } from "node:path";
 
 // modules/provider-commandcode/src/native-transport.mjs
-import { createHash as createHash10, randomBytes as randomBytes5, randomUUID as randomUUID11 } from "node:crypto";
+import { createHash as createHash9, randomBytes as randomBytes5, randomUUID as randomUUID11 } from "node:crypto";
 import { existsSync as existsSync5, readFileSync as readFileSync5 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { join as join14 } from "node:path";
@@ -14345,7 +14335,7 @@ function deriveConversationSessionId(request, explicitSessionId) {
   if (direct) return direct;
   const firstMsg = request?.messages?.[0];
   const seed = firstMsg ? typeof firstMsg.content === "string" ? firstMsg.content : JSON.stringify(firstMsg.content || "") : "default-dsh-session";
-  const hash6 = createHash10("sha256").update(seed.slice(0, 500)).digest("hex");
+  const hash6 = createHash9("sha256").update(seed.slice(0, 500)).digest("hex");
   return `${hash6.slice(0, 8)}-${hash6.slice(8, 12)}-4${hash6.slice(13, 16)}-a${hash6.slice(17, 20)}-${hash6.slice(20, 32)}`;
 }
 function createCommandCodeNativeExecutor({
@@ -14649,7 +14639,7 @@ function createCommandCodeNativeExecutor({
 // modules/provider-commandcode/src/driver.mjs
 var PROVIDER_ID14 = "commandcode";
 function fingerprintApiKey(apiKey) {
-  return createHash11("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
+  return createHash10("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
 }
 function maskApiKey(apiKey) {
   const value = String(apiKey ?? "");
@@ -15249,7 +15239,7 @@ function createCommandCodeModule({ driver = {} } = {}) {
 }
 
 // modules/provider-hermes/src/driver.mjs
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 
 // modules/provider-hermes/src/native-transport.mjs
 import { existsSync as existsSync7, readFileSync as readFileSync7, statSync as statSync3 } from "node:fs";
@@ -15685,7 +15675,7 @@ function createHermesNativeExecutor({
 // modules/provider-hermes/src/driver.mjs
 var PROVIDER_ID16 = "hermes";
 function fingerprintApiKey2(apiKey) {
-  return createHash12("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
+  return createHash11("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
 }
 function maskApiKey2(apiKey) {
   const value = String(apiKey ?? "");
@@ -18036,6 +18026,21 @@ var DockyardRuntime = class {
   listProviderIds() {
     return this.providers.map(({ module }) => module.manifest.id);
   }
+  /**
+   * Ask a provider what the user has to do when it has no authorization entry
+   * point of its own (a desktop-session provider, for example). The host keeps
+   * one generic message for every provider that answers null.
+   */
+  async authorizationInstructions(providerId) {
+    const module = this.providers.find((entry) => entry.module.manifest.id === providerId)?.module;
+    if (typeof module?.authorizationInstructions !== "function") return null;
+    try {
+      const text3 = await module.authorizationInstructions(providerContext(this, {}));
+      return typeof text3 === "string" && text3.trim().length > 0 ? text3.trim() : null;
+    } catch {
+      return null;
+    }
+  }
   async scan(providerId = null) {
     await this.init();
     const entries = providerId ? [[providerId, this.#entry(providerId)]] : [...this.#entries];
@@ -19069,11 +19074,13 @@ var DockyardDshService = class {
     const manifest = manifestFor2(this.runtime, providerInput);
     if (!manifest) throw new Error(`\u672A\u77E5 provider\uFF1A${providerInput}`);
     if (!manifest.capabilities?.includes("oauth_authorization")) {
+      const provided = typeof this.runtime.authorizationInstructions === "function" ? await this.runtime.authorizationInstructions(manifest.id) : null;
       const keyOnly = manifest.capabilities?.includes("api_key_auth");
+      const fallback = keyOnly ? `${providerName(manifest)} \u4F7F\u7528 API Key \u8BA4\u8BC1\uFF1B\u8BF7\u5728\u9762\u677F\u7684\u300C\u6DFB\u52A0\u65B0\u7684 API Key\u300D\u4E2D\u586B\u5165\uFF0C\u6216\u626B\u63CF\u672C\u673A\u5DF2\u6709\u7684\u767B\u5F55\u6001\u3002` : `${providerName(manifest)} \u6CA1\u6709\u72EC\u7ACB\u7684\u5B98\u65B9\u6388\u6743\u5165\u53E3\uFF1B\u8BF7\u5148\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u5B98\u65B9\u73AF\u5883\u767B\u5F55/\u5207\u6362\u8D26\u53F7\uFF0C\u7136\u540E\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\uFF0C\u518D\u6DFB\u52A0\u5019\u9009\u3002`;
       return {
         status: "unsupported",
         providerId: manifest.id,
-        instructions: keyOnly ? `${providerName(manifest)} \u4F7F\u7528 API Key \u8BA4\u8BC1\uFF1B\u8BF7\u5728\u9762\u677F\u7684\u300C\u6DFB\u52A0\u65B0\u7684 API Key\u300D\u4E2D\u586B\u5165\uFF0C\u6216\u626B\u63CF\u672C\u673A\u5DF2\u6709\u7684\u767B\u5F55\u6001\u3002` : `${providerName(manifest)} \u6CA1\u6709\u72EC\u7ACB\u7684\u5B98\u65B9\u6388\u6743\u5165\u53E3\uFF1B\u8BF7\u5148\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u5B98\u65B9\u73AF\u5883\u767B\u5F55/\u5207\u6362\u8D26\u53F7\uFF0C\u7136\u540E\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\uFF0C\u518D\u6DFB\u52A0\u5019\u9009\u3002`
+        instructions: provided ?? fallback
       };
     }
     const existingStart = this.#authStartPromises.get(manifest.id);
@@ -19352,9 +19359,9 @@ var dockyardDshConstants = Object.freeze({
 });
 
 // packages/dsh-plugin/src/dockyard-credential-store.mjs
-import { createHash as createHash13 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 function dshCredentialRef(ref) {
-  const digest = createHash13("sha256").update(String(ref)).digest("hex");
+  const digest = createHash12("sha256").update(String(ref)).digest("hex");
   return `DOCKYARD_DSH_${digest}`;
 }
 function parseCredential(value) {
