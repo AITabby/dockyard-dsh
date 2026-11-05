@@ -12,6 +12,10 @@ import {
   createHermesDriver,
   createHermesModule,
 } from "../modules/provider-hermes/src/index.mjs";
+import {
+  createWorkbuddyDriver,
+  createWorkbuddyModule,
+} from "../modules/provider-workbuddy/src/index.mjs";
 
 function memorySecretStore() {
   const data = new Map();
@@ -130,4 +134,51 @@ test("hermes importSource stores the pasted key and derives a stable account id"
     const [again] = await driver.importSource({ apiKey: "nous-panel-key-9876" }, { secretStore: memorySecretStore() });
     assert.equal(account.accountId, again.accountId);
   });
+});
+
+// WorkBuddy has no OAuth and no user-facing API key either: it decrypts the
+// access token the official macOS desktop app keeps in its own storage. Without
+// that app the only entry point is a pasted token, which the panel now offers.
+
+test("workbuddy declares api_key_auth", () => {
+  assert.ok(createWorkbuddyModule().manifest.capabilities.includes("api_key_auth"));
+});
+
+test("workbuddy importSource rejects an empty token", async () => {
+  const driver = createWorkbuddyDriver();
+  await assert.rejects(() => driver.importSource({ accessToken: "  " }), /WorkBuddy access token/);
+});
+
+test("workbuddy importSource stores the pasted token and masks it in the label", async () => {
+  const driver = createWorkbuddyDriver({ fetchImpl: async () => { throw new Error("no network in tests"); } });
+  const secretStore = memorySecretStore();
+
+  const [account] = await driver.importSource({ accessToken: "wb-access-token-abcdef" }, { secretStore });
+
+  assert.equal(account.providerId, "workbuddy");
+  assert.ok(account.accountId.startsWith("workbuddy-"));
+  const stored = await secretStore.read(account.auth.credentialRef);
+  assert.equal(stored.access, "wb-access-token-abcdef");
+  assert.ok(!account.displayName.includes("wb-access-token-abcdef"));
+
+  const [again] = await driver.importSource({ accessToken: "wb-access-token-abcdef" }, { secretStore: memorySecretStore() });
+  assert.equal(account.accountId, again.accountId);
+});
+
+test("workbuddy refreshAccount reports healthy only when a token resolves", async () => {
+  const driver = createWorkbuddyDriver();
+  const secretStore = memorySecretStore();
+  const [account] = await driver.importSource({ accessToken: "wb-refresh-token-1234" }, { secretStore });
+
+  const refreshed = await driver.refreshAccount(account, { secretStore });
+  assert.equal(refreshed.health.status, "healthy");
+});
+
+test("workbuddy discover does not invent a quota", async () => {
+  const driver = createWorkbuddyDriver();
+  const result = await driver.discover();
+  const candidate = result.candidates[0];
+  // It used to report a hard-coded 100/100 "requests" allowance on every scan.
+  assert.equal(candidate.quota?.remaining, undefined);
+  assert.equal(candidate.quota?.limit, undefined);
 });

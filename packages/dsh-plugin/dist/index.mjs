@@ -13152,6 +13152,7 @@ function summarizeOpencodeCandidate(candidate2) {
 }
 
 // modules/provider-workbuddy/src/driver.mjs
+import { createHash as createHash9 } from "node:crypto";
 import { existsSync as existsSync4, readdirSync, readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
 import { join as join13 } from "node:path";
 
@@ -13588,6 +13589,25 @@ function createWorkbuddyNativeExecutor({
 
 // modules/provider-workbuddy/src/driver.mjs
 var PROVIDER_ID11 = "workbuddy";
+function fingerprintToken(token) {
+  return createHash9("sha256").update(String(token)).digest("hex").slice(0, 16);
+}
+function maskToken(token) {
+  const value = String(token ?? "");
+  if (value.length <= 8) return "\u2022\u2022\u2022\u2022";
+  return `${value.slice(0, 4)}\u2026${value.slice(-4)}`;
+}
+function workbuddySession() {
+  try {
+    return extractWorkbuddySession();
+  } catch {
+    return null;
+  }
+}
+function envAccessToken() {
+  const token = process.env.WORKBUDDY_ACCESS_TOKEN;
+  return token && token.trim().length > 0 ? token.trim() : null;
+}
 var BUILTIN_WORKBUDDY_FREE_MODELS = Object.freeze([
   {
     id: "hy4free",
@@ -13781,11 +13801,8 @@ var WorkbuddyDriver = class {
     });
   }
   async discover() {
-    let session = null;
-    try {
-      session = extractWorkbuddySession();
-    } catch {
-    }
+    const session = workbuddySession();
+    const usable = Boolean(session?.accessToken) || Boolean(envAccessToken());
     const displayName = session?.nickname ? `WorkBuddy Free (${session.nickname})` : "WorkBuddy Free";
     const email = session?.email || (session?.nickname?.includes("@") ? session.nickname : "workbuddy@desktop.ai");
     return {
@@ -13797,22 +13814,18 @@ var WorkbuddyDriver = class {
           email,
           subscription: {
             plan: "WorkBuddy Free Rotation",
-            status: "active"
+            status: usable ? "active" : "unknown"
           },
-          quota: {
-            remaining: 100,
-            limit: 100,
-            unit: "requests",
-            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-          },
+          // WorkBuddy publishes no quota, and this plugin does not invent one.
+          quota: { source: "unknown" },
           source: "workbuddy_free_tier",
           health: {
-            status: "healthy"
+            status: usable ? "healthy" : "auth_expired"
           }
         }
       ],
       source: "workbuddy_free_tier",
-      diagnostics: []
+      diagnostics: usable ? [] : ["\u672A\u68C0\u6D4B\u5230 WorkBuddy \u5B98\u65B9\u684C\u9762\u7AEF\u4F1A\u8BDD\uFF1B\u8BF7\u767B\u5F55\u5B98\u65B9 WorkBuddy \u684C\u9762\u7AEF\uFF0C\u6216\u5728\u9762\u677F\u4E2D\u586B\u5199 access token\u3002"]
     };
   }
   async importAccount(candidate2, context = {}) {
@@ -13826,7 +13839,7 @@ var WorkbuddyDriver = class {
       }
       await context.secretStore.write(ref, {
         type: "workbuddy_free",
-        access: session?.accessToken || "free-tier",
+        access: candidate2?.accessToken || session?.accessToken || "free-tier",
         uid: session?.uid || null,
         email: session?.email || null
       }).catch(() => {
@@ -13845,27 +13858,33 @@ var WorkbuddyDriver = class {
         plan: candidate2?.subscription?.plan || "WorkBuddy Free Rotation",
         status: "active"
       },
-      quota: createQuotaSnapshot(candidate2?.quota || {
-        remaining: 100,
-        limit: 100,
-        unit: "requests"
-      }),
+      quota: createQuotaSnapshot(candidate2?.quota ?? {}),
       health: {
-        status: "healthy"
+        status: candidate2?.health?.status ?? "healthy"
       }
     });
   }
   async getActiveSession() {
     return this.discover().then((res) => Array.isArray(res?.candidates) ? res.candidates[0] : null);
   }
-  async refreshAccount(account) {
+  /** Resolve a usable token from the imported credential, the environment or the desktop app. */
+  async #resolveAccessToken(account, context = {}) {
+    if (context.secretStore && account?.auth?.credentialRef) {
+      try {
+        const secret = await context.secretStore.read(account.auth.credentialRef);
+        const stored = stringValue(secret?.access);
+        if (stored && stored !== "free-tier") return stored;
+      } catch {
+      }
+    }
+    const fromEnv = envAccessToken();
+    if (fromEnv) return fromEnv;
+    return workbuddySession()?.accessToken ?? null;
+  }
+  async refreshAccount(account, context = {}) {
+    const token = await this.#resolveAccessToken(account, context);
+    if (!token) return { health: { status: "auth_expired" } };
     return {
-      quota: createQuotaSnapshot({
-        remaining: 100,
-        limit: 100,
-        unit: "requests",
-        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-      }),
       health: {
         status: "healthy",
         lastCheckedAt: (/* @__PURE__ */ new Date()).toISOString()
@@ -13873,12 +13892,27 @@ var WorkbuddyDriver = class {
     };
   }
   async getQuota() {
-    return createQuotaSnapshot({
-      remaining: 100,
-      limit: 100,
-      unit: "requests",
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-    });
+    return createQuotaSnapshot({ source: "unknown" });
+  }
+  /**
+   * Import an access token pasted into the panel. WorkBuddy has no OAuth, and
+   * the official desktop app is the only thing that normally produces one, so
+   * this is the entry point for a machine without that app installed.
+   */
+  async importSource(source, context = {}) {
+    const rawToken = typeof source === "string" ? source : source?.accessToken ?? source?.token ?? source?.apiKey ?? "";
+    const token = String(rawToken ?? "").trim();
+    if (!token) throw new ValidationError("\u8BF7\u8F93\u5165\u6709\u6548\u7684 WorkBuddy access token");
+    const label = typeof source === "object" && typeof source?.label === "string" ? source.label.trim() : "";
+    const masked = maskToken(token);
+    return [await this.importAccount({
+      accountId: `workbuddy-${fingerprintToken(token)}`,
+      accessToken: token,
+      source: "manual_access_token",
+      displayName: label || `WorkBuddy Key (${masked})`,
+      email: masked,
+      health: { status: "healthy" }
+    }, context)];
   }
   async getCatalog(context = {}) {
     return this.catalogLoader({ force: Boolean(context.force) });
@@ -13924,7 +13958,9 @@ function createWorkbuddyModule({ driver = {} } = {}) {
       "invoke",
       "stream",
       PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
-      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP
+      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP,
+      // Runs on an access token; the panel offers a field for it.
+      PROVIDER_BEHAVIOR_CAPABILITIES.API_KEY_AUTH
     ],
     driver
   });
@@ -14048,13 +14084,13 @@ function summarizeKiloCandidate(candidate2) {
 }
 
 // modules/provider-commandcode/src/driver.mjs
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 import { existsSync as existsSync6, readdirSync as readdirSync2, readFileSync as readFileSync6 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
 import { join as join15 } from "node:path";
 
 // modules/provider-commandcode/src/native-transport.mjs
-import { createHash as createHash9, randomBytes as randomBytes5, randomUUID as randomUUID11 } from "node:crypto";
+import { createHash as createHash10, randomBytes as randomBytes5, randomUUID as randomUUID11 } from "node:crypto";
 import { existsSync as existsSync5, readFileSync as readFileSync5 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { join as join14 } from "node:path";
@@ -14309,7 +14345,7 @@ function deriveConversationSessionId(request, explicitSessionId) {
   if (direct) return direct;
   const firstMsg = request?.messages?.[0];
   const seed = firstMsg ? typeof firstMsg.content === "string" ? firstMsg.content : JSON.stringify(firstMsg.content || "") : "default-dsh-session";
-  const hash6 = createHash9("sha256").update(seed.slice(0, 500)).digest("hex");
+  const hash6 = createHash10("sha256").update(seed.slice(0, 500)).digest("hex");
   return `${hash6.slice(0, 8)}-${hash6.slice(8, 12)}-4${hash6.slice(13, 16)}-a${hash6.slice(17, 20)}-${hash6.slice(20, 32)}`;
 }
 function createCommandCodeNativeExecutor({
@@ -14613,7 +14649,7 @@ function createCommandCodeNativeExecutor({
 // modules/provider-commandcode/src/driver.mjs
 var PROVIDER_ID14 = "commandcode";
 function fingerprintApiKey(apiKey) {
-  return createHash10("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
+  return createHash11("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
 }
 function maskApiKey(apiKey) {
   const value = String(apiKey ?? "");
@@ -15213,7 +15249,7 @@ function createCommandCodeModule({ driver = {} } = {}) {
 }
 
 // modules/provider-hermes/src/driver.mjs
-import { createHash as createHash11 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 
 // modules/provider-hermes/src/native-transport.mjs
 import { existsSync as existsSync7, readFileSync as readFileSync7, statSync as statSync3 } from "node:fs";
@@ -15649,7 +15685,7 @@ function createHermesNativeExecutor({
 // modules/provider-hermes/src/driver.mjs
 var PROVIDER_ID16 = "hermes";
 function fingerprintApiKey2(apiKey) {
-  return createHash11("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
+  return createHash12("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
 }
 function maskApiKey2(apiKey) {
   const value = String(apiKey ?? "");
@@ -19316,9 +19352,9 @@ var dockyardDshConstants = Object.freeze({
 });
 
 // packages/dsh-plugin/src/dockyard-credential-store.mjs
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 function dshCredentialRef(ref) {
-  const digest = createHash12("sha256").update(String(ref)).digest("hex");
+  const digest = createHash13("sha256").update(String(ref)).digest("hex");
   return `DOCKYARD_DSH_${digest}`;
 }
 function parseCredential(value) {

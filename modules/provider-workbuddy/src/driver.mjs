@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import {
   createAccountRecord,
   createQuotaSnapshot,
 } from "../../../packages/core/src/contracts.mjs";
+import { ValidationError } from "../../../packages/core/src/errors.mjs";
 import {
   resolveContextWindowFromModel,
   resolveMaxTokensFromModel,
@@ -22,6 +24,37 @@ import {
 } from "./native-transport.mjs";
 
 const PROVIDER_ID = "workbuddy";
+
+/** Stable per-token identifier so pasting the same token twice reuses one account. */
+function fingerprintToken(token) {
+  return createHash("sha256").update(String(token)).digest("hex").slice(0, 16);
+}
+
+/** Display form of an access token: never echo the whole secret back. */
+function maskToken(token) {
+  const value = String(token ?? "");
+  if (value.length <= 8) return "••••";
+  return `${value.slice(0, 4)}…${value.slice(-4)}`;
+}
+
+/**
+ * Read the official desktop session if it is available. WorkBuddy has no OAuth
+ * and no user-facing API key: the plugin decrypts the access token the official
+ * macOS app keeps in its own storage. A `WORKBUDDY_ACCESS_TOKEN` environment
+ * variable is the only supported way to run it without that app.
+ */
+function workbuddySession() {
+  try {
+    return extractWorkbuddySession();
+  } catch {
+    return null;
+  }
+}
+
+function envAccessToken() {
+  const token = process.env.WORKBUDDY_ACCESS_TOKEN;
+  return token && token.trim().length > 0 ? token.trim() : null;
+}
 
 export const BUILTIN_WORKBUDDY_FREE_MODELS = Object.freeze([
   {
@@ -238,10 +271,8 @@ export class WorkbuddyDriver {
   }
 
   async discover() {
-    let session = null;
-    try {
-      session = extractWorkbuddySession();
-    } catch {}
+    const session = workbuddySession();
+    const usable = Boolean(session?.accessToken) || Boolean(envAccessToken());
 
     const displayName = session?.nickname
       ? `WorkBuddy Free (${session.nickname})`
@@ -257,22 +288,20 @@ export class WorkbuddyDriver {
           email,
           subscription: {
             plan: "WorkBuddy Free Rotation",
-            status: "active",
+            status: usable ? "active" : "unknown",
           },
-          quota: {
-            remaining: 100,
-            limit: 100,
-            unit: "requests",
-            updatedAt: new Date().toISOString(),
-          },
+          // WorkBuddy publishes no quota, and this plugin does not invent one.
+          quota: { source: "unknown" },
           source: "workbuddy_free_tier",
           health: {
-            status: "healthy",
+            status: usable ? "healthy" : "auth_expired",
           },
         },
       ],
       source: "workbuddy_free_tier",
-      diagnostics: [],
+      diagnostics: usable
+        ? []
+        : ["未检测到 WorkBuddy 官方桌面端会话；请登录官方 WorkBuddy 桌面端，或在面板中填写 access token。"],
     };
   }
 
@@ -288,7 +317,7 @@ export class WorkbuddyDriver {
 
       await context.secretStore.write(ref, {
         type: "workbuddy_free",
-        access: session?.accessToken || "free-tier",
+        access: candidate?.accessToken || session?.accessToken || "free-tier",
         uid: session?.uid || null,
         email: session?.email || null,
       }).catch(() => {});
@@ -307,13 +336,9 @@ export class WorkbuddyDriver {
         plan: candidate?.subscription?.plan || "WorkBuddy Free Rotation",
         status: "active",
       },
-      quota: createQuotaSnapshot(candidate?.quota || {
-        remaining: 100,
-        limit: 100,
-        unit: "requests",
-      }),
+      quota: createQuotaSnapshot(candidate?.quota ?? {}),
       health: {
-        status: "healthy",
+        status: candidate?.health?.status ?? "healthy",
       },
     });
   }
@@ -322,14 +347,26 @@ export class WorkbuddyDriver {
     return this.discover().then((res) => (Array.isArray(res?.candidates) ? res.candidates[0] : null));
   }
 
-  async refreshAccount(account) {
+  /** Resolve a usable token from the imported credential, the environment or the desktop app. */
+  async #resolveAccessToken(account, context = {}) {
+    if (context.secretStore && account?.auth?.credentialRef) {
+      try {
+        const secret = await context.secretStore.read(account.auth.credentialRef);
+        const stored = stringValue(secret?.access);
+        if (stored && stored !== "free-tier") return stored;
+      } catch {}
+    }
+    const fromEnv = envAccessToken();
+    if (fromEnv) return fromEnv;
+    return workbuddySession()?.accessToken ?? null;
+  }
+
+  async refreshAccount(account, context = {}) {
+    const token = await this.#resolveAccessToken(account, context);
+    // No token means every request would fail; reporting "healthy" here would
+    // be an invented result, which this plugin never reports.
+    if (!token) return { health: { status: "auth_expired" } };
     return {
-      quota: createQuotaSnapshot({
-        remaining: 100,
-        limit: 100,
-        unit: "requests",
-        updatedAt: new Date().toISOString(),
-      }),
       health: {
         status: "healthy",
         lastCheckedAt: new Date().toISOString(),
@@ -338,12 +375,33 @@ export class WorkbuddyDriver {
   }
 
   async getQuota() {
-    return createQuotaSnapshot({
-      remaining: 100,
-      limit: 100,
-      unit: "requests",
-      updatedAt: new Date().toISOString(),
-    });
+    // WorkBuddy exposes no quota surface; leave the numbers unknown.
+    return createQuotaSnapshot({ source: "unknown" });
+  }
+
+  /**
+   * Import an access token pasted into the panel. WorkBuddy has no OAuth, and
+   * the official desktop app is the only thing that normally produces one, so
+   * this is the entry point for a machine without that app installed.
+   */
+  async importSource(source, context = {}) {
+    const rawToken = typeof source === "string"
+      ? source
+      : (source?.accessToken ?? source?.token ?? source?.apiKey ?? "");
+    const token = String(rawToken ?? "").trim();
+    if (!token) throw new ValidationError("请输入有效的 WorkBuddy access token");
+    const label = typeof source === "object" && typeof source?.label === "string"
+      ? source.label.trim()
+      : "";
+    const masked = maskToken(token);
+    return [await this.importAccount({
+      accountId: `workbuddy-${fingerprintToken(token)}`,
+      accessToken: token,
+      source: "manual_access_token",
+      displayName: label || `WorkBuddy Key (${masked})`,
+      email: masked,
+      health: { status: "healthy" },
+    }, context)];
   }
 
   async getCatalog(context = {}) {
