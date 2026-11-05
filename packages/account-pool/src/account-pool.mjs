@@ -2,6 +2,7 @@ import {
   ACCOUNT_HEALTH,
   ACCOUNT_SELECTION_POLICY,
   accountSummary,
+  createBalanceSnapshot,
   createAccountRecord,
   createQuotaSnapshot,
   createRefreshState,
@@ -14,6 +15,9 @@ function defaultClock() {
 }
 
 const STICKY_SESSION_TTL_MS = 30 * 60 * 1000;
+// How long an account whose authorization expired stays parked before it is
+// retried. Overridable per report through `cooldownUntil`.
+const RELIST_COOLDOWN_MS = 30 * 60 * 1000;
 const MAX_STICKY_ASSIGNMENTS = 10_000;
 
 export class AccountPool {
@@ -157,9 +161,16 @@ export class AccountPool {
         ? selectable.find((candidate) => candidate.accountId === assignedId)
         : null;
       if (!account) {
-        account = this.policy === ACCOUNT_SELECTION_POLICY.FAILOVER
-          ? selectable[0]
-          : this.#next(selectable);
+        if (this.policy === ACCOUNT_SELECTION_POLICY.FAILOVER) {
+          account = selectable[0];
+        } else if (this.policy === ACCOUNT_SELECTION_POLICY.ALLOWANCE_FULLEST) {
+          // Burn the account with the most headroom, so accounts whose windows
+          // reset later are not drained first. Accounts that report no windows
+          // cannot be compared, so the pool falls back to round robin.
+          account = this.#fullest(selectable) ?? this.#next(selectable);
+        } else {
+          account = this.#next(selectable);
+        }
       }
       if (assignmentKey) {
         this.#sessionAssignments.delete(assignmentKey);
@@ -235,6 +246,7 @@ export class AccountPool {
     const now = this.clock().toISOString();
     const patch = { updatedAt: now, health: { ...account.health, lastCheckedAt: now } };
     if (result.quota) patch.quota = createQuotaSnapshot({ ...account.quota, ...result.quota }, this.clock());
+    if (result.balance) patch.balance = createBalanceSnapshot({ ...account.balance, ...result.balance }, this.clock());
     if (result.refresh) patch.refresh = createRefreshState({ ...account.refresh, ...result.refresh });
 
     switch (result.status) {
@@ -258,7 +270,17 @@ export class AccountPool {
         };
         break;
       case "auth_expired":
-        patch.health = { ...patch.health, status: ACCOUNT_HEALTH.EXPIRED, lastError: result.message ?? null };
+        // Parked, not discarded: the account is retried once the cooldown
+        // passes, because an expired token is usually a refresh away from
+        // working again (the official CLI may have rotated it, for instance).
+        patch.health = {
+          ...patch.health,
+          status: ACCOUNT_HEALTH.EXPIRED,
+          lastError: result.message ?? null,
+          cooldownUntil: result.cooldownUntil ?? new Date(
+            this.clock().getTime() + RELIST_COOLDOWN_MS,
+          ).toISOString(),
+        };
         break;
       case "error":
         patch.health = { ...patch.health, status: ACCOUNT_HEALTH.DEGRADED, lastError: result.message ?? null };
@@ -276,12 +298,28 @@ export class AccountPool {
       ...current,
       ...patch,
       quota: patch.quota ? { ...current.quota, ...patch.quota } : current.quota,
+      balance: patch.balance ? { ...current.balance, ...patch.balance } : current.balance,
       refresh: patch.refresh ? { ...current.refresh, ...patch.refresh } : current.refresh,
       resources: patch.resources ? { ...current.resources, ...patch.resources } : current.resources,
       health: patch.health ? { ...current.health, ...patch.health } : current.health,
     };
     this.#accounts.set(accountId, next);
     return accountSummary(next);
+  }
+
+  /**
+   * Accounts parked by an expired authorization whose cooldown has passed.
+   * The runtime retries exactly these, so a token that was rotated elsewhere is
+   * picked back up without the account staying dead forever.
+   */
+  relistable(now = this.clock()) {
+    return [...this.#accounts.values()]
+      .filter((account) => account.health?.status === ACCOUNT_HEALTH.EXPIRED)
+      .filter((account) => {
+        const until = account.health?.cooldownUntil;
+        return !until || new Date(until).getTime() <= now.getTime();
+      })
+      .map(accountSummary);
   }
 
   #eligibleAccounts(now = this.clock()) {
@@ -303,6 +341,39 @@ export class AccountPool {
       if (oldest === undefined) break;
       this.#sessionAssignments.delete(oldest);
     }
+  }
+
+  /**
+   * The share of an account's tightest reported window that is still left.
+   * The tightest window is the one that will stop the account first, so it is
+   * the honest measure of headroom. Returns null when nothing is reported.
+   */
+  #remainingShare(account) {
+    const windows = Array.isArray(account?.quota?.windows) ? account.quota.windows : [];
+    let lowest = null;
+    for (const window of windows) {
+      const remaining = Number(window?.remaining);
+      const limit = Number(window?.limit);
+      if (!Number.isFinite(remaining) || !Number.isFinite(limit) || limit <= 0) continue;
+      const share = Math.max(0, Math.min(1, remaining / limit));
+      if (lowest === null || share < lowest) lowest = share;
+    }
+    return lowest;
+  }
+
+  /** The selectable account with the most headroom, if any reports quota. */
+  #fullest(selectable) {
+    let best = null;
+    let bestShare = -1;
+    for (const candidate of selectable) {
+      const share = this.#remainingShare(candidate);
+      if (share === null) continue;
+      if (share > bestShare) {
+        best = candidate;
+        bestShare = share;
+      }
+    }
+    return best;
   }
 
   #next(accounts) {

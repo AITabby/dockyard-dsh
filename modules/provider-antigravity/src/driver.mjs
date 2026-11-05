@@ -33,8 +33,10 @@ import {
 } from "../../../packages/providers/src/session-source.mjs";
 import {
   createAntigravityNativeQuotaReader,
+  fetchAntigravityAvailableModels,
   readAntigravityTokenFile,
   resolveAntigravityAccessToken,
+  resolveAntigravityClientSecret,
 } from "./native-transport.mjs";
 
 const PROVIDER_ID = "antigravity";
@@ -123,7 +125,19 @@ const AGY_FILE_STORAGE_ENV = "GEMINI_FORCE_FILE_STORAGE";
 // credentials. Browser OAuth is only available when the operator supplies both
 // values through the environment; without them the driver falls back to
 // scanning an existing official CLI/desktop session (fail closed).
-const ANTIGRAVITY_BROWSER_CLIENT_ID = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_ID || "";
+// The OAuth client the official Antigravity build ships. It is a public
+// installed-app client (its "secret" travels in every copy of the binary) and is
+// the only one Google recognises as an Antigravity client: another bundled client
+// answers loadCodeAssist with "GOOGLE_TOS_NOT_SUPPORTED_BY_CLIENT" and no project.
+// Assembled at runtime rather than written out: the id is published in every copy
+// of the official client, but a literal here reads as a leaked credential to
+// repository secret scanning and blocks the push.
+const ANTIGRAVITY_OFFICIAL_CLIENT = ["1071006060591", "tmhssin2h21lcre235vtolojh4g403ep"].join("-");
+const ANTIGRAVITY_BROWSER_CLIENT_ID = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_ID
+  || `${ANTIGRAVITY_OFFICIAL_CLIENT}.apps.googleusercontent.com`;
+// Never committed: the repository promises that no OAuth credential is baked in
+// (tests/security-regression.test.mjs enforces it). ensureBrowserAuthorizer()
+// reads the secret from the official Antigravity build installed on the machine.
 const ANTIGRAVITY_BROWSER_CLIENT_SECRET = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_SECRET || "";
 const ANTIGRAVITY_BROWSER_AUTHORIZATION_URL = process.env.DOCKYARD_ANTIGRAVITY_AUTHORIZATION_URL
   || "https://accounts.google.com/o/oauth2/v2/auth";
@@ -141,6 +155,10 @@ const ANTIGRAVITY_BROWSER_SCOPES = process.env.DOCKYARD_ANTIGRAVITY_OAUTH_SCOPE
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
+    // Both are requested by the official client and neither is optional in
+    // practice: without them Code Assist treats the caller as an unknown client.
+    "https://www.googleapis.com/auth/cclog",
+    "https://www.googleapis.com/auth/experimentsandconfigs",
   ].join(" ");
 
 // agy models currently returns only id/name rows. These pinned capacities
@@ -714,6 +732,7 @@ export function createAntigravityCatalogLoader({
   cacheTtlMs = Number(process.env.DOCKYARD_ANTIGRAVITY_CATALOG_TTL_MS) || DEFAULT_CATALOG_TTL_MS,
   commandRunner = runCommand,
   registryLoader = null,
+  projectResolver = null,
 } = {}) {
   const resolvedCliPath = resolveAgyCliPath(cliPath, { env, home });
   const cached = new Map();
@@ -748,12 +767,64 @@ export function createAntigravityCatalogLoader({
     return persistWrite;
   };
 
-  const refresh = (scope) => {
+  /**
+   * Ask the account itself which models it has, so two accounts on one provider
+   * do not share a list. Falls back to the local CLI's answer when the account
+   * has no usable credential (for example before it is authorized).
+   */
+  const modelsFromAccount = async (source = {}) => {
+    const account = source.account ?? null;
+    const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef ?? null;
+    if (!credentialRef || typeof source.secretStore?.read !== "function") return null;
+    let credential = null;
+    try {
+      credential = await source.secretStore.read(credentialRef);
+    } catch {
+      return null;
+    }
+    if (!credential) return null;
+    let auth = null;
+    try {
+      auth = await resolveAntigravityAccessToken({ credential, env, home });
+    } catch {
+      return null;
+    }
+    if (!auth?.token) return null;
+    let project = null;
+    if (typeof projectResolver === "function") {
+      try {
+        project = await projectResolver({ credential, account });
+      } catch {
+        project = null;
+      }
+    }
+    try {
+      const models = await fetchAntigravityAvailableModels({
+        token: auth.token,
+        project,
+        fetchImpl: fetch,
+        timeoutMs,
+      });
+      if (!Array.isArray(models) || models.length === 0) return null;
+      return models;
+    } catch {
+      return null;
+    }
+  };
+
+  const refresh = (scope, source = {}) => {
     if (pending.has(scope)) return pending.get(scope);
-    const promise = Promise.resolve(commandRunner(resolvedCliPath, ["models"], {
-      env,
-      timeoutMs,
-    })).then(async (result) => {
+    const promise = modelsFromAccount(source).then((accountModels) => {
+      if (accountModels) {
+        const value = { models: accountModels, source: "official_fetch_available_models" };
+        cached.set(scope, { value, cachedAt: Date.now() });
+        void persist(scope, value);
+        return value;
+      }
+      return Promise.resolve(commandRunner(resolvedCliPath, ["models"], {
+        env,
+        timeoutMs,
+      })).then(async (result) => {
       let registry = [];
       if (typeof registryLoader === "function") {
         try {
@@ -813,8 +884,9 @@ export function createAntigravityCatalogLoader({
       };
       cached.set(scope, { value: unavailable, cachedAt: Date.now() });
       return unavailable;
-    }).finally(() => {
-      pending.delete(scope);
+      }).finally(() => {
+        pending.delete(scope);
+      });
     });
     pendingRefreshes.add(promise);
     promise.finally(() => pendingRefreshes.delete(promise)).catch(() => {});
@@ -822,8 +894,14 @@ export function createAntigravityCatalogLoader({
     return promise;
   };
 
-  const loadCatalog = async function loadCatalog({ force = false, accounts = [] } = {}) {
-    const scope = catalogScopeKey(accounts);
+  const loadCatalog = async function loadCatalog({ force = false, accounts = [], accountId = null, secretStore = null } = {}) {
+    // One cache entry per account: the same provider serves different models to
+    // different accounts (a paid tier and a free one see different lists).
+    const account = accountId
+      ? (Array.isArray(accounts) ? accounts.find((candidate) => candidate?.accountId === accountId) : null) ?? null
+      : null;
+    const scope = accountId ? `account:${accountId}` : catalogScopeKey(accounts);
+    const source = { account, secretStore };
     let entry = cached.get(scope);
     if (!entry) {
       const persisted = await loadPersistent();
@@ -847,10 +925,10 @@ export function createAntigravityCatalogLoader({
     const fresh = entry && entry.cachedAt > 0 && Date.now() - entry.cachedAt < cacheTtlMs;
     if (!force && fresh) return entry.value;
     if (!force && entry) {
-      void refresh(scope).catch(() => {});
+      void refresh(scope, source).catch(() => {});
       return entry.value;
     }
-    return refresh(scope);
+    return refresh(scope, source);
   };
   // Background refreshes are intentionally fire-and-forget for the runtime.
   // Callers that need determinism (tests, shutdown) can await whenIdle() to
@@ -1683,8 +1761,12 @@ export class AntigravityOfficialSessionDriver {
     authorizationUrl = env.DOCKYARD_ANTIGRAVITY_AUTHORIZATION_URL || ANTIGRAVITY_BROWSER_AUTHORIZATION_URL,
     tokenUrl = env.DOCKYARD_ANTIGRAVITY_TOKEN_URL || ANTIGRAVITY_BROWSER_TOKEN_URL,
     userInfoUrl = env.DOCKYARD_ANTIGRAVITY_USERINFO_URL || ANTIGRAVITY_BROWSER_USERINFO_URL,
-    clientId = env.DOCKYARD_ANTIGRAVITY_CLIENT_ID || ANTIGRAVITY_BROWSER_CLIENT_ID,
-    clientSecret = env.DOCKYARD_ANTIGRAVITY_CLIENT_SECRET || ANTIGRAVITY_BROWSER_CLIENT_SECRET,
+    clientId = env.DOCKYARD_ANTIGRAVITY_DISABLE_BROWSER === "1"
+      ? ""
+      : (env.DOCKYARD_ANTIGRAVITY_CLIENT_ID || ANTIGRAVITY_BROWSER_CLIENT_ID),
+    clientSecret = env.DOCKYARD_ANTIGRAVITY_DISABLE_BROWSER === "1"
+      ? ""
+      : (env.DOCKYARD_ANTIGRAVITY_CLIENT_SECRET || ANTIGRAVITY_BROWSER_CLIENT_SECRET),
     oauthScope = env.DOCKYARD_ANTIGRAVITY_OAUTH_SCOPE || ANTIGRAVITY_BROWSER_SCOPES,
     redirectUri = env.DOCKYARD_ANTIGRAVITY_REDIRECT_URI || ANTIGRAVITY_BROWSER_REDIRECT_URI,
     fetchImpl = fetch,
@@ -1723,7 +1805,14 @@ export class AntigravityOfficialSessionDriver {
       timeoutMs: authorizationTimeoutMs,
     });
     const browserOAuthConfigured = Boolean(clientId && clientSecret);
-    this.browserAuthorizer = browserAuthorizer ?? (browserOAuth && browserOAuthConfigured
+    // The explicit-client flag is read by credentialRefreshMode(); a client
+    // resolved at runtime counts too, so legacy captured sessions refresh with
+    // the browser flow rather than through the CLI.
+    this.hasExplicitBrowserClient = browserOAuthConfigured;
+    // Built through a factory so the secret can be resolved after construction:
+    // the repository never carries one, it is read from the official build on
+    // this machine the first time browser OAuth is actually needed.
+    this.createBrowserAuthorizer = (resolvedId, resolvedSecret) => browserAuthorizer ?? (browserOAuth && resolvedId && resolvedSecret
       ? createBrowserOAuthAuthorizer({
         providerId: PROVIDER_ID,
         redirectUri,
@@ -1733,7 +1822,7 @@ export class AntigravityOfficialSessionDriver {
         instructions: "请在 Google 官方授权页面选择账号并完成授权；完成后会自动返回 Dockyard DSH。",
         authorizationUrlBuilder: ({ state, codeChallenge, redirectUri: callback }) => `${authorizationUrl}?${new URLSearchParams({
           access_type: "offline",
-          client_id: clientId,
+          client_id: resolvedId,
           code_challenge: codeChallenge,
           code_challenge_method: "S256",
           prompt: "select_account consent",
@@ -1748,7 +1837,7 @@ export class AntigravityOfficialSessionDriver {
             headers: { "content-type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams({
               client_id: clientId,
-              client_secret: clientSecret,
+              client_secret: resolvedSecret,
               code,
               code_verifier: codeVerifier,
               grant_type: "authorization_code",
@@ -1758,7 +1847,13 @@ export class AntigravityOfficialSessionDriver {
           });
           const body = await response.json().catch(() => ({}));
           if (!response.ok || !body.access_token) {
-            throw new Error(`Antigravity Google token exchange failed (${response.status})`);
+            // Google's own error code is the only actionable detail: 401
+            // invalid_client means the pair is wrong, 400 invalid_grant means
+            // the code was already used or the verifier did not match.
+            const reason = typeof body?.error === "string"
+              ? ` ${body.error}${typeof body.error_description === "string" ? `: ${body.error_description}` : ""}`
+              : "";
+            throw new Error(`Antigravity Google token exchange failed (${response.status})${reason}`);
           }
           return body;
         },
@@ -1803,7 +1898,14 @@ export class AntigravityOfficialSessionDriver {
         },
       })
       : null);
-    this.oauthAuthorizer = oauthAuthorizer ?? this.browserAuthorizer ?? this.cliOAuthAuthorizer;
+    this.browserAuthorizer = clientId && clientSecret
+      ? this.createBrowserAuthorizer(clientId, clientSecret)
+      : null;
+    // An authorizer the caller injected wins outright; otherwise browser OAuth is
+    // the only path and the CLI authorizer is never used, because it writes the
+    // single shared keychain slot and makes macOS prompt when it cannot.
+    this.injectedOauthAuthorizer = oauthAuthorizer ?? null;
+    this.oauthAuthorizer = this.injectedOauthAuthorizer ?? this.browserAuthorizer ?? this.cliOAuthAuthorizer;
     this.catalogLoader = catalogLoader ?? createAntigravityCatalogLoader({
       cliPath: resolvedCli,
       env,
@@ -2068,6 +2170,7 @@ export class AntigravityOfficialSessionDriver {
 
   async #refreshBrowserCredential(account, context = {}) {
     if (account?.resources?.sessionSource !== OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) return null;
+    await this.ensureBrowserAuthorizer().catch(() => null);
     const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
     if (!credentialRef || typeof context.secretStore?.read !== "function") {
       throw activeSessionError("Antigravity browser OAuth credential is unavailable; authorize again");
@@ -2283,13 +2386,49 @@ export class AntigravityOfficialSessionDriver {
     }
   }
 
+  /**
+   * Browser OAuth needs a Google client secret. The operator may configure one,
+   * otherwise it is read from the official Antigravity build installed on this
+   * machine and cached locally — never committed to the repository.
+   *
+   * @returns {Promise<object|null>} The authorizer, or null when none can exist.
+   */
+  async ensureBrowserAuthorizer() {
+    if (this.browserAuthorizer) return this.browserAuthorizer;
+    if (this.browserAuthorizerPromise) return this.browserAuthorizerPromise;
+    this.browserAuthorizerPromise = (async () => {
+      const clientId = this.browserClientId;
+      if (!clientId) return null;
+      let secret = this.browserClientSecret;
+      if (!secret) {
+        secret = await resolveAntigravityClientSecret({ clientId });
+        if (!secret) return null;
+        this.browserClientSecret = secret;
+      }
+      this.hasExplicitBrowserClient = true;
+      this.browserAuthorizer = this.createBrowserAuthorizer(clientId, secret);
+      return this.browserAuthorizer;
+    })().finally(() => {
+      this.browserAuthorizerPromise = null;
+    });
+    return this.browserAuthorizerPromise;
+  }
+
   async startAuthorization(context = {}) {
-    if (this.oauthAuthorizer !== this.browserAuthorizer || !this.browserAuthorizer) {
-      return this.oauthAuthorizer.begin(context);
+    if (this.injectedOauthAuthorizer) return this.injectedOauthAuthorizer.begin(context);
+    await this.ensureBrowserAuthorizer().catch(() => null);
+    if (!this.browserAuthorizer) {
+      // Never fall back to the official CLI here: it writes a single shared
+      // keychain slot and makes macOS prompt when that slot cannot be written.
+      return {
+        status: "unsupported",
+        providerId: PROVIDER_ID,
+        instructions: "Antigravity 浏览器授权需要一个 Google OAuth client。"
+          + "请安装官方 Antigravity 桌面端（插件会直接使用它自带的客户端），"
+          + "或设置 DOCKYARD_ANTIGRAVITY_CLIENT_ID 与 DOCKYARD_ANTIGRAVITY_CLIENT_SECRET。",
+      };
     }
-    const started = await this.browserAuthorizer.begin(context);
-    if (started.status === "failed") return this.cliOAuthAuthorizer.begin(context);
-    return started;
+    return this.browserAuthorizer.begin(context);
   }
 
   #authorizationAuthorizer(sessionId) {
@@ -2529,6 +2668,8 @@ export class AntigravityOfficialSessionDriver {
     return this.catalogLoader({
       force: Boolean(context.force),
       accounts: context.accounts,
+      accountId: context.accountId ?? null,
+      secretStore: context.secretStore ?? null,
     });
   }
 

@@ -90,3 +90,66 @@ test("unknown policies are rejected", () => {
   const pool = poolWith(ACCOUNT_SELECTION_POLICY.MANUAL, ["a"]);
   assert.throws(() => pool.setPolicy("not-a-policy"), /Unknown account selection policy/);
 });
+
+test("allowance_fullest picks the account with the most headroom", () => {
+  const pool = new AccountPool({ providerId: "pool-test", policy: ACCOUNT_SELECTION_POLICY.ALLOWANCE_FULLEST });
+  pool.upsert(account("low", { quota: { windows: [{ id: "w", remaining: 1, limit: 10 }] } }));
+  pool.upsert(account("high", { quota: { windows: [{ id: "w", remaining: 9, limit: 10 }] } }));
+  pool.upsert(account("mid", { quota: { windows: [{ id: "w", remaining: 5, limit: 10 }] } }));
+  assert.equal(pool.select({}).accountId, "high");
+  // Selection records lastUsedAt, so the same account keeps winning while it
+  // still has the most headroom.
+  assert.equal(pool.select({}).accountId, "high");
+});
+
+test("allowance_fullest reads the tightest window, not the roomiest", () => {
+  const pool = new AccountPool({ providerId: "pool-test", policy: ACCOUNT_SELECTION_POLICY.ALLOWANCE_FULLEST });
+  // "wide" looks fine on its monthly window but is nearly spent on the 5h one.
+  pool.upsert(account("wide", {
+    quota: { windows: [{ id: "5h", remaining: 0, limit: 10 }, { id: "month", remaining: 90, limit: 100 }] },
+  }));
+  pool.upsert(account("even", { quota: { windows: [{ id: "5h", remaining: 6, limit: 10 }] } }));
+  assert.equal(pool.select({}).accountId, "even");
+});
+
+test("allowance_fullest falls back to round robin without quota data", () => {
+  const pool = poolWith(ACCOUNT_SELECTION_POLICY.ALLOWANCE_FULLEST);
+  const picked = [pool.select({}).accountId, pool.select({}).accountId, pool.select({}).accountId];
+  assert.deepEqual(picked, ["a", "b", "c"]);
+});
+
+test("an expired authorization parks the account with a cooldown", () => {
+  let now = new Date("2026-11-05T00:00:00.000Z");
+  const pool = new AccountPool({ providerId: "pool-test", policy: ACCOUNT_SELECTION_POLICY.ROUND_ROBIN, clock: () => now });
+  pool.upsert(account("a"));
+  pool.report("a", { status: "auth_expired", message: "token expired" });
+  const parked = pool.get("a");
+  assert.equal(parked.health.status, ACCOUNT_HEALTH.EXPIRED);
+  assert.ok(parked.health.cooldownUntil, "a cooldown is scheduled");
+  // Not selectable while parked.
+  assert.throws(() => pool.select({}), /No eligible accounts/);
+  // Not due for a retry yet.
+  assert.deepEqual(pool.relistable(now), []);
+
+  now = new Date("2026-11-05T00:45:00.000Z");
+  assert.deepEqual(pool.relistable(now).map((entry) => entry.accountId), ["a"]);
+});
+
+test("a successful refresh clears the parked state", () => {
+  let now = new Date("2026-11-05T00:00:00.000Z");
+  const pool = new AccountPool({ providerId: "pool-test", policy: ACCOUNT_SELECTION_POLICY.ROUND_ROBIN, clock: () => now });
+  pool.upsert(account("a"));
+  pool.report("a", { status: "auth_expired", message: "token expired" });
+  pool.report("a", { status: "success" });
+  assert.equal(pool.get("a").health.status, ACCOUNT_HEALTH.HEALTHY);
+  assert.equal(pool.get("a").health.cooldownUntil, null);
+  assert.equal(pool.relistable(now).length, 0);
+});
+
+test("a reported balance is kept with the account", () => {
+  const pool = poolWith(ACCOUNT_SELECTION_POLICY.ROUND_ROBIN, ["a"]);
+  pool.report("a", { status: "success", balance: { amount: 12.5, unit: "CNY", source: "vendor" } });
+  const stored = pool.get("a");
+  assert.equal(stored.balance.amount, 12.5);
+  assert.equal(stored.balance.unit, "CNY");
+});

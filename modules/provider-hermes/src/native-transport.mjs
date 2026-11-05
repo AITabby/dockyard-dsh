@@ -220,9 +220,16 @@ export async function buildHermesMessages(request = {}, attachments = null) {
       }
     }
 
+    if (Array.isArray(content) && content.length === 0 && calls.length === 0) {
+      // Nothing to say: an empty content array is rejected outright by the
+      // strict models on this gateway ("content must not be an empty array").
+      continue;
+    }
     const msgObj = {
       role,
-      content: Array.isArray(content) && content.length === 1 && content[0]?.type === "text" ? content[0].text : content,
+      content: Array.isArray(content) && content.length === 1 && content[0]?.type === "text"
+        ? content[0].text
+        : (Array.isArray(content) && content.length === 0 ? "" : content),
     };
     if (role === "assistant" && calls.length > 0) {
       msgObj.tool_calls = calls;

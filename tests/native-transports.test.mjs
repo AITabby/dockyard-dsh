@@ -642,7 +642,8 @@ test("Antigravity native transport resolves a Code Assist project per selected a
   }));
   const projectCall = calls.find((call) => call.url.includes("loadCodeAssist"));
   const streamCall = calls.find((call) => call.url.includes("streamGenerateContent"));
-  assert.deepEqual(JSON.parse(projectCall.init.body), {});
+  // The enquiry carries the Antigravity identity, as the official client sends it.
+  assert.deepEqual(JSON.parse(projectCall.init.body), { metadata: { ideType: "ANTIGRAVITY" } });
   assert.equal(projectCall.init.headers.authorization, "Bearer google-token");
   assert.equal(JSON.parse(streamCall.init.body).project, "account-project");
 });
@@ -1147,4 +1148,35 @@ test("CLI abort reports ABORT_ERR semantics", { skip: process.platform === "win3
       return true;
     },
   );
+});
+
+test("Grok sends a tool call once, as tool_calls, never as marker text", async () => {
+  const { buildGrokMessages } = await import("../modules/provider-grok/src/native-transport.mjs");
+  // Flattening the call into "[Tool Call clock] {...}" text as well taught the
+  // model to imitate that format and print it instead of calling a tool.
+  const messages = await buildGrokMessages({
+    messages: [
+      { role: "user", content: "check the time" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "One moment." },
+          { type: "tool-call", id: "c1", name: "clock", arguments: { tz: "UTC" } },
+        ],
+      },
+      { role: "tool", toolCallId: "c1", content: "12:00" },
+    ],
+  });
+  const assistant = messages.find((message) => message.role === "assistant");
+  assert.equal(assistant.content, "One moment.");
+  assert.equal(assistant.tool_calls.length, 1);
+  assert.equal(assistant.tool_calls[0].function.name, "clock");
+  assert.doesNotMatch(JSON.stringify(assistant.content), /\[Tool Call/);
+
+  const onlyCall = await buildGrokMessages({
+    messages: [{ role: "assistant", content: [{ type: "tool-call", id: "c1", name: "clock", arguments: {} }] }],
+  });
+  const second = onlyCall.find((message) => message.role === "assistant");
+  assert.equal(second.content, "");
+  assert.equal(second.tool_calls.length, 1);
 });

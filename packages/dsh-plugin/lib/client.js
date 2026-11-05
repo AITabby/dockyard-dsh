@@ -15574,6 +15574,7 @@ var DOCKYARD_LOCALES = Object.freeze({
     "policy.manual": "\u624B\u52A8\u9009\u62E9",
     "policy.sticky_session": "\u4F1A\u8BDD\u7C98\u6EDE",
     "policy.round_robin": "\u8D26\u53F7\u8F6E\u8BE2",
+    "policy.allowance_fullest": "\u989D\u5EA6\u6700\u5145\u8DB3\u4F18\u5148",
     "policy.failover": "\u5931\u8D25\u8F6C\u79FB",
     "nativePolicy.manual": "\u624B\u52A8\u9009\u62E9 Key",
     "nativePolicy.round_robin": "\u591A Key \u8F6E\u8BE2",
@@ -15644,6 +15645,8 @@ var DOCKYARD_LOCALES = Object.freeze({
     "account.remove": "\u79FB\u9664",
     "account.confirmRemove": "\u786E\u8BA4\u79FB\u9664\u8D26\u53F7 {account}\uFF1F\u8FD9\u4F1A\u4ECE Dockyard DSH \u8D26\u53F7\u6C60\u548C\u672C\u673A Keychain \u5F15\u7528\u4E2D\u5220\u9664\u3002",
     "quota.noWindow": "provider \u5C1A\u672A\u8FD4\u56DE\u989D\u5EA6\u7A97\u53E3",
+    "quota.balance": "\u4F59\u989D",
+    "account.relistAt": "\u5DF2\u6682\u505C\uFF0C{time} \u540E\u81EA\u52A8\u91CD\u8BD5",
     "quota.openUsage": "\u6253\u5F00\u5B98\u65B9\u7528\u91CF\u9875\u9762",
     "quota.readFailed": "\u989D\u5EA6\u8BFB\u53D6\u5931\u8D25\uFF1A{error}",
     "quota.keyUnconfigured": "\u8BE5 Key \u5C1A\u672A\u914D\u7F6E",
@@ -15795,6 +15798,7 @@ var DOCKYARD_LOCALES = Object.freeze({
     "policy.manual": "Manual selection",
     "policy.sticky_session": "Sticky session",
     "policy.round_robin": "Round robin",
+    "policy.allowance_fullest": "Most allowance left",
     "policy.failover": "Failover",
     "nativePolicy.manual": "Manual Key",
     "nativePolicy.round_robin": "Key round robin",
@@ -15865,6 +15869,8 @@ var DOCKYARD_LOCALES = Object.freeze({
     "account.remove": "Remove",
     "account.confirmRemove": "Remove account {account}? This removes it from the Dockyard DSH account pool and its local Keychain reference.",
     "quota.noWindow": "The provider has not returned a quota window",
+    "quota.balance": "Balance",
+    "account.relistAt": "Paused, retried after {time}",
     "quota.openUsage": "Open official usage page",
     "quota.readFailed": "Failed to read quota: {error}",
     "quota.keyUnconfigured": "This Key is not configured",
@@ -16492,7 +16498,8 @@ var POLICY_KEYS = Object.freeze({
   manual: "policy.manual",
   sticky_session: "policy.sticky_session",
   round_robin: "policy.round_robin",
-  failover: "policy.failover"
+  failover: "policy.failover",
+  allowance_fullest: "policy.allowance_fullest"
 });
 function text(t, key, params) {
   return translate(t, key, params);
@@ -16682,6 +16689,9 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-health{color:#9ce5dc}.dockyard-dsh-health[data-bad=true]{color:#ff9a83}
 .dockyard-dsh-account-note{padding:4px 8px;border-radius:var(--dsw-radius-xs,4px);background:rgba(203,183,255,.07);color:var(--dsw-alias-label-caption,#8b93a1);font-size:11px;line-height:16px;text-align:left}
 .dockyard-dsh-account-error{max-width:100%;overflow:hidden;color:#ff9a83;font-size:11px;line-height:16px;text-align:left;text-overflow:ellipsis;white-space:nowrap}
+.dockyard-dsh-alert{max-width:100%;overflow:hidden;font-size:11px;line-height:16px;text-align:left;text-overflow:ellipsis;white-space:nowrap;color:#ffd28a}
+.dockyard-dsh-alert[data-severity="warning"]{color:#ff9a83}
+.dockyard-dsh-alert[data-severity="info"]{color:#9fc4ff}
 .dockyard-dsh-quota{display:flex;flex-direction:column;gap:5px}
 .dockyard-dsh-quota-row{display:flex;align-items:center;gap:8px}
 .dockyard-dsh-quota-copy{min-width:0;flex:1;color:var(--dsw-alias-label-tertiary,#a9b0ba);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -16881,7 +16891,29 @@ function quotaWindowRows(quota, t) {
   return [];
 }
 function quotaRowsForAccount(account, t) {
-  return quotaWindowRows(account?.quota, t);
+  const rows = quotaWindowRows(account?.quota, t);
+  const amount = account?.balance?.amount;
+  if (typeof amount === "number" && Number.isFinite(amount) && !rows.some((row) => row?.kind === "balance")) {
+    rows.push({
+      id: "balance",
+      kind: "balance",
+      name: text(t, "quota.balance"),
+      remaining: amount,
+      limit: account?.balance?.limit ?? null,
+      unit: account?.balance?.unit ?? null,
+      currency: account?.balance?.currency ?? account?.balance?.unit ?? null,
+      updatedAt: account?.balance?.updatedAt
+    });
+  }
+  return rows;
+}
+function alertLines(account) {
+  const alerts = Array.isArray(account?.alerts) ? account.alerts : [];
+  return alerts.filter((alert) => alert && typeof alert.message === "string").map((alert, index) => h("div", {
+    key: `${alert.kind ?? "alert"}-${alert.windowId ?? index}`,
+    className: "dockyard-dsh-alert",
+    "data-severity": alert.severity ?? "info"
+  }, alert.message));
 }
 function quotaPercent(window2) {
   if (typeof window2?.remaining !== "number" || typeof window2?.limit !== "number" || window2.limit <= 0) return null;
@@ -17960,8 +17992,14 @@ function AccountCard({ account, current: current2, providerId, controller, busy,
       account.refresh?.nextRefreshAt ? h("span", null, `OAuth: ${formatDate(account.refresh.nextRefreshAt, t)}`) : null
     ),
     account.resources?.identityNote ? h("div", { className: "dockyard-dsh-account-note" }, account.resources.identityNote) : null,
+    account.health?.status === "expired" && account.health?.cooldownUntil ? h(
+      "div",
+      { className: "dockyard-dsh-account-note" },
+      text(t, "account.relistAt", { time: formatDate(account.health.cooldownUntil, t) })
+    ) : null,
     account.health?.lastError ? h("div", { className: "dockyard-dsh-account-error", title: account.health.lastError }, account.health.lastError) : null,
-    quotaView(account, t)
+    quotaView(account, t),
+    ...alertLines(account)
   );
 }
 function candidateMatchesAccount(candidate, account) {

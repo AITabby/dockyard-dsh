@@ -318,7 +318,13 @@ export class DockyardDshService {
     await this.ready;
     const providerId = providerIdFor(this.runtime, providerInput);
     if (!providerId) throw new Error(`未知 provider：${providerInput}`);
-    return this.runtime.setDefaultAccount(providerId, accountId);
+    const result = await this.runtime.setDefaultAccount(providerId, accountId);
+    // The model list is per account, so the newly selected account's catalog is
+    // fetched right away instead of leaving the previous account's list on
+    // screen. Failures are harmless: the picker falls back to the cached list.
+    void this.runtime.getCatalog(providerId, { force: true, accountId })
+      .catch(() => {});
+    return result;
   }
 
   async removeAccount(providerInput, accountId) {

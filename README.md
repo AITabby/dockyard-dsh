@@ -15,7 +15,8 @@ Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harnes
 当前包含的 provider 模块：
 
 - **Codex** — 官方浏览器 OAuth、CLI fallback 和原生 Responses 请求链路。
-- **Antigravity** — Google 官方浏览器 OAuth、官方本机会话、实时模型目录、额度/credits 和原生 Gemini SSE 请求链路。
+- **Antigravity** — Google 官方浏览器 OAuth（沿用官方客户端身份，因此免费档位可用）、多账号各自独立的
+  refresh token、**按账号**拉取模型目录（不同账号的模型表不同）、额度/credits 和原生 Gemini SSE 请求链路。
 - **Grok** — xAI 官方浏览器 OAuth、CLI fallback、实时模型目录、官方 Build credits 周期和 provider-native streaming 请求。额度读取使用官方 `/billing?format=credits`（转发 `GetGrokCreditsConfig`）；若上游只返回周期，剩余值保持未知。
 - **Claude** — Claude 官方浏览器 OAuth（支持带 state 的手动回调地址/授权码）、CLI fallback 与原生请求适配。
 - **Cursor** — Cursor 官方浏览器登录轮询、CLI fallback 与原生请求适配。
@@ -33,9 +34,12 @@ Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harnes
 - 在 DSH 内使用 `/dockyard` 命令管理账号和 provider。
 - 点击“登录添加账号”直接打开 provider 官方浏览器授权页，选择账号并安全导入账号池；provider 不可用时保留 CLI fallback。
 - 扫描本机已有的官方登录态；扫描和新增账号是两个独立操作，已有账号不会被“新增”静默重复导入。
-- 支持手动选择、sticky session、round-robin 和 failover 账号池策略。
+- 支持手动选择、sticky session、round-robin、failover 和 **额度最充足优先**（按各账号最紧张窗口的剩余量选号）
+  五种账号池策略。
 - 读取 provider 返回的实时模型目录、推理档位、套餐和额度窗口。
 - 所有命令、模型选择和 LLM 生成都读取同一个 Dockyard runtime，不维护第二套账号池或额度缓存。
+- 额度是活的：窗口剩余偏低、或「即将重置却还剩很多」时在账号卡片上直接给出提示；provider 上报余额时一并显示。
+- 失效账号不丢弃：授权过期后进入冷却（默认 30 分钟），冷却结束自动重试刷新，成功即重新进入可用池。
 
 ### 平台支持：macOS 与 Windows
 
@@ -69,7 +73,9 @@ Windows 上的实际行为：
 
 DMG 内置 Node.js、DSH CLI、完整 `web` profile 和 Dockyard 插件；双击 App 即可运行，不需要另外安装 Node.js、pnpm 或 DSH。它会在原生 WebKit 窗口中显示内置的 DSH Web profile；OAuth 授权页会交给系统默认浏览器打开。当前构建包含 Apple Silicon 和 Intel 两个架构。详细说明见 [`apps/macos/README.md`](apps/macos/README.md)。
 
-仍需注意：这是 macOS 专用、当前为本地 ad-hoc 签名的开发预览；某些 provider 的官方 CLI 扫描/兼容性 fallback 仍可能需要对应 CLI，Antigravity 浏览器授权仍需要配置官方 OAuth client 信息。
+仍需注意：这是 macOS 专用、当前为本地 ad-hoc 签名的开发预览；某些 provider 的官方 CLI 扫描/兼容性 fallback 仍可能需要对应 CLI。
+Antigravity 的浏览器授权使用官方客户端的 OAuth client：client id 是公开常量，client secret 在首次授权时从本机已安装的
+官方客户端/`agy` 二进制中读取并缓存在本地（不进入仓库），也可以用 `DOCKYARD_ANTIGRAVITY_CLIENT_ID` / `_CLIENT_SECRET` 覆盖。
 
 ### 一条命令安装 Dockyard plugin
 
@@ -180,7 +186,7 @@ DSH_HOME=/tmp/dockyard-dsh-home dsh web
 /dockyard login <provider>
 /dockyard refresh [provider]
 /dockyard models <provider>
-/dockyard policy <provider> <manual|sticky_session|round_robin|failover> [accountId]
+/dockyard policy <provider> <manual|sticky_session|round_robin|failover|allowance_fullest> [accountId]
 /dockyard use <provider> <accountId>
 /dockyard remove <provider> <accountId>
 ```

@@ -1,6 +1,6 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import {
@@ -24,7 +24,11 @@ import {
 const PROVIDER_ID = "antigravity";
 const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse";
 const DEFAULT_QUOTA_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
-const DEFAULT_PROJECT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+// The account's tier and project are asked for on the product host; only
+// generation uses the daily host. Mixing the two was one reason the project
+// never resolved.
+const DEFAULT_PROJECT_ENDPOINT = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+const DEFAULT_ONBOARD_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:onboardUser";
 const MACOS_SECURITY_BIN = "/usr/bin/security";
 const AGY_KEYCHAIN_SERVICE = "gemini";
 const AGY_KEYCHAIN_ACCOUNT = "antigravity";
@@ -53,6 +57,157 @@ function detectAntigravityUserAgent() {
     }
   }
   return `antigravity/hub/2.29.0 ${process.platform}/${process.arch}`;
+}
+
+// Google client secrets are exactly "GOCSPX-" plus 28 characters. The bound
+// matters: binary string pools concatenate adjacent literals, so an open-ended
+// quantifier swallows the next literal ("...ZtsXhttps") and Google rejects the
+// pair with 401 invalid_client.
+const GOOGLE_CLIENT_SECRET_PATTERN = /GOCSPX-[A-Za-z0-9_-]{28}/g;
+const SCAN_CHUNK_BYTES = 8 * 1024 * 1024;
+const SCAN_OVERLAP_BYTES = 512;
+// The official builds ship the client secret the Antigravity OAuth client needs.
+// It is read from the copy installed on this machine — the repository never
+// carries it — and cached next to the other Dockyard state.
+function antigravityClientScanPaths({ env = process.env, home = homedir(), platform = process.platform } = {}) {
+  if (platform === "win32") {
+    // The desktop build keeps its sidecar under resources\bin; the CLI lands in
+    // the npm prefix or the user's .local\bin, the same places `agy` is found.
+    const localAppData = env.LOCALAPPDATA || join(home, "AppData", "Local");
+    const appData = env.APPDATA || join(home, "AppData", "Roaming");
+    return [
+      join(localAppData, "Programs", "Antigravity", "resources", "bin", "language_server.exe"),
+      join(localAppData, "Programs", "Antigravity", "resources", "bin", "language_server"),
+      join(appData, "npm", "agy.cmd"),
+      join(home, ".local", "bin", "agy.exe"),
+      join(home, ".local", "bin", "agy.cmd"),
+    ];
+  }
+  return [
+    "/Applications/Antigravity.app/Contents/Resources/bin/language_server",
+    join(home, "Applications/Antigravity.app/Contents/Resources/bin/language_server"),
+    join(home, ".local", "bin", "agy"),
+  ];
+}
+
+const ANTIGRAVITY_CLIENT_SCAN_PATHS = antigravityClientScanPaths();
+
+const scannedSecrets = new Map();
+
+/** Every Google client secret the locally installed official build ships. */
+export function scanAntigravityClientSecrets({ paths = null, env = process.env, home = homedir(), platform = process.platform } = {}) {
+  const resolved = Array.isArray(paths) ? paths : antigravityClientScanPaths({ env, home, platform });
+  const cacheKey = resolved.join("|");
+  const memoized = scannedSecrets.get(cacheKey);
+  if (memoized) return memoized;
+  const secrets = [];
+  for (const file of resolved) {
+    if (!existsSync(file)) continue;
+    let descriptor;
+    try {
+      descriptor = openSync(file, "r");
+      const buffer = Buffer.allocUnsafe(SCAN_CHUNK_BYTES);
+      let carry = "";
+      while (true) {
+        const bytes = readSync(descriptor, buffer, 0, SCAN_CHUNK_BYTES, null);
+        if (bytes <= 0) break;
+        const text = carry + buffer.subarray(0, bytes).toString("latin1");
+        for (const match of text.match(GOOGLE_CLIENT_SECRET_PATTERN) ?? []) {
+          if (!secrets.includes(match)) secrets.push(match);
+        }
+        carry = text.slice(-SCAN_OVERLAP_BYTES);
+      }
+    } catch {
+      // An unreadable bundle is not fatal: the operator can configure a client.
+    } finally {
+      if (descriptor !== undefined) {
+        try { closeSync(descriptor); } catch { /* already closed */ }
+      }
+    }
+    if (secrets.length > 0) break;
+  }
+  scannedSecrets.set(cacheKey, secrets);
+  return secrets;
+}
+
+function antigravityClientCachePath({ env = process.env, home = homedir() } = {}) {
+  const root = env.DOCKYARD_DSH_HOME || join(home, ".dockyard-dsh");
+  return join(root, "antigravity-oauth-client.json");
+}
+
+function readClientSecretCache(clientId, file) {
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    const secret = parsed?.clients?.[clientId];
+    return typeof secret === "string" && secret.startsWith("GOCSPX-") ? secret : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeClientSecretCache(clientId, file, secret) {
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    let parsed = {};
+    try { parsed = JSON.parse(readFileSync(file, "utf8")) ?? {}; } catch { parsed = {}; }
+    parsed.clients = { ...(parsed.clients ?? {}), [clientId]: secret };
+    writeFileSync(file, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600 });
+  } catch {
+    // Caching is an optimisation; a read-only home still works, just slower.
+  }
+}
+
+/**
+ * Pair `clientId` with the secret that belongs to it.
+ *
+ * The installed build ships several Google clients, and the string pool does not
+ * keep a secret next to its id. Rather than guess, each candidate secret is
+ * tried against Google's token endpoint with a throwaway authorization code: a
+ * matching pair answers `invalid_grant` (the code is bad), a mismatched pair
+ * answers `invalid_client`. The winner is cached locally.
+ *
+ * @returns {Promise<string | null>} The secret, or null when none matched.
+ */
+export async function resolveAntigravityClientSecret({
+  clientId,
+  env = process.env,
+  home = homedir(),
+  fetchImpl = fetch,
+  paths,
+  tokenUrl = "https://oauth2.googleapis.com/token",
+} = {}) {
+  if (!clientId) return null;
+  const cacheFile = antigravityClientCachePath({ env, home });
+  const cached = readClientSecretCache(clientId, cacheFile);
+  if (cached) return cached;
+
+  const candidates = scanAntigravityClientSecrets(paths ? { paths } : {});
+  for (const secret of candidates) {
+    let response;
+    try {
+      response = await fetchImpl(tokenUrl, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: clientId,
+          client_secret: secret,
+          code: "dockyard-client-probe",
+          grant_type: "authorization_code",
+          redirect_uri: "http://localhost",
+        }).toString(),
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch {
+      continue;
+    }
+    let body = {};
+    try { body = await response.json(); } catch { body = {}; }
+    if (body?.error === "invalid_grant") {
+      writeClientSecretCache(clientId, cacheFile, secret);
+      return secret;
+    }
+  }
+  return null;
 }
 
 function firstString(...values) {
@@ -393,9 +548,158 @@ function projectIdFromLoadCodeAssist(value, depth = 0) {
   return null;
 }
 
+
+/**
+ * Provision a Code Assist project for an account the official client has never
+ * onboarded. Mirrors the client's own sequence — onboardUser for the tier the
+ * server advertises, then read the project out of the operation result. Every
+ * failure is non-fatal: the caller keeps its "no project" error.
+ */
+/**
+ * Provision a Code Assist project the way the official Antigravity client does:
+ * ask loadCodeAssist first, and when the account has no project yet, run
+ * onboardUser for the tier the server advertises and poll the long-running
+ * operation until it reports the project.
+ *
+ * The shapes here follow the official client rather than the Gemini CLI: the
+ * enquiry carries `metadata.ideType = ANTIGRAVITY`, onboarding sends
+ * `tier_id` with an `ide_*` metadata block and the node-client headers, and the
+ * operation is polled on the daily host.
+ */
+async function onboardCodeAssistProject({
+  metadata,
+  tierId,
+  base,
+  headers,
+  signal,
+  timeoutMs,
+  fetchImpl,
+}) {
+  const deadline = Date.now() + Math.min(timeoutMs, 20_000);
+  const pollDelayMs = 2_000;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (Date.now() > deadline) break;
+    const operation = await callCodeAssist(base, "onboardUser", {
+      tier_id: tierId,
+      metadata,
+    }, { headers, signal, timeoutMs, fetchImpl });
+    const project = projectIdFromLoadCodeAssist(operation);
+    if (project) return project;
+    if (operation?.done === true) return null;
+    await new Promise((resolve) => setTimeout(resolve, pollDelayMs));
+  }
+  return null;
+}
+
+/** One v1internal POST, returning the parsed JSON body. */
+async function callCodeAssist(base, method, body, { headers, signal, timeoutMs, fetchImpl }) {
+  const response = await fetchNativeResponse(`${base}/v1internal:${method}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+    signal,
+  }, { providerId: PROVIDER_ID, timeoutMs, fetchImpl });
+  try {
+    return typeof response.json === "function" ? await response.json() : JSON.parse(await response.text());
+  } finally {
+    cleanupNativeResponse(response);
+  }
+}
+
+/** Explain why no project came back, in terms of what the user can do. */
+function describeMissingProject(raw) {
+  const tiers = Array.isArray(raw?.allowedTiers) ? raw.allowedTiers.filter(Boolean) : [];
+  const ineligible = Array.isArray(raw?.ineligibleTiers) ? raw.ineligibleTiers.filter(Boolean) : [];
+  const needsOwnProject = tiers.some((tier) => tier?.userDefinedCloudaicompanionProject === true);
+  const reason = ineligible.find((tier) => typeof tier?.reasonMessage === "string" && tier.reasonMessage.trim());
+  if (needsOwnProject && reason) {
+    return `Antigravity 未返回 Code Assist 项目：${reason.reasonMessage.trim()}`;
+  }
+  if (needsOwnProject) {
+    return "Antigravity 未返回 Code Assist 项目：该账号的档位要求自带 Google Cloud 项目。";
+  }
+  if (reason) return `Antigravity 未返回 Code Assist 项目：${reason.reasonMessage.trim()}`;
+  return "Antigravity did not return a Code Assist project for the selected account";
+}
+
+/**
+ * Ask Code Assist which models *this account* has.
+ *
+ * The local CLI's `models` command answers for whoever the CLI is signed in as,
+ * so every dual-account setup showed the same list — switching accounts changed
+ * nothing. The account's own token against `v1internal:fetchAvailableModels`
+ * answers per account, which is what the picker needs.
+ *
+ * @returns {Promise<Array<{id: string, name: string, maxTokens: number|null, contextWindow: number|null}> | null>}
+ */
+export async function fetchAntigravityAvailableModels({
+  token,
+  project,
+  endpoint = process.env.DOCKYARD_ANTIGRAVITY_MODELS_ENDPOINT
+    || "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+  fetchImpl = fetch,
+  timeoutMs = 20_000,
+  signal,
+  userAgent = process.env.DOCKYARD_ANTIGRAVITY_USER_AGENT || detectAntigravityUserAgent(),
+} = {}) {
+  if (!token) return null;
+  const safeEndpoint = validateNativeEndpoint(endpoint, { providerId: PROVIDER_ID });
+  const headers = {
+    authorization: `Bearer ${token}`,
+    "content-type": "application/json",
+    accept: "application/json",
+  };
+  if (userAgent) headers["user-agent"] = userAgent;
+  const response = await fetchNativeResponse(safeEndpoint, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(project ? { project } : {}),
+    signal,
+  }, { providerId: PROVIDER_ID, timeoutMs, fetchImpl });
+  let raw;
+  try {
+    raw = typeof response.json === "function" ? await response.json() : JSON.parse(await response.text());
+  } finally {
+    cleanupNativeResponse(response);
+  }
+  return modelsFromFetchAvailableModels(raw);
+}
+
+/** Flatten fetchAvailableModels' map (and picker order) into catalog rows. */
+export function modelsFromFetchAvailableModels(raw) {
+  const table = raw?.models;
+  if (!table || typeof table !== "object") return null;
+  const entries = Object.entries(table).filter(([id, info]) => (
+    typeof id === "string" && id.length > 0 && info && info.disabled !== true
+  ));
+  if (entries.length === 0) return null;
+  const order = [];
+  for (const sort of Array.isArray(raw?.agentModelSorts) ? raw.agentModelSorts : []) {
+    for (const group of Array.isArray(sort?.groups) ? sort.groups : []) {
+      for (const id of Array.isArray(group?.modelIds) ? group.modelIds : []) {
+        if (!order.includes(id)) order.push(id);
+      }
+    }
+  }
+  const models = entries.map(([id, info]) => ({
+    id,
+    name: typeof info.displayName === "string" && info.displayName.trim() ? info.displayName.trim() : id,
+    ...(Number.isFinite(info.maxTokens) && info.maxTokens > 0 ? { contextWindow: info.maxTokens } : {}),
+    ...(Number.isFinite(info.maxOutputTokens) && info.maxOutputTokens > 0 ? { maxTokens: info.maxOutputTokens } : {}),
+    ...(info.supportsImages === true ? { inputModalities: ["text", "image"] } : {}),
+  }));
+  const rank = (id) => {
+    const index = order.indexOf(id);
+    return index === -1 ? Number.MAX_SAFE_INTEGER : index;
+  };
+  models.sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
+  return models;
+}
+
 /** Resolve the Code Assist project for the selected OAuth session. */
 export function createAntigravityProjectResolver({
   endpoint = process.env.DOCKYARD_ANTIGRAVITY_PROJECT_ENDPOINT || DEFAULT_PROJECT_ENDPOINT,
+  onboardEndpoint = process.env.DOCKYARD_ANTIGRAVITY_ONBOARD_ENDPOINT || DEFAULT_ONBOARD_ENDPOINT,
   env = process.env,
   home = homedir(),
   timeoutMs = 20_000,
@@ -405,6 +709,7 @@ export function createAntigravityProjectResolver({
   userAgent = process.env.DOCKYARD_ANTIGRAVITY_USER_AGENT || detectAntigravityUserAgent(),
 } = {}) {
   const safeEndpoint = validateNativeEndpoint(endpoint, { providerId: PROVIDER_ID });
+  const safeOnboard = validateNativeEndpoint(onboardEndpoint, { providerId: PROVIDER_ID });
   const configuredProject = typeof project === "string" && project.trim() ? project.trim() : null;
   const cache = new Map();
   return async ({ credential = null, account = null, context = {} } = {}) => {
@@ -428,27 +733,50 @@ export function createAntigravityProjectResolver({
       accept: "application/json",
     };
     if (userAgent) headers["user-agent"] = userAgent;
-    const response = await fetchNativeResponse(safeEndpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({}),
-      signal: context.signal,
-    }, { providerId: PROVIDER_ID, timeoutMs, fetchImpl });
-    let raw;
-    try {
-      raw = typeof response.json === "function"
-        ? await response.json()
-        : JSON.parse(await response.text());
-    } finally {
-      cleanupNativeResponse(response);
-    }
-    const resolved = projectIdFromLoadCodeAssist(raw);
+
+    const load = await callCodeAssist(safeEndpoint.replace(/\/v1internal:.*$/u, ""), "loadCodeAssist", {
+      metadata: { ideType: "ANTIGRAVITY" },
+    }, { headers, signal: context.signal, timeoutMs, fetchImpl });
+
+    let resolved = projectIdFromLoadCodeAssist(load);
     if (!resolved) {
-      throw nativeProviderError(PROVIDER_ID, "Antigravity did not return a Code Assist project for the selected account", { body: raw });
+      const tier = defaultCodeAssistTier(load);
+      if (tier?.id && !tier.userDefinedCloudaicompanionProject) {
+        resolved = await onboardCodeAssistProject({
+          metadata: {
+            ide_type: "ANTIGRAVITY",
+            ide_name: "antigravity",
+            ide_version: antigravityIdeVersion(),
+          },
+          tierId: tier.id,
+          base: safeOnboard.replace(/\/v1internal:.*$/u, ""),
+          headers: {
+            ...headers,
+            "user-agent": `${userAgent ?? "antigravity/hub/2.29.0"} google-api-nodejs-client/10.3.0`,
+            "x-goog-api-client": "gl-node/22.21.1",
+          },
+          signal: context.signal,
+          timeoutMs,
+          fetchImpl,
+        }).catch(() => null);
+      }
+      if (!resolved) throw nativeProviderError(PROVIDER_ID, describeMissingProject(load), { body: load });
     }
     cache.set(cacheKey, resolved);
     return resolved;
   };
+}
+
+/** The tier the server says this account may use. */
+function defaultCodeAssistTier(load) {
+  const tiers = Array.isArray(load?.allowedTiers) ? load.allowedTiers.filter(Boolean) : [];
+  const current = load?.currentTier && typeof load.currentTier === "object" ? load.currentTier : null;
+  return current ?? tiers.find((tier) => tier?.isDefault === true) ?? tiers[0] ?? null;
+}
+
+/** Antigravity's IDE version string, as its own onboarding sends it. */
+function antigravityIdeVersion() {
+  return process.env.DOCKYARD_ANTIGRAVITY_IDE_VERSION || "2.9.1";
 }
 
 async function geminiParts(content, attachments, { signedToolCallIds = new Set(), requireThoughtSignatures = false } = {}) {

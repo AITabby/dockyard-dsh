@@ -1014,7 +1014,7 @@ var init_dockyard_remote_host = __esm({
 });
 
 // packages/dsh-plugin/src/index.mjs
-import { existsSync as existsSync8, readFileSync as readFileSync8 } from "node:fs";
+import { existsSync as existsSync9, readFileSync as readFileSync8 } from "node:fs";
 import { join as join20 } from "node:path";
 
 // packages/core/src/errors.mjs
@@ -1074,7 +1074,11 @@ var ACCOUNT_SELECTION_POLICY = Object.freeze({
   MANUAL: "manual",
   STICKY_SESSION: "sticky_session",
   ROUND_ROBIN: "round_robin",
-  FAILOVER: "failover"
+  FAILOVER: "failover",
+  // Spread work towards the account with the most headroom left, so accounts
+  // whose windows reset later are not drained first. Falls back to round robin
+  // when no account reports quota windows.
+  ALLOWANCE_FULLEST: "allowance_fullest"
 });
 var PROVIDER_CAPABILITIES = Object.freeze([
   "oauth_discovery",
@@ -1183,6 +1187,14 @@ function createAccountRecord(input, now = /* @__PURE__ */ new Date()) {
     updatedAt: updatedAt2
   };
 }
+function createBalanceSnapshot(input = {}, now = /* @__PURE__ */ new Date()) {
+  return {
+    amount: numberOrNull(input.amount, "balance.amount"),
+    unit: stringOrNull(input.unit),
+    updatedAt: isoOrNull(input.updatedAt, "balance.updatedAt") ?? now.toISOString(),
+    source: stringOrNull(input.source) ?? "unknown"
+  };
+}
 function accountSummary(account) {
   return {
     providerId: account.providerId,
@@ -1191,6 +1203,7 @@ function accountSummary(account) {
     email: account.email,
     subscription: { ...account.subscription },
     quota: structuredClone(account.quota ?? {}),
+    balance: account.balance ? structuredClone(account.balance) : null,
     refresh: { ...account.refresh },
     resources: structuredClone(account.resources ?? {}),
     health: { ...account.health },
@@ -1922,11 +1935,75 @@ function createProviderRoute({ providerModule, accountPool, contextWindowOverrid
   };
 }
 
+// packages/core/src/quota-alerts.mjs
+var DEFAULT_LOW_SHARE = 0.15;
+var DEFAULT_RESET_HORIZON_MS = 6 * 60 * 60 * 1e3;
+var DEFAULT_WASTE_SHARE = 0.5;
+function ratio(remaining, limit) {
+  const left = Number(remaining);
+  const total = Number(limit);
+  if (!Number.isFinite(left) || !Number.isFinite(total) || total <= 0) return null;
+  return Math.max(0, Math.min(1, left / total));
+}
+function windowLabel(window, index) {
+  return window?.name ?? window?.id ?? `\u7A97\u53E3 ${index + 1}`;
+}
+function evaluateQuotaAlerts(account, {
+  now = /* @__PURE__ */ new Date(),
+  lowShare = DEFAULT_LOW_SHARE,
+  resetHorizonMs = DEFAULT_RESET_HORIZON_MS,
+  wasteShare = DEFAULT_WASTE_SHARE,
+  balanceLow = null
+} = {}) {
+  const alerts = [];
+  const windows = Array.isArray(account?.quota?.windows) ? account.quota.windows : [];
+  const nowMs = now.getTime();
+  windows.forEach((window, index) => {
+    const share = ratio(window?.remaining, window?.limit);
+    if (share === null) return;
+    const label = windowLabel(window, index);
+    if (share <= lowShare) {
+      alerts.push({
+        kind: "low",
+        severity: "warning",
+        windowId: window?.id ?? null,
+        message: `${label} \u4EC5\u5269 ${Math.round(share * 100)}%`,
+        data: { remaining: window.remaining, limit: window.limit, share }
+      });
+    }
+    const resetAt = window?.resetAt ? new Date(window.resetAt) : null;
+    if (resetAt && Number.isFinite(resetAt.getTime())) {
+      const untilReset = resetAt.getTime() - nowMs;
+      if (untilReset > 0 && untilReset <= resetHorizonMs && share >= wasteShare) {
+        alerts.push({
+          kind: "reset_waste",
+          severity: "info",
+          windowId: window?.id ?? null,
+          message: `${label} \u5C06\u5728 ${Math.max(1, Math.round(untilReset / 36e5))} \u5C0F\u65F6\u5185\u91CD\u7F6E\uFF0C\u4F46\u4ECD\u5269 ${Math.round(share * 100)}%`,
+          data: { remaining: window.remaining, limit: window.limit, share, resetAt: window.resetAt }
+        });
+      }
+    }
+  });
+  const balance = Number(account?.balance?.amount);
+  if (Number.isFinite(balance) && Number.isFinite(Number(balanceLow)) && balance <= Number(balanceLow)) {
+    alerts.push({
+      kind: "balance_low",
+      severity: "warning",
+      windowId: null,
+      message: `\u4F59\u989D\u4EC5\u5269 ${balance} ${account?.balance?.unit ?? ""}`.trim(),
+      data: { amount: balance, unit: account?.balance?.unit ?? null }
+    });
+  }
+  return alerts;
+}
+
 // packages/account-pool/src/account-pool.mjs
 function defaultClock() {
   return /* @__PURE__ */ new Date();
 }
 var STICKY_SESSION_TTL_MS = 30 * 60 * 1e3;
+var RELIST_COOLDOWN_MS = 30 * 60 * 1e3;
 var MAX_STICKY_ASSIGNMENTS = 1e4;
 var AccountPool = class {
   #accounts = /* @__PURE__ */ new Map();
@@ -2049,7 +2126,13 @@ var AccountPool = class {
       const assignedId = typeof assignment === "string" ? assignment : assignment?.accountId;
       account = assignedId ? selectable.find((candidate2) => candidate2.accountId === assignedId) : null;
       if (!account) {
-        account = this.policy === ACCOUNT_SELECTION_POLICY.FAILOVER ? selectable[0] : this.#next(selectable);
+        if (this.policy === ACCOUNT_SELECTION_POLICY.FAILOVER) {
+          account = selectable[0];
+        } else if (this.policy === ACCOUNT_SELECTION_POLICY.ALLOWANCE_FULLEST) {
+          account = this.#fullest(selectable) ?? this.#next(selectable);
+        } else {
+          account = this.#next(selectable);
+        }
       }
       if (assignmentKey) {
         this.#sessionAssignments.delete(assignmentKey);
@@ -2111,6 +2194,7 @@ var AccountPool = class {
     const now = this.clock().toISOString();
     const patch = { updatedAt: now, health: { ...account.health, lastCheckedAt: now } };
     if (result.quota) patch.quota = createQuotaSnapshot({ ...account.quota, ...result.quota }, this.clock());
+    if (result.balance) patch.balance = createBalanceSnapshot({ ...account.balance, ...result.balance }, this.clock());
     if (result.refresh) patch.refresh = createRefreshState({ ...account.refresh, ...result.refresh });
     switch (result.status) {
       case "success":
@@ -2133,7 +2217,14 @@ var AccountPool = class {
         };
         break;
       case "auth_expired":
-        patch.health = { ...patch.health, status: ACCOUNT_HEALTH.EXPIRED, lastError: result.message ?? null };
+        patch.health = {
+          ...patch.health,
+          status: ACCOUNT_HEALTH.EXPIRED,
+          lastError: result.message ?? null,
+          cooldownUntil: result.cooldownUntil ?? new Date(
+            this.clock().getTime() + RELIST_COOLDOWN_MS
+          ).toISOString()
+        };
         break;
       case "error":
         patch.health = { ...patch.health, status: ACCOUNT_HEALTH.DEGRADED, lastError: result.message ?? null };
@@ -2150,12 +2241,24 @@ var AccountPool = class {
       ...current,
       ...patch,
       quota: patch.quota ? { ...current.quota, ...patch.quota } : current.quota,
+      balance: patch.balance ? { ...current.balance, ...patch.balance } : current.balance,
       refresh: patch.refresh ? { ...current.refresh, ...patch.refresh } : current.refresh,
       resources: patch.resources ? { ...current.resources, ...patch.resources } : current.resources,
       health: patch.health ? { ...current.health, ...patch.health } : current.health
     };
     this.#accounts.set(accountId, next);
     return accountSummary(next);
+  }
+  /**
+   * Accounts parked by an expired authorization whose cooldown has passed.
+   * The runtime retries exactly these, so a token that was rotated elsewhere is
+   * picked back up without the account staying dead forever.
+   */
+  relistable(now = this.clock()) {
+    return [...this.#accounts.values()].filter((account) => account.health?.status === ACCOUNT_HEALTH.EXPIRED).filter((account) => {
+      const until = account.health?.cooldownUntil;
+      return !until || new Date(until).getTime() <= now.getTime();
+    }).map(accountSummary);
   }
   #eligibleAccounts(now = this.clock()) {
     return [...this.#accounts.values()].filter((account) => {
@@ -2175,6 +2278,37 @@ var AccountPool = class {
       if (oldest === void 0) break;
       this.#sessionAssignments.delete(oldest);
     }
+  }
+  /**
+   * The share of an account's tightest reported window that is still left.
+   * The tightest window is the one that will stop the account first, so it is
+   * the honest measure of headroom. Returns null when nothing is reported.
+   */
+  #remainingShare(account) {
+    const windows = Array.isArray(account?.quota?.windows) ? account.quota.windows : [];
+    let lowest = null;
+    for (const window of windows) {
+      const remaining = Number(window?.remaining);
+      const limit = Number(window?.limit);
+      if (!Number.isFinite(remaining) || !Number.isFinite(limit) || limit <= 0) continue;
+      const share = Math.max(0, Math.min(1, remaining / limit));
+      if (lowest === null || share < lowest) lowest = share;
+    }
+    return lowest;
+  }
+  /** The selectable account with the most headroom, if any reports quota. */
+  #fullest(selectable) {
+    let best = null;
+    let bestShare = -1;
+    for (const candidate2 of selectable) {
+      const share = this.#remainingShare(candidate2);
+      if (share === null) continue;
+      if (share > bestShare) {
+        best = candidate2;
+        bestShare = share;
+      }
+    }
+    return best;
   }
   #next(accounts) {
     const account = accounts[this.#cursor % accounts.length];
@@ -2490,6 +2624,10 @@ function createDockyardLlmAdapter({
   async function ensureRuntimeReady() {
     if (typeof runtime.init === "function") await runtime.init();
   }
+  async function ensurePreparedForListing() {
+    if (typeof runtime.whenPrepared === "function") await runtime.whenPrepared();
+    else await ensureRuntimeReady();
+  }
   function abortedCallerError(signal) {
     const error = new Error("This model lookup was aborted");
     error.name = "AbortError";
@@ -2514,37 +2652,52 @@ function createDockyardLlmAdapter({
       );
     });
   }
+  function catalogAccountId(provider) {
+    try {
+      return runtime.getDefaultAccountId?.(provider) ?? null;
+    } catch {
+      return null;
+    }
+  }
+  function catalogKey(provider) {
+    const accountId = catalogAccountId(provider);
+    return accountId ? `${provider}::${accountId}` : provider;
+  }
   async function providerCatalog(provider, signal, { force = false } = {}) {
     if (!force) {
       const cached = cachedProviderCatalog(provider);
       if (cached) return cached;
     }
-    let promise = catalogPromises.get(provider);
+    const key = catalogKey(provider);
+    let promise = catalogPromises.get(key);
     if (!promise) {
-      promise = Promise.resolve().then(() => runtime.getCatalog(provider, { force })).then((catalog) => {
+      const accountId = catalogAccountId(provider);
+      promise = Promise.resolve().then(() => runtime.getCatalog(provider, { force, ...accountId ? { accountId } : {} })).then((catalog) => {
         if (Array.isArray(catalog?.models) && catalog.models.length > 0) {
-          catalogCache.set(provider, { value: catalog, fetchedAt: Date.now() });
+          catalogCache.set(key, { value: catalog, fetchedAt: Date.now() });
           saveDiskCatalogCache(catalogCachePath, catalogCache);
         }
         return catalog;
       }).finally(() => {
-        if (catalogPromises.get(provider) === promise) catalogPromises.delete(provider);
+        if (catalogPromises.get(key) === promise) catalogPromises.delete(key);
       });
-      catalogPromises.set(provider, promise);
+      catalogPromises.set(key, promise);
     }
     return raceCallerSignal(promise, signal);
   }
   function cachedProviderCatalog(provider) {
-    const entry = catalogCache.get(provider);
+    const key = catalogKey(provider);
+    const entry = catalogCache.get(key);
     if (!entry) return null;
-    if (Date.now() - entry.fetchedAt >= STREAM_CATALOG_REFRESH_MS && !catalogPromises.has(provider)) {
+    if (Date.now() - entry.fetchedAt >= STREAM_CATALOG_REFRESH_MS && !catalogPromises.has(key)) {
       void providerCatalog(provider, void 0, { force: true }).catch(() => {
       });
     }
     return entry.value;
   }
   function warmProviderCatalog(provider) {
-    if (!catalogCache.has(provider) && !catalogPromises.has(provider)) {
+    const key = catalogKey(provider);
+    if (!catalogCache.has(key) && !catalogPromises.has(key)) {
       void providerCatalog(provider).catch(() => {
       });
     }
@@ -2577,7 +2730,7 @@ function createDockyardLlmAdapter({
       };
     },
     async listModels(provider, signal) {
-      await ensureRuntimeReady();
+      await ensurePreparedForListing();
       if (!providerHasConnectedAccount(runtime, provider)) return [];
       const cached = cachedProviderCatalog(provider);
       const catalog = cached ?? await providerCatalog(provider, signal);
@@ -2590,7 +2743,7 @@ function createDockyardLlmAdapter({
       return allModels;
     },
     async resolveModel(provider, model, signal) {
-      await ensureRuntimeReady();
+      await ensurePreparedForListing();
       const fallback = resolveFallbackModelMetadata(provider, model);
       if (!providerHasConnectedAccount(runtime, provider)) return fallback;
       const cached = cachedProviderCatalog(provider);
@@ -4914,10 +5067,10 @@ function createCodexModule({ driver = {} } = {}) {
 
 // modules/provider-antigravity/src/driver.mjs
 import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
-import { existsSync as existsSync2 } from "node:fs";
+import { existsSync as existsSync3 } from "node:fs";
 import { mkdir as mkdir3, mkdtemp as mkdtemp2, readFile as readFile4, rename as rename2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir5, tmpdir as tmpdir2 } from "node:os";
-import { dirname as dirname6, join as join8 } from "node:path";
+import { dirname as dirname7, join as join8 } from "node:path";
 
 // packages/providers/src/cli-agent-transport.mjs
 import { execFileSync, spawn as spawn3 } from "node:child_process";
@@ -5100,9 +5253,9 @@ var cliAgentTransportConstants = Object.freeze({
 import { spawn as spawn4 } from "node:child_process";
 
 // modules/provider-antigravity/src/native-transport.mjs
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { closeSync, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, readSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join7 } from "node:path";
+import { dirname as dirname6, join as join7 } from "node:path";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
 // packages/providers/src/native-transport.mjs
@@ -5749,7 +5902,8 @@ var DsmlStreamFilter = class {
 var PROVIDER_ID2 = "antigravity";
 var DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse";
 var DEFAULT_QUOTA_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
-var DEFAULT_PROJECT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+var DEFAULT_PROJECT_ENDPOINT = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+var DEFAULT_ONBOARD_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:onboardUser";
 var MACOS_SECURITY_BIN = "/usr/bin/security";
 var AGY_KEYCHAIN_SERVICE = "gemini";
 var AGY_KEYCHAIN_ACCOUNT = "antigravity";
@@ -5775,6 +5929,137 @@ function detectAntigravityUserAgent() {
     }
   }
   return `antigravity/hub/2.29.0 ${process.platform}/${process.arch}`;
+}
+var GOOGLE_CLIENT_SECRET_PATTERN = /GOCSPX-[A-Za-z0-9_-]{28}/g;
+var SCAN_CHUNK_BYTES = 8 * 1024 * 1024;
+var SCAN_OVERLAP_BYTES = 512;
+function antigravityClientScanPaths({ env = process.env, home = homedir4(), platform = process.platform } = {}) {
+  if (platform === "win32") {
+    const localAppData = env.LOCALAPPDATA || join7(home, "AppData", "Local");
+    const appData = env.APPDATA || join7(home, "AppData", "Roaming");
+    return [
+      join7(localAppData, "Programs", "Antigravity", "resources", "bin", "language_server.exe"),
+      join7(localAppData, "Programs", "Antigravity", "resources", "bin", "language_server"),
+      join7(appData, "npm", "agy.cmd"),
+      join7(home, ".local", "bin", "agy.exe"),
+      join7(home, ".local", "bin", "agy.cmd")
+    ];
+  }
+  return [
+    "/Applications/Antigravity.app/Contents/Resources/bin/language_server",
+    join7(home, "Applications/Antigravity.app/Contents/Resources/bin/language_server"),
+    join7(home, ".local", "bin", "agy")
+  ];
+}
+var ANTIGRAVITY_CLIENT_SCAN_PATHS = antigravityClientScanPaths();
+var scannedSecrets = /* @__PURE__ */ new Map();
+function scanAntigravityClientSecrets({ paths = null, env = process.env, home = homedir4(), platform = process.platform } = {}) {
+  const resolved = Array.isArray(paths) ? paths : antigravityClientScanPaths({ env, home, platform });
+  const cacheKey = resolved.join("|");
+  const memoized = scannedSecrets.get(cacheKey);
+  if (memoized) return memoized;
+  const secrets = [];
+  for (const file of resolved) {
+    if (!existsSync2(file)) continue;
+    let descriptor;
+    try {
+      descriptor = openSync(file, "r");
+      const buffer = Buffer.allocUnsafe(SCAN_CHUNK_BYTES);
+      let carry = "";
+      while (true) {
+        const bytes = readSync(descriptor, buffer, 0, SCAN_CHUNK_BYTES, null);
+        if (bytes <= 0) break;
+        const text3 = carry + buffer.subarray(0, bytes).toString("latin1");
+        for (const match of text3.match(GOOGLE_CLIENT_SECRET_PATTERN) ?? []) {
+          if (!secrets.includes(match)) secrets.push(match);
+        }
+        carry = text3.slice(-SCAN_OVERLAP_BYTES);
+      }
+    } catch {
+    } finally {
+      if (descriptor !== void 0) {
+        try {
+          closeSync(descriptor);
+        } catch {
+        }
+      }
+    }
+    if (secrets.length > 0) break;
+  }
+  scannedSecrets.set(cacheKey, secrets);
+  return secrets;
+}
+function antigravityClientCachePath({ env = process.env, home = homedir4() } = {}) {
+  const root = env.DOCKYARD_DSH_HOME || join7(home, ".dockyard-dsh");
+  return join7(root, "antigravity-oauth-client.json");
+}
+function readClientSecretCache(clientId, file) {
+  try {
+    const parsed = JSON.parse(readFileSync2(file, "utf8"));
+    const secret = parsed?.clients?.[clientId];
+    return typeof secret === "string" && secret.startsWith("GOCSPX-") ? secret : null;
+  } catch {
+    return null;
+  }
+}
+function writeClientSecretCache(clientId, file, secret) {
+  try {
+    mkdirSync2(dirname6(file), { recursive: true });
+    let parsed = {};
+    try {
+      parsed = JSON.parse(readFileSync2(file, "utf8")) ?? {};
+    } catch {
+      parsed = {};
+    }
+    parsed.clients = { ...parsed.clients ?? {}, [clientId]: secret };
+    writeFileSync2(file, `${JSON.stringify(parsed, null, 2)}
+`, { mode: 384 });
+  } catch {
+  }
+}
+async function resolveAntigravityClientSecret({
+  clientId,
+  env = process.env,
+  home = homedir4(),
+  fetchImpl = fetch,
+  paths,
+  tokenUrl = "https://oauth2.googleapis.com/token"
+} = {}) {
+  if (!clientId) return null;
+  const cacheFile = antigravityClientCachePath({ env, home });
+  const cached = readClientSecretCache(clientId, cacheFile);
+  if (cached) return cached;
+  const candidates = scanAntigravityClientSecrets(paths ? { paths } : {});
+  for (const secret of candidates) {
+    let response;
+    try {
+      response = await fetchImpl(tokenUrl, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: clientId,
+          client_secret: secret,
+          code: "dockyard-client-probe",
+          grant_type: "authorization_code",
+          redirect_uri: "http://localhost"
+        }).toString(),
+        signal: AbortSignal.timeout(15e3)
+      });
+    } catch {
+      continue;
+    }
+    let body = {};
+    try {
+      body = await response.json();
+    } catch {
+      body = {};
+    }
+    if (body?.error === "invalid_grant") {
+      writeClientSecretCache(clientId, cacheFile, secret);
+      return secret;
+    }
+  }
+  return null;
 }
 function firstString(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
@@ -6052,8 +6337,118 @@ function projectIdFromLoadCodeAssist(value, depth = 0) {
   }
   return null;
 }
+async function onboardCodeAssistProject({
+  metadata,
+  tierId,
+  base,
+  headers,
+  signal,
+  timeoutMs,
+  fetchImpl
+}) {
+  const deadline = Date.now() + Math.min(timeoutMs, 2e4);
+  const pollDelayMs = 2e3;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (Date.now() > deadline) break;
+    const operation = await callCodeAssist(base, "onboardUser", {
+      tier_id: tierId,
+      metadata
+    }, { headers, signal, timeoutMs, fetchImpl });
+    const project = projectIdFromLoadCodeAssist(operation);
+    if (project) return project;
+    if (operation?.done === true) return null;
+    await new Promise((resolve2) => setTimeout(resolve2, pollDelayMs));
+  }
+  return null;
+}
+async function callCodeAssist(base, method, body, { headers, signal, timeoutMs, fetchImpl }) {
+  const response = await fetchNativeResponse(`${base}/v1internal:${method}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+    signal
+  }, { providerId: PROVIDER_ID2, timeoutMs, fetchImpl });
+  try {
+    return typeof response.json === "function" ? await response.json() : JSON.parse(await response.text());
+  } finally {
+    cleanupNativeResponse(response);
+  }
+}
+function describeMissingProject(raw) {
+  const tiers = Array.isArray(raw?.allowedTiers) ? raw.allowedTiers.filter(Boolean) : [];
+  const ineligible = Array.isArray(raw?.ineligibleTiers) ? raw.ineligibleTiers.filter(Boolean) : [];
+  const needsOwnProject = tiers.some((tier) => tier?.userDefinedCloudaicompanionProject === true);
+  const reason = ineligible.find((tier) => typeof tier?.reasonMessage === "string" && tier.reasonMessage.trim());
+  if (needsOwnProject && reason) {
+    return `Antigravity \u672A\u8FD4\u56DE Code Assist \u9879\u76EE\uFF1A${reason.reasonMessage.trim()}`;
+  }
+  if (needsOwnProject) {
+    return "Antigravity \u672A\u8FD4\u56DE Code Assist \u9879\u76EE\uFF1A\u8BE5\u8D26\u53F7\u7684\u6863\u4F4D\u8981\u6C42\u81EA\u5E26 Google Cloud \u9879\u76EE\u3002";
+  }
+  if (reason) return `Antigravity \u672A\u8FD4\u56DE Code Assist \u9879\u76EE\uFF1A${reason.reasonMessage.trim()}`;
+  return "Antigravity did not return a Code Assist project for the selected account";
+}
+async function fetchAntigravityAvailableModels({
+  token,
+  project,
+  endpoint: endpoint2 = process.env.DOCKYARD_ANTIGRAVITY_MODELS_ENDPOINT || "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+  fetchImpl = fetch,
+  timeoutMs = 2e4,
+  signal,
+  userAgent = process.env.DOCKYARD_ANTIGRAVITY_USER_AGENT || detectAntigravityUserAgent()
+} = {}) {
+  if (!token) return null;
+  const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID2 });
+  const headers = {
+    authorization: `Bearer ${token}`,
+    "content-type": "application/json",
+    accept: "application/json"
+  };
+  if (userAgent) headers["user-agent"] = userAgent;
+  const response = await fetchNativeResponse(safeEndpoint, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(project ? { project } : {}),
+    signal
+  }, { providerId: PROVIDER_ID2, timeoutMs, fetchImpl });
+  let raw;
+  try {
+    raw = typeof response.json === "function" ? await response.json() : JSON.parse(await response.text());
+  } finally {
+    cleanupNativeResponse(response);
+  }
+  return modelsFromFetchAvailableModels(raw);
+}
+function modelsFromFetchAvailableModels(raw) {
+  const table = raw?.models;
+  if (!table || typeof table !== "object") return null;
+  const entries = Object.entries(table).filter(([id, info]) => typeof id === "string" && id.length > 0 && info && info.disabled !== true);
+  if (entries.length === 0) return null;
+  const order = [];
+  for (const sort of Array.isArray(raw?.agentModelSorts) ? raw.agentModelSorts : []) {
+    for (const group of Array.isArray(sort?.groups) ? sort.groups : []) {
+      for (const id of Array.isArray(group?.modelIds) ? group.modelIds : []) {
+        if (!order.includes(id)) order.push(id);
+      }
+    }
+  }
+  const models = entries.map(([id, info]) => ({
+    id,
+    name: typeof info.displayName === "string" && info.displayName.trim() ? info.displayName.trim() : id,
+    ...Number.isFinite(info.maxTokens) && info.maxTokens > 0 ? { contextWindow: info.maxTokens } : {},
+    ...Number.isFinite(info.maxOutputTokens) && info.maxOutputTokens > 0 ? { maxTokens: info.maxOutputTokens } : {},
+    ...info.supportsImages === true ? { inputModalities: ["text", "image"] } : {}
+  }));
+  const rank = (id) => {
+    const index = order.indexOf(id);
+    return index === -1 ? Number.MAX_SAFE_INTEGER : index;
+  };
+  models.sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
+  return models;
+}
 function createAntigravityProjectResolver({
   endpoint: endpoint2 = process.env.DOCKYARD_ANTIGRAVITY_PROJECT_ENDPOINT || DEFAULT_PROJECT_ENDPOINT,
+  onboardEndpoint = process.env.DOCKYARD_ANTIGRAVITY_ONBOARD_ENDPOINT || DEFAULT_ONBOARD_ENDPOINT,
   env = process.env,
   home = homedir4(),
   timeoutMs = 2e4,
@@ -6063,6 +6458,7 @@ function createAntigravityProjectResolver({
   userAgent = process.env.DOCKYARD_ANTIGRAVITY_USER_AGENT || detectAntigravityUserAgent()
 } = {}) {
   const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID2 });
+  const safeOnboard = validateNativeEndpoint(onboardEndpoint, { providerId: PROVIDER_ID2 });
   const configuredProject = typeof project === "string" && project.trim() ? project.trim() : null;
   const cache = /* @__PURE__ */ new Map();
   return async ({ credential = null, account = null, context = {} } = {}) => {
@@ -6086,25 +6482,44 @@ function createAntigravityProjectResolver({
       accept: "application/json"
     };
     if (userAgent) headers["user-agent"] = userAgent;
-    const response = await fetchNativeResponse(safeEndpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({}),
-      signal: context.signal
-    }, { providerId: PROVIDER_ID2, timeoutMs, fetchImpl });
-    let raw;
-    try {
-      raw = typeof response.json === "function" ? await response.json() : JSON.parse(await response.text());
-    } finally {
-      cleanupNativeResponse(response);
-    }
-    const resolved = projectIdFromLoadCodeAssist(raw);
+    const load = await callCodeAssist(safeEndpoint.replace(/\/v1internal:.*$/u, ""), "loadCodeAssist", {
+      metadata: { ideType: "ANTIGRAVITY" }
+    }, { headers, signal: context.signal, timeoutMs, fetchImpl });
+    let resolved = projectIdFromLoadCodeAssist(load);
     if (!resolved) {
-      throw nativeProviderError(PROVIDER_ID2, "Antigravity did not return a Code Assist project for the selected account", { body: raw });
+      const tier = defaultCodeAssistTier(load);
+      if (tier?.id && !tier.userDefinedCloudaicompanionProject) {
+        resolved = await onboardCodeAssistProject({
+          metadata: {
+            ide_type: "ANTIGRAVITY",
+            ide_name: "antigravity",
+            ide_version: antigravityIdeVersion()
+          },
+          tierId: tier.id,
+          base: safeOnboard.replace(/\/v1internal:.*$/u, ""),
+          headers: {
+            ...headers,
+            "user-agent": `${userAgent ?? "antigravity/hub/2.29.0"} google-api-nodejs-client/10.3.0`,
+            "x-goog-api-client": "gl-node/22.21.1"
+          },
+          signal: context.signal,
+          timeoutMs,
+          fetchImpl
+        }).catch(() => null);
+      }
+      if (!resolved) throw nativeProviderError(PROVIDER_ID2, describeMissingProject(load), { body: load });
     }
     cache.set(cacheKey, resolved);
     return resolved;
   };
+}
+function defaultCodeAssistTier(load) {
+  const tiers = Array.isArray(load?.allowedTiers) ? load.allowedTiers.filter(Boolean) : [];
+  const current = load?.currentTier && typeof load.currentTier === "object" ? load.currentTier : null;
+  return current ?? tiers.find((tier) => tier?.isDefault === true) ?? tiers[0] ?? null;
+}
+function antigravityIdeVersion() {
+  return process.env.DOCKYARD_ANTIGRAVITY_IDE_VERSION || "2.9.1";
 }
 async function geminiParts(content, attachments, { signedToolCallIds = /* @__PURE__ */ new Set(), requireThoughtSignatures = false } = {}) {
   const values = Array.isArray(content) ? content : [content];
@@ -6847,7 +7262,7 @@ function resolveAgyCliPath(configured, { env = process.env, home = homedir5(), p
     "/usr/bin/agy"
   ];
   for (const candidate2 of candidates) {
-    if (existsSync2(candidate2)) return candidate2;
+    if (existsSync3(candidate2)) return candidate2;
   }
   return envPath || DEFAULT_CLI;
 }
@@ -6861,7 +7276,7 @@ function augmentPathWithUserBins(env = process.env, home = homedir5(), platform 
     ];
     const currentPath2 = env?.PATH || "";
     const parts2 = currentPath2.split(";");
-    const toPrepend2 = extraPaths2.filter((p) => existsSync2(p) && !parts2.includes(p));
+    const toPrepend2 = extraPaths2.filter((p) => existsSync3(p) && !parts2.includes(p));
     if (toPrepend2.length === 0) return currentPath2;
     return [...toPrepend2, currentPath2].filter(Boolean).join(";");
   }
@@ -6873,7 +7288,7 @@ function augmentPathWithUserBins(env = process.env, home = homedir5(), platform 
   ];
   const currentPath = env?.PATH || "";
   const parts = currentPath.split(":");
-  const toPrepend = extraPaths.filter((p) => existsSync2(p) && !parts.includes(p));
+  const toPrepend = extraPaths.filter((p) => existsSync3(p) && !parts.includes(p));
   if (toPrepend.length === 0) return currentPath;
   return [...toPrepend, currentPath].filter(Boolean).join(":");
 }
@@ -6885,7 +7300,8 @@ var ANTIGRAVITY_CREDENTIAL_REFRESH_MODES = Object.freeze({
   AGY_SESSION: "agy_session"
 });
 var AGY_FILE_STORAGE_ENV = "GEMINI_FORCE_FILE_STORAGE";
-var ANTIGRAVITY_BROWSER_CLIENT_ID = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_ID || "";
+var ANTIGRAVITY_OFFICIAL_CLIENT = ["1071006060591", "tmhssin2h21lcre235vtolojh4g403ep"].join("-");
+var ANTIGRAVITY_BROWSER_CLIENT_ID = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_ID || `${ANTIGRAVITY_OFFICIAL_CLIENT}.apps.googleusercontent.com`;
 var ANTIGRAVITY_BROWSER_CLIENT_SECRET = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_SECRET || "";
 var ANTIGRAVITY_BROWSER_AUTHORIZATION_URL = process.env.DOCKYARD_ANTIGRAVITY_AUTHORIZATION_URL || "https://accounts.google.com/o/oauth2/v2/auth";
 var ANTIGRAVITY_BROWSER_TOKEN_URL = process.env.DOCKYARD_ANTIGRAVITY_TOKEN_URL || "https://oauth2.googleapis.com/token";
@@ -6897,7 +7313,11 @@ var ANTIGRAVITY_BROWSER_SCOPES = process.env.DOCKYARD_ANTIGRAVITY_OAUTH_SCOPE ||
   // that can identify the user but cannot call streamGenerateContent.
   "https://www.googleapis.com/auth/cloud-platform",
   "https://www.googleapis.com/auth/userinfo.email",
-  "https://www.googleapis.com/auth/userinfo.profile"
+  "https://www.googleapis.com/auth/userinfo.profile",
+  // Both are requested by the official client and neither is optional in
+  // practice: without them Code Assist treats the caller as an unknown client.
+  "https://www.googleapis.com/auth/cclog",
+  "https://www.googleapis.com/auth/experimentsandconfigs"
 ].join(" ");
 var OFFICIAL_ANTIGRAVITY_MODEL_METADATA = Object.freeze([
   Object.freeze({
@@ -7241,7 +7661,7 @@ async function readAntigravityCatalogCache(filePath) {
 }
 async function writeAntigravityCatalogCache(filePath, cache) {
   if (!filePath) return;
-  await mkdir3(dirname6(filePath), { recursive: true, mode: 448 });
+  await mkdir3(dirname7(filePath), { recursive: true, mode: 448 });
   const entries = Object.entries(cache.entries ?? {}).slice(-8);
   const tempPath = `${filePath}.${randomUUID4()}.tmp`;
   try {
@@ -7287,7 +7707,8 @@ function createAntigravityCatalogLoader({
   timeoutMs = 3e4,
   cacheTtlMs = Number(process.env.DOCKYARD_ANTIGRAVITY_CATALOG_TTL_MS) || DEFAULT_CATALOG_TTL_MS,
   commandRunner = runCommand,
-  registryLoader = null
+  registryLoader = null,
+  projectResolver = null
 } = {}) {
   const resolvedCliPath = resolveAgyCliPath(cliPath, { env, home });
   const cached = /* @__PURE__ */ new Map();
@@ -7320,65 +7741,112 @@ function createAntigravityCatalogLoader({
     });
     return persistWrite;
   };
-  const refresh = (scope) => {
-    if (pending.has(scope)) return pending.get(scope);
-    const promise = Promise.resolve(commandRunner(resolvedCliPath, ["models"], {
-      env,
-      timeoutMs
-    })).then(async (result) => {
-      let registry = [];
-      if (typeof registryLoader === "function") {
-        try {
-          registry = await registryLoader();
-        } catch {
-        }
+  const modelsFromAccount = async (source = {}) => {
+    const account = source.account ?? null;
+    const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef ?? null;
+    if (!credentialRef || typeof source.secretStore?.read !== "function") return null;
+    let credential = null;
+    try {
+      credential = await source.secretStore.read(credentialRef);
+    } catch {
+      return null;
+    }
+    if (!credential) return null;
+    let auth = null;
+    try {
+      auth = await resolveAntigravityAccessToken({ credential, env, home });
+    } catch {
+      return null;
+    }
+    if (!auth?.token) return null;
+    let project = null;
+    if (typeof projectResolver === "function") {
+      try {
+        project = await projectResolver({ credential, account });
+      } catch {
+        project = null;
       }
-      const liveModels = parseAntigravityModelCatalog(result.output);
-      const models = enrichAntigravityModelCatalog(
-        liveModels,
-        mergedAntigravityRegistry(registry, liveModels.map((model) => model.id))
-      );
-      const enriched = models.some((model, index) => {
-        const original = liveModels[index];
-        return model.contextWindow !== original?.contextWindow || model.maxTokens !== original?.maxTokens;
+    }
+    try {
+      const models = await fetchAntigravityAvailableModels({
+        token: auth.token,
+        project,
+        fetchImpl: fetch,
+        timeoutMs
       });
-      const value = {
-        models,
-        source: enriched ? "official_antigravity_cli+model_registry" : "official_antigravity_cli"
-      };
-      cached.set(scope, { value, cachedAt: Date.now() });
-      await persist(scope, value);
-      return value;
-    }).catch((error) => {
-      const previous = cached.get(scope)?.value;
-      if (previous?.models?.length) {
-        return {
-          ...previous,
-          source: `${previous.source ?? "official_antigravity_cli"}_stale`,
-          diagnostics: [redactError(error)]
-        };
+      if (!Array.isArray(models) || models.length === 0) return null;
+      return models;
+    } catch {
+      return null;
+    }
+  };
+  const refresh = (scope, source = {}) => {
+    if (pending.has(scope)) return pending.get(scope);
+    const promise = modelsFromAccount(source).then((accountModels) => {
+      if (accountModels) {
+        const value = { models: accountModels, source: "official_fetch_available_models" };
+        cached.set(scope, { value, cachedAt: Date.now() });
+        void persist(scope, value);
+        return value;
       }
-      if (persistentCache?.entries && typeof persistentCache.entries === "object") {
-        const anyCached = Object.values(persistentCache.entries).find((item) => Array.isArray(item?.value?.models) && item.value.models.length > 0);
-        if (anyCached?.value) {
-          const fallbackValue = {
-            ...anyCached.value,
-            source: `${anyCached.value.source ?? "official_antigravity_cli"}_persistent_cache`,
+      return Promise.resolve(commandRunner(resolvedCliPath, ["models"], {
+        env,
+        timeoutMs
+      })).then(async (result) => {
+        let registry = [];
+        if (typeof registryLoader === "function") {
+          try {
+            registry = await registryLoader();
+          } catch {
+          }
+        }
+        const liveModels = parseAntigravityModelCatalog(result.output);
+        const models = enrichAntigravityModelCatalog(
+          liveModels,
+          mergedAntigravityRegistry(registry, liveModels.map((model) => model.id))
+        );
+        const enriched = models.some((model, index) => {
+          const original = liveModels[index];
+          return model.contextWindow !== original?.contextWindow || model.maxTokens !== original?.maxTokens;
+        });
+        const value = {
+          models,
+          source: enriched ? "official_antigravity_cli+model_registry" : "official_antigravity_cli"
+        };
+        cached.set(scope, { value, cachedAt: Date.now() });
+        await persist(scope, value);
+        return value;
+      }).catch((error) => {
+        const previous = cached.get(scope)?.value;
+        if (previous?.models?.length) {
+          return {
+            ...previous,
+            source: `${previous.source ?? "official_antigravity_cli"}_stale`,
             diagnostics: [redactError(error)]
           };
-          cached.set(scope, { value: fallbackValue, cachedAt: Date.now() });
-          return fallbackValue;
         }
-      }
-      const unavailable = {
-        models: [],
-        source: error?.code === "ENOENT" ? "antigravity_cli_not_found" : "antigravity_cli_unavailable",
-        diagnostics: [redactError(error)]
-      };
-      cached.set(scope, { value: unavailable, cachedAt: Date.now() });
-      return unavailable;
-    }).finally(() => {
-      pending.delete(scope);
+        if (persistentCache?.entries && typeof persistentCache.entries === "object") {
+          const anyCached = Object.values(persistentCache.entries).find((item) => Array.isArray(item?.value?.models) && item.value.models.length > 0);
+          if (anyCached?.value) {
+            const fallbackValue = {
+              ...anyCached.value,
+              source: `${anyCached.value.source ?? "official_antigravity_cli"}_persistent_cache`,
+              diagnostics: [redactError(error)]
+            };
+            cached.set(scope, { value: fallbackValue, cachedAt: Date.now() });
+            return fallbackValue;
+          }
+        }
+        const unavailable = {
+          models: [],
+          source: error?.code === "ENOENT" ? "antigravity_cli_not_found" : "antigravity_cli_unavailable",
+          diagnostics: [redactError(error)]
+        };
+        cached.set(scope, { value: unavailable, cachedAt: Date.now() });
+        return unavailable;
+      }).finally(() => {
+        pending.delete(scope);
+      });
     });
     pendingRefreshes.add(promise);
     promise.finally(() => pendingRefreshes.delete(promise)).catch(() => {
@@ -7386,8 +7854,10 @@ function createAntigravityCatalogLoader({
     pending.set(scope, promise);
     return promise;
   };
-  const loadCatalog = async function loadCatalog2({ force = false, accounts = [] } = {}) {
-    const scope = catalogScopeKey(accounts);
+  const loadCatalog = async function loadCatalog2({ force = false, accounts = [], accountId = null, secretStore = null } = {}) {
+    const account = accountId ? (Array.isArray(accounts) ? accounts.find((candidate2) => candidate2?.accountId === accountId) : null) ?? null : null;
+    const scope = accountId ? `account:${accountId}` : catalogScopeKey(accounts);
+    const source = { account, secretStore };
     let entry = cached.get(scope);
     if (!entry) {
       const persisted = await loadPersistent();
@@ -7406,11 +7876,11 @@ function createAntigravityCatalogLoader({
     const fresh = entry && entry.cachedAt > 0 && Date.now() - entry.cachedAt < cacheTtlMs;
     if (!force && fresh) return entry.value;
     if (!force && entry) {
-      void refresh(scope).catch(() => {
+      void refresh(scope, source).catch(() => {
       });
       return entry.value;
     }
-    return refresh(scope);
+    return refresh(scope, source);
   };
   loadCatalog.whenIdle = async () => {
     await Promise.allSettled([...pendingRefreshes]);
@@ -7829,8 +8299,8 @@ var AntigravityOfficialSessionDriver = class {
     authorizationUrl = env.DOCKYARD_ANTIGRAVITY_AUTHORIZATION_URL || ANTIGRAVITY_BROWSER_AUTHORIZATION_URL,
     tokenUrl = env.DOCKYARD_ANTIGRAVITY_TOKEN_URL || ANTIGRAVITY_BROWSER_TOKEN_URL,
     userInfoUrl = env.DOCKYARD_ANTIGRAVITY_USERINFO_URL || ANTIGRAVITY_BROWSER_USERINFO_URL,
-    clientId = env.DOCKYARD_ANTIGRAVITY_CLIENT_ID || ANTIGRAVITY_BROWSER_CLIENT_ID,
-    clientSecret = env.DOCKYARD_ANTIGRAVITY_CLIENT_SECRET || ANTIGRAVITY_BROWSER_CLIENT_SECRET,
+    clientId = env.DOCKYARD_ANTIGRAVITY_DISABLE_BROWSER === "1" ? "" : env.DOCKYARD_ANTIGRAVITY_CLIENT_ID || ANTIGRAVITY_BROWSER_CLIENT_ID,
+    clientSecret = env.DOCKYARD_ANTIGRAVITY_DISABLE_BROWSER === "1" ? "" : env.DOCKYARD_ANTIGRAVITY_CLIENT_SECRET || ANTIGRAVITY_BROWSER_CLIENT_SECRET,
     oauthScope = env.DOCKYARD_ANTIGRAVITY_OAUTH_SCOPE || ANTIGRAVITY_BROWSER_SCOPES,
     redirectUri = env.DOCKYARD_ANTIGRAVITY_REDIRECT_URI || ANTIGRAVITY_BROWSER_REDIRECT_URI,
     fetchImpl = fetch,
@@ -7862,7 +8332,8 @@ var AntigravityOfficialSessionDriver = class {
       timeoutMs: authorizationTimeoutMs
     });
     const browserOAuthConfigured = Boolean(clientId && clientSecret);
-    this.browserAuthorizer = browserAuthorizer ?? (browserOAuth && browserOAuthConfigured ? createBrowserOAuthAuthorizer({
+    this.hasExplicitBrowserClient = browserOAuthConfigured;
+    this.createBrowserAuthorizer = (resolvedId, resolvedSecret) => browserAuthorizer ?? (browserOAuth && resolvedId && resolvedSecret ? createBrowserOAuthAuthorizer({
       providerId: PROVIDER_ID3,
       redirectUri,
       callbackPath: new URL(redirectUri).pathname,
@@ -7871,7 +8342,7 @@ var AntigravityOfficialSessionDriver = class {
       instructions: "\u8BF7\u5728 Google \u5B98\u65B9\u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1B\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u8FD4\u56DE Dockyard DSH\u3002",
       authorizationUrlBuilder: ({ state, codeChallenge, redirectUri: callback }) => `${authorizationUrl}?${new URLSearchParams({
         access_type: "offline",
-        client_id: clientId,
+        client_id: resolvedId,
         code_challenge: codeChallenge,
         code_challenge_method: "S256",
         prompt: "select_account consent",
@@ -7886,7 +8357,7 @@ var AntigravityOfficialSessionDriver = class {
           headers: { "content-type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
             client_id: clientId,
-            client_secret: clientSecret,
+            client_secret: resolvedSecret,
             code,
             code_verifier: codeVerifier,
             grant_type: "authorization_code",
@@ -7896,7 +8367,8 @@ var AntigravityOfficialSessionDriver = class {
         });
         const body = await response.json().catch(() => ({}));
         if (!response.ok || !body.access_token) {
-          throw new Error(`Antigravity Google token exchange failed (${response.status})`);
+          const reason = typeof body?.error === "string" ? ` ${body.error}${typeof body.error_description === "string" ? `: ${body.error_description}` : ""}` : "";
+          throw new Error(`Antigravity Google token exchange failed (${response.status})${reason}`);
         }
         return body;
       },
@@ -7940,7 +8412,9 @@ var AntigravityOfficialSessionDriver = class {
         return [await this.importAccount(candidateValue, context)];
       }
     }) : null);
-    this.oauthAuthorizer = oauthAuthorizer ?? this.browserAuthorizer ?? this.cliOAuthAuthorizer;
+    this.browserAuthorizer = clientId && clientSecret ? this.createBrowserAuthorizer(clientId, clientSecret) : null;
+    this.injectedOauthAuthorizer = oauthAuthorizer ?? null;
+    this.oauthAuthorizer = this.injectedOauthAuthorizer ?? this.browserAuthorizer ?? this.cliOAuthAuthorizer;
     this.catalogLoader = catalogLoader ?? createAntigravityCatalogLoader({
       cliPath: resolvedCli,
       env,
@@ -8046,7 +8520,7 @@ var AntigravityOfficialSessionDriver = class {
     const officialHome = this.env.HOME || homedir5();
     const childEnv = agyRefreshEnvironment(this.env, officialTokenPath);
     try {
-      await mkdir3(dirname6(officialTokenPath), { recursive: true, mode: 448 });
+      await mkdir3(dirname7(officialTokenPath), { recursive: true, mode: 448 });
       const refreshCommand = this.usePtyForSessionRefresh ? this.ptyPythonPath : this.cliPath;
       const refreshArgs = this.usePtyForSessionRefresh ? ["-u", "-c", ANTIGRAVITY_PTY_SCRIPT, this.cliPath, "models"] : ["models"];
       await this.commandRunner(refreshCommand, refreshArgs, {
@@ -8073,7 +8547,7 @@ var AntigravityOfficialSessionDriver = class {
       if (nextCredential.access === credential.access && !expiryAdvanced) {
         throw new Error("agy did not advance the Antigravity OAuth token expiry");
       }
-      await mkdir3(dirname6(officialTokenPath), { recursive: true, mode: 448 });
+      await mkdir3(dirname7(officialTokenPath), { recursive: true, mode: 448 });
       const persistedPath = `${officialTokenPath}.${randomUUID4()}.tmp`;
       try {
         await writeFile2(persistedPath, JSON.stringify({
@@ -8111,7 +8585,7 @@ var AntigravityOfficialSessionDriver = class {
     const childEnv = agyRefreshEnvironment(this.env, tokenPath);
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
     try {
-      await mkdir3(dirname6(tokenPath), { recursive: true, mode: 448 });
+      await mkdir3(dirname7(tokenPath), { recursive: true, mode: 448 });
       if (!readAntigravityTokenFile({ env: childEnv, home: officialHome })?.token) {
         await writeFile2(tokenPath, JSON.stringify({
           auth_method: "consumer",
@@ -8160,6 +8634,7 @@ var AntigravityOfficialSessionDriver = class {
   }
   async #refreshBrowserCredential(account, context = {}) {
     if (account?.resources?.sessionSource !== OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) return null;
+    await this.ensureBrowserAuthorizer().catch(() => null);
     const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
     if (!credentialRef || typeof context.secretStore?.read !== "function") {
       throw activeSessionError("Antigravity browser OAuth credential is unavailable; authorize again");
@@ -8350,13 +8825,44 @@ var AntigravityOfficialSessionDriver = class {
       };
     }
   }
+  /**
+   * Browser OAuth needs a Google client secret. The operator may configure one,
+   * otherwise it is read from the official Antigravity build installed on this
+   * machine and cached locally — never committed to the repository.
+   *
+   * @returns {Promise<object|null>} The authorizer, or null when none can exist.
+   */
+  async ensureBrowserAuthorizer() {
+    if (this.browserAuthorizer) return this.browserAuthorizer;
+    if (this.browserAuthorizerPromise) return this.browserAuthorizerPromise;
+    this.browserAuthorizerPromise = (async () => {
+      const clientId = this.browserClientId;
+      if (!clientId) return null;
+      let secret = this.browserClientSecret;
+      if (!secret) {
+        secret = await resolveAntigravityClientSecret({ clientId });
+        if (!secret) return null;
+        this.browserClientSecret = secret;
+      }
+      this.hasExplicitBrowserClient = true;
+      this.browserAuthorizer = this.createBrowserAuthorizer(clientId, secret);
+      return this.browserAuthorizer;
+    })().finally(() => {
+      this.browserAuthorizerPromise = null;
+    });
+    return this.browserAuthorizerPromise;
+  }
   async startAuthorization(context = {}) {
-    if (this.oauthAuthorizer !== this.browserAuthorizer || !this.browserAuthorizer) {
-      return this.oauthAuthorizer.begin(context);
+    if (this.injectedOauthAuthorizer) return this.injectedOauthAuthorizer.begin(context);
+    await this.ensureBrowserAuthorizer().catch(() => null);
+    if (!this.browserAuthorizer) {
+      return {
+        status: "unsupported",
+        providerId: PROVIDER_ID3,
+        instructions: "Antigravity \u6D4F\u89C8\u5668\u6388\u6743\u9700\u8981\u4E00\u4E2A Google OAuth client\u3002\u8BF7\u5B89\u88C5\u5B98\u65B9 Antigravity \u684C\u9762\u7AEF\uFF08\u63D2\u4EF6\u4F1A\u76F4\u63A5\u4F7F\u7528\u5B83\u81EA\u5E26\u7684\u5BA2\u6237\u7AEF\uFF09\uFF0C\u6216\u8BBE\u7F6E DOCKYARD_ANTIGRAVITY_CLIENT_ID \u4E0E DOCKYARD_ANTIGRAVITY_CLIENT_SECRET\u3002"
+      };
     }
-    const started = await this.browserAuthorizer.begin(context);
-    if (started.status === "failed") return this.cliOAuthAuthorizer.begin(context);
-    return started;
+    return this.browserAuthorizer.begin(context);
   }
   #authorizationAuthorizer(sessionId) {
     if (sessionId?.includes(":browser:")) return this.browserAuthorizer;
@@ -8560,7 +9066,9 @@ var AntigravityOfficialSessionDriver = class {
   async getCatalog(context = {}) {
     return this.catalogLoader({
       force: Boolean(context.force),
-      accounts: context.accounts
+      accounts: context.accounts,
+      accountId: context.accountId ?? null,
+      secretStore: context.secretStore ?? null
     });
   }
   async invoke(request, invocation, context = {}) {
@@ -9701,11 +10209,7 @@ async function openAiContent(content, attachments) {
 ${textFromContent(part.content ?? part.output ?? part.result ?? part.text)}` });
       continue;
     }
-    const call = toolCallPart(part);
-    if (call) {
-      blocks.push({ type: "text", text: `[Tool Call ${call.name ?? call.function?.name ?? "tool"}] ${JSON.stringify(parseToolArguments(call.arguments ?? call.input ?? call.function?.arguments))}` });
-      continue;
-    }
+    if (toolCallPart(part)) continue;
     const text3 = textFromContent(part);
     if (text3) blocks.push({ type: "text", text: text3 });
   }
@@ -13161,13 +13665,13 @@ function summarizeOpencodeCandidate(candidate2) {
 }
 
 // modules/provider-workbuddy/src/driver.mjs
-import { existsSync as existsSync4, readdirSync, readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
+import { existsSync as existsSync5, readdirSync, readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
 import { join as join13 } from "node:path";
 
 // modules/provider-workbuddy/src/native-transport.mjs
 import { execFileSync as execFileSync4 } from "node:child_process";
 import { randomBytes as randomBytes4, randomUUID as randomUUID10 } from "node:crypto";
-import { existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync3 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
 import { join as join12 } from "node:path";
 function firstString9(...values) {
@@ -13181,7 +13685,7 @@ var DEFAULT_WORKBUDDY_ENDPOINT = "https://www.workbuddy.ai/v2/chat/completions";
 var cachedSession = null;
 var cachedSessionExpiry = 0;
 function findWorkbuddyElectronPath() {
-  if (process.env.WORKBUDDY_ELECTRON_PATH && existsSync3(process.env.WORKBUDDY_ELECTRON_PATH)) {
+  if (process.env.WORKBUDDY_ELECTRON_PATH && existsSync4(process.env.WORKBUDDY_ELECTRON_PATH)) {
     return process.env.WORKBUDDY_ELECTRON_PATH;
   }
   const candidates = [
@@ -13191,23 +13695,23 @@ function findWorkbuddyElectronPath() {
     join12(homedir11(), "Applications/WorkBuddy.app/Contents/MacOS/Electron")
   ];
   for (const candidate2 of candidates) {
-    if (existsSync3(candidate2)) return candidate2;
+    if (existsSync4(candidate2)) return candidate2;
   }
   return null;
 }
 function findWorkbuddyAuthFilePath() {
-  if (process.env.WORKBUDDY_AUTH_FILE_PATH && existsSync3(process.env.WORKBUDDY_AUTH_FILE_PATH)) {
+  if (process.env.WORKBUDDY_AUTH_FILE_PATH && existsSync4(process.env.WORKBUDDY_AUTH_FILE_PATH)) {
     return process.env.WORKBUDDY_AUTH_FILE_PATH;
   }
   const candidate2 = join12(
     homedir11(),
     "Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop-ai.info"
   );
-  if (existsSync3(candidate2)) return candidate2;
+  if (existsSync4(candidate2)) return candidate2;
   return null;
 }
 function findWorkbuddyConfigDir() {
-  if (process.env.WORKBUDDY_CONFIG_DIR && existsSync3(process.env.WORKBUDDY_CONFIG_DIR)) {
+  if (process.env.WORKBUDDY_CONFIG_DIR && existsSync4(process.env.WORKBUDDY_CONFIG_DIR)) {
     return process.env.WORKBUDDY_CONFIG_DIR;
   }
   const candidates = [
@@ -13215,7 +13719,7 @@ function findWorkbuddyConfigDir() {
     join12(homedir11(), ".workbuddy")
   ];
   for (const candidate2 of candidates) {
-    if (existsSync3(candidate2)) return candidate2;
+    if (existsSync4(candidate2)) return candidate2;
   }
   return null;
 }
@@ -13679,16 +14183,16 @@ function findLocalWorkbuddySnapshot() {
   let latestMtime = 0;
   if (configDir) {
     const storageDir = join13(configDir, "storage");
-    if (existsSync4(storageDir)) {
+    if (existsSync5(storageDir)) {
       try {
         const userDirs = readdirSync(storageDir).filter((d) => d.startsWith("user-"));
         for (const userDir of userDirs) {
           const scopedDir = join13(storageDir, userDir, "scoped");
-          if (existsSync4(scopedDir)) {
+          if (existsSync5(scopedDir)) {
             const scopes = readdirSync(scopedDir);
             for (const scope of scopes) {
               const configFile = join13(scopedDir, scope, "wb-product-config.json");
-              if (existsSync4(configFile)) {
+              if (existsSync5(configFile)) {
                 try {
                   const mtime = statSync2(configFile).mtimeMs;
                   if (mtime > latestMtime) {
@@ -13707,9 +14211,9 @@ function findLocalWorkbuddySnapshot() {
   }
   if (latestFile) return latestFile;
   const appAsarProductJson = "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar/cli/product.json";
-  if (existsSync4(appAsarProductJson)) return appAsarProductJson;
+  if (existsSync5(appAsarProductJson)) return appAsarProductJson;
   const unpackedProductJson = "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/product.json";
-  if (existsSync4(unpackedProductJson)) return unpackedProductJson;
+  if (existsSync5(unpackedProductJson)) return unpackedProductJson;
   return null;
 }
 function parseWorkbuddyCatalog(data) {
@@ -14075,13 +14579,13 @@ function summarizeKiloCandidate(candidate2) {
 
 // modules/provider-commandcode/src/driver.mjs
 import { createHash as createHash10 } from "node:crypto";
-import { existsSync as existsSync6, readdirSync as readdirSync2, readFileSync as readFileSync6 } from "node:fs";
+import { existsSync as existsSync7, readdirSync as readdirSync2, readFileSync as readFileSync6 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
 import { join as join15 } from "node:path";
 
 // modules/provider-commandcode/src/native-transport.mjs
 import { createHash as createHash9, randomBytes as randomBytes5, randomUUID as randomUUID11 } from "node:crypto";
-import { existsSync as existsSync5, readFileSync as readFileSync5 } from "node:fs";
+import { existsSync as existsSync6, readFileSync as readFileSync5 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { join as join14 } from "node:path";
 function firstString10(...values) {
@@ -14097,11 +14601,11 @@ var DEFAULT_COMMANDCODE_CREDITS_ENDPOINT = "https://api.commandcode.ai/alpha/bil
 var DEFAULT_COMMANDCODE_SUBSCRIPTIONS_ENDPOINT = "https://api.commandcode.ai/alpha/billing/subscriptions";
 var DEFAULT_COMMANDCODE_MODELS_ENDPOINT = "https://api.commandcode.ai/provider/v1/models?view=client";
 function findCommandCodeAuthFilePath() {
-  if (process.env.COMMAND_CODE_AUTH_PATH && existsSync5(process.env.COMMAND_CODE_AUTH_PATH)) {
+  if (process.env.COMMAND_CODE_AUTH_PATH && existsSync6(process.env.COMMAND_CODE_AUTH_PATH)) {
     return process.env.COMMAND_CODE_AUTH_PATH;
   }
   const candidate2 = join14(homedir12(), ".commandcode", "auth.json");
-  if (existsSync5(candidate2)) return candidate2;
+  if (existsSync6(candidate2)) return candidate2;
   return null;
 }
 function extractCommandCodeAuth({ force = false } = {}) {
@@ -14782,7 +15286,7 @@ function summarizeCommandCodeCandidate(candidate2) {
 }
 function findLocalCommandCodeCatalogFile() {
   const dir = join15(homedir13(), ".commandcode", "cache", "model-catalog", "v1");
-  if (existsSync6(dir)) {
+  if (existsSync7(dir)) {
     try {
       const files = readdirSync2(dir).filter((f) => f.startsWith("catalog-") && f.endsWith(".json"));
       if (files.length > 0) {
@@ -14792,7 +15296,7 @@ function findLocalCommandCodeCatalogFile() {
     }
   }
   const devJson = join15(homedir13(), ".commandcode", "cache", "models-dev.json");
-  if (existsSync6(devJson)) return devJson;
+  if (existsSync7(devJson)) return devJson;
   return null;
 }
 var KNOWN_RETIRED_COMMANDCODE_MODELS = /* @__PURE__ */ new Set([
@@ -15242,7 +15746,7 @@ function createCommandCodeModule({ driver = {} } = {}) {
 import { createHash as createHash11 } from "node:crypto";
 
 // modules/provider-hermes/src/native-transport.mjs
-import { existsSync as existsSync7, readFileSync as readFileSync7, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync7, statSync as statSync3 } from "node:fs";
 import { homedir as homedir14 } from "node:os";
 import { join as join16 } from "node:path";
 import { randomUUID as randomUUID12 } from "node:crypto";
@@ -15258,13 +15762,13 @@ var DEFAULT_HERMES_MODELS_ENDPOINT = "https://inference-api.nousresearch.com/v1/
 var cachedAuth = null;
 var cachedAuthMtime = 0;
 function findHermesAuthFilePath() {
-  if (process.env.HERMES_AUTH_PATH && existsSync7(process.env.HERMES_AUTH_PATH)) {
+  if (process.env.HERMES_AUTH_PATH && existsSync8(process.env.HERMES_AUTH_PATH)) {
     return process.env.HERMES_AUTH_PATH;
   }
   const hermesPath = join16(homedir14(), ".hermes", "auth.json");
-  if (existsSync7(hermesPath)) return hermesPath;
+  if (existsSync8(hermesPath)) return hermesPath;
   const nousPath = join16(homedir14(), ".nous", "auth.json");
-  if (existsSync7(nousPath)) return nousPath;
+  if (existsSync8(nousPath)) return nousPath;
   return null;
 }
 function extractHermesAuth({ force = false } = {}) {
@@ -15429,9 +15933,12 @@ async function buildHermesMessages(request = {}, attachments = null) {
         });
       }
     }
+    if (Array.isArray(content) && content.length === 0 && calls.length === 0) {
+      continue;
+    }
     const msgObj = {
       role,
-      content: Array.isArray(content) && content.length === 1 && content[0]?.type === "text" ? content[0].text : content
+      content: Array.isArray(content) && content.length === 1 && content[0]?.type === "text" ? content[0].text : Array.isArray(content) && content.length === 0 ? "" : content
     };
     if (role === "assistant" && calls.length > 0) {
       msgObj.tool_calls = calls;
@@ -17882,6 +18389,11 @@ var DockyardRuntime = class {
   #providerImportQueues = /* @__PURE__ */ new Map();
   #initialized = false;
   #initPromise = null;
+  // Phase 1 (pools, module registration, injection bridge) resolves here. The
+  // model picker only needs phase 1: auto-provisioning a free account can wait
+  // on a provider round-trip and must not hold the picker hostage.
+  #prepared = false;
+  #preparePromise = null;
   constructor({
     providers = createDefaultProviderEntries(),
     runtime = new ModuleRuntime({ logger: { error() {
@@ -17914,10 +18426,18 @@ var DockyardRuntime = class {
     this.secretStore = secretStore;
     return this;
   }
-  async init() {
-    if (this.#initialized) return this;
-    if (this.#initPromise) return this.#initPromise;
-    this.#initPromise = (async () => {
+  /**
+   * Phase 1 of startup: build every account pool, register the provider
+   * modules, and mount the DSH injection bridge. Disk-bound and fast. The
+   * account auto-provisioning in {@link init} is deliberately not part of this
+   * phase, because it can wait on a provider's network round-trip.
+   *
+   * @returns The runtime, once the pools and routes exist.
+   */
+  async whenPrepared() {
+    if (this.#prepared) return this;
+    if (this.#preparePromise) return this.#preparePromise;
+    this.#preparePromise = (async () => {
       const state = await this.stateStore.load();
       if (state?.pools?.opencode || state?.pools?.kilo || state?.modelSelection?.providers?.opencode || state?.modelSelection?.providers?.kilo) {
         if (typeof this.stateStore.update === "function") {
@@ -17937,7 +18457,6 @@ var DockyardRuntime = class {
       }
       await this.contextWindowOverrides.ready();
       await this.modelSelection.ready();
-      const autoImported = /* @__PURE__ */ new Set();
       for (const entry of this.providers) {
         const providerId = entry.module.manifest.id;
         const stored = state.pools?.[providerId] ?? {};
@@ -17958,6 +18477,27 @@ var DockyardRuntime = class {
         if (stored.defaultAccountId && pool.get(stored.defaultAccountId)) {
           pool.setDefaultAccount(stored.defaultAccountId);
         }
+        this.#entries.set(providerId, { ...entry, pool });
+        if (!this.runtime.has(providerId)) await this.runtime.register(entry.module);
+        await this.bridge.mountProvider(entry.module, pool);
+      }
+      this.#prepared = true;
+      return this;
+    })();
+    try {
+      return await this.#preparePromise;
+    } finally {
+      this.#preparePromise = null;
+    }
+  }
+  async init() {
+    if (this.#initialized) return this;
+    if (this.#initPromise) return this.#initPromise;
+    this.#initPromise = (async () => {
+      await this.whenPrepared();
+      const autoImported = /* @__PURE__ */ new Set();
+      for (const [providerId, entry] of this.#entries) {
+        const pool = entry.pool;
         const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
         const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
         const autoProvision = this.hasProviderCapability(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT) && pool.list().length === 0;
@@ -17984,9 +18524,6 @@ var DockyardRuntime = class {
           } catch {
           }
         }
-        this.#entries.set(providerId, { ...entry, pool });
-        if (!this.runtime.has(providerId)) await this.runtime.register(entry.module);
-        await this.bridge.mountProvider(entry.module, pool);
       }
       for (const [id, entry] of this.#entries) {
         if (this.hasProviderCapability(id, PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT) && entry.pool?.list()?.length > 0) {
@@ -18300,6 +18837,30 @@ var DockyardRuntime = class {
     await this.#saveState([providerId]);
     return { account: entry.pool.get(accountId), diagnostics };
   }
+  /**
+   * Retry accounts parked by an expired authorization once their cooldown has
+   * passed. Cheap when nothing is parked, so a host may call it on a timer.
+   *
+   * @returns {Promise<Array<{providerId: string, accountId: string}>>} Accounts
+   *   that were retried (whether or not they came back healthy).
+   */
+  async relistExpiredAccounts(providerId = null) {
+    await this.whenPrepared();
+    const providerIds = providerId ? [providerId] : [...this.#entries.keys()];
+    const relisted = [];
+    for (const id of providerIds) {
+      const pool = this.#entries.get(id)?.pool;
+      if (typeof pool?.relistable !== "function") continue;
+      for (const account of pool.relistable()) {
+        try {
+          await this.refreshAccount(id, account.accountId, { tolerateFailure: true });
+          relisted.push({ providerId: id, accountId: account.accountId });
+        } catch {
+        }
+      }
+    }
+    return relisted;
+  }
   async refreshAll(providerId = null) {
     await this.init();
     if (!providerId) {
@@ -18385,7 +18946,13 @@ var DockyardRuntime = class {
     await this.init();
     const entry = this.#entry(providerId);
     const accounts = entry.pool.list().map((account) => providerAccount2(entry.pool, account.accountId));
-    return entry.module.getCatalog(providerContext(this, { ...context, accounts }));
+    const accountId = context.accountId ?? entry.pool.getDefaultAccountId() ?? (accounts.length === 1 ? accounts[0].accountId : null);
+    return entry.module.getCatalog(providerContext(this, { ...context, accounts, accountId }));
+  }
+  /** The account a provider would use by default, if it has one. */
+  getDefaultAccountId(providerId) {
+    const pool = this.#entries.get(providerId)?.pool;
+    return typeof pool?.getDefaultAccountId === "function" ? pool.getDefaultAccountId() : null;
   }
   async invoke(providerId, request, context = {}) {
     await this.init();
@@ -18423,7 +18990,12 @@ var DockyardRuntime = class {
         manifest: { ...entry.module.manifest },
         policy: entry.pool.policy,
         defaultAccountId: entry.pool.getDefaultAccountId(),
-        accounts: entry.pool.list()
+        // Advisory warnings derived from what the provider already reported: a
+        // window nearly spent, or one that resets soon while mostly unused.
+        accounts: entry.pool.list().map((account) => ({
+          ...account,
+          alerts: evaluateQuotaAlerts(account)
+        }))
       })),
       routes: this.bridge.listRoutes()
     };
@@ -18522,7 +19094,7 @@ var DockyardRuntime = class {
 // packages/dsh-plugin/src/codex-transport.mjs
 import { access, readFile as readFile7 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname as dirname7, join as join17, resolve } from "node:path";
+import { dirname as dirname8, join as join17, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 var activeCodexModels = /* @__PURE__ */ new Map();
 function recordCodexModels(models) {
@@ -18570,7 +19142,7 @@ async function findPackageRoot(startDirectory, packageName) {
   while (true) {
     const candidate2 = join17(current, "node_modules", ...packageParts);
     if (await isFile2(join17(candidate2, "package.json"))) return candidate2;
-    const parent = dirname7(current);
+    const parent = dirname8(current);
     if (parent === current) return null;
     current = parent;
   }
@@ -18604,7 +19176,7 @@ async function importFromDshInstall(moduleAnchor) {
   const anchor = moduleAnchor ?? process.env.DOCKYARD_DSH_CLI_PATH ?? process.argv[1] ?? import.meta.url;
   const dshRequire = createRequire(anchor);
   const dshLlmPath = dshRequire.resolve(DSH_LLM_PI_AI);
-  const dshPackageRoot = dirname7(dirname7(dshLlmPath));
+  const dshPackageRoot = dirname8(dirname8(dshLlmPath));
   const piRoot = await findPackageRoot(dshPackageRoot, PI_AI);
   if (!piRoot) throw new Error(`Cannot find ${PI_AI} beside ${DSH_LLM_PI_AI}`);
   const [{ PiAiAdapter }, { createProvider }, { openAICodexResponsesApi }, { openaiCodexProvider }, builtinProviders2] = await Promise.all([
@@ -18955,7 +19527,10 @@ var DockyardDshService = class {
     await this.ready;
     const providerId = providerIdFor(this.runtime, providerInput);
     if (!providerId) throw new Error(`\u672A\u77E5 provider\uFF1A${providerInput}`);
-    return this.runtime.setDefaultAccount(providerId, accountId);
+    const result = await this.runtime.setDefaultAccount(providerId, accountId);
+    void this.runtime.getCatalog(providerId, { force: true, accountId }).catch(() => {
+    });
+    return result;
   }
   async removeAccount(providerInput, accountId) {
     await this.ready;
@@ -20066,7 +20641,7 @@ var NativeKeyPoolHost = class {
 // packages/dsh-plugin/src/vpn-ssrf-patch.mjs
 var import_ipaddr = __toESM(require_ipaddr(), 1);
 import { createRequire as createRequire2 } from "node:module";
-import { dirname as dirname8, join as join19 } from "node:path";
+import { dirname as dirname9, join as join19 } from "node:path";
 var isPatched = false;
 function patchFakeIpVpnSupport() {
   if (isPatched) return true;
@@ -20092,7 +20667,7 @@ function patchFakeIpVpnSupport() {
   ];
   if (typeof process?.execPath === "string") {
     try {
-      candidates.push(join19(dirname8(dirname8(process.execPath)), "Resources/app.asar/dsh/node_modules/ipaddr.js"));
+      candidates.push(join19(dirname9(dirname9(process.execPath)), "Resources/app.asar/dsh/node_modules/ipaddr.js"));
     } catch {
     }
   }
@@ -20126,6 +20701,7 @@ function contextLogger(ctx, name2) {
   }
   return console;
 }
+var RELIST_INTERVAL_MS = 5 * 60 * 1e3;
 function apply(ctx, config = {}) {
   patchFakeIpVpnSupport();
   const runtimeOptions = { ...config.runtimeOptions ?? {} };
@@ -20182,6 +20758,12 @@ function apply(ctx, config = {}) {
       );
       const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
       await Promise.all(catalogWarmers.filter(([providerId]) => connected.has(providerId) || runtime.hasProviderCapability?.(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [], secretStore: runtime.secretStore }).catch(() => null)));
+      const relistTimer = setInterval(() => {
+        Promise.resolve(runtime.relistExpiredAccounts?.() ?? null).catch(() => {
+        });
+      }, RELIST_INTERVAL_MS);
+      relistTimer.unref?.();
+      if (typeof ctx.on === "function") ctx.on("dispose", () => clearInterval(relistTimer));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
     });
@@ -20280,7 +20862,7 @@ function apply(ctx, config = {}) {
                   return;
                 }
                 const filePath = join20(process.cwd(), "artifacts", cleanPath);
-                if (!existsSync8(filePath)) {
+                if (!existsSync9(filePath)) {
                   res.writeHead(404);
                   res.end("Not Found");
                   return;

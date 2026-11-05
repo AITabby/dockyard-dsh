@@ -392,6 +392,17 @@ export function createDockyardLlmAdapter({
     if (typeof runtime.init === "function") await runtime.init();
   }
 
+  /**
+   * The model list only needs the account pools and injected routes, which the
+   * runtime builds before it auto-provisions free accounts. Provisioning talks
+   * to the provider, so waiting for it here would delay the picker for as long
+   * as that round-trip takes. Generation still awaits the full init.
+   */
+  async function ensurePreparedForListing() {
+    if (typeof runtime.whenPrepared === "function") await runtime.whenPrepared();
+    else await ensureRuntimeReady();
+  }
+
   function abortedCallerError(signal) {
     const error = new Error("This model lookup was aborted");
     error.name = "AbortError";
@@ -422,34 +433,55 @@ export function createDockyardLlmAdapter({
     });
   }
 
+  /**
+   * The account a provider would serve with. Catalogs are per account: a paid
+   * tier and a free one expose different model lists, so caching them per
+   * provider made switching accounts look like it changed nothing.
+   */
+  function catalogAccountId(provider) {
+    try {
+      return runtime.getDefaultAccountId?.(provider) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function catalogKey(provider) {
+    const accountId = catalogAccountId(provider);
+    return accountId ? `${provider}::${accountId}` : provider;
+  }
+
   async function providerCatalog(provider, signal, { force = false } = {}) {
     if (!force) {
       const cached = cachedProviderCatalog(provider);
       if (cached) return cached;
     }
-    let promise = catalogPromises.get(provider);
+    const key = catalogKey(provider);
+    let promise = catalogPromises.get(key);
     if (!promise) {
+      const accountId = catalogAccountId(provider);
       promise = Promise.resolve()
-        .then(() => runtime.getCatalog(provider, { force }))
+        .then(() => runtime.getCatalog(provider, { force, ...(accountId ? { accountId } : {}) }))
         .then((catalog) => {
           if (Array.isArray(catalog?.models) && catalog.models.length > 0) {
-            catalogCache.set(provider, { value: catalog, fetchedAt: Date.now() });
+            catalogCache.set(key, { value: catalog, fetchedAt: Date.now() });
             saveDiskCatalogCache(catalogCachePath, catalogCache);
           }
           return catalog;
         })
         .finally(() => {
-          if (catalogPromises.get(provider) === promise) catalogPromises.delete(provider);
+          if (catalogPromises.get(key) === promise) catalogPromises.delete(key);
         });
-      catalogPromises.set(provider, promise);
+      catalogPromises.set(key, promise);
     }
     return raceCallerSignal(promise, signal);
   }
 
   function cachedProviderCatalog(provider) {
-    const entry = catalogCache.get(provider);
+    const key = catalogKey(provider);
+    const entry = catalogCache.get(key);
     if (!entry) return null;
-    if (Date.now() - entry.fetchedAt >= STREAM_CATALOG_REFRESH_MS && !catalogPromises.has(provider)) {
+    if (Date.now() - entry.fetchedAt >= STREAM_CATALOG_REFRESH_MS && !catalogPromises.has(key)) {
       // Refresh metadata opportunistically, but never put model generation
       // behind a provider's CLI/remote catalog endpoint.
       void providerCatalog(provider, undefined, { force: true }).catch(() => {});
@@ -458,7 +490,8 @@ export function createDockyardLlmAdapter({
   }
 
   function warmProviderCatalog(provider) {
-    if (!catalogCache.has(provider) && !catalogPromises.has(provider)) {
+    const key = catalogKey(provider);
+    if (!catalogCache.has(key) && !catalogPromises.has(key)) {
       // A cold catalog is advisory for generation. The selected model is
       // already known by DSH, so discovery can finish after the request starts.
       void providerCatalog(provider).catch(() => {});
@@ -498,7 +531,7 @@ export function createDockyardLlmAdapter({
     },
 
     async listModels(provider, signal) {
-      await ensureRuntimeReady();
+      await ensurePreparedForListing();
       if (!providerHasConnectedAccount(runtime, provider)) return [];
       const cached = cachedProviderCatalog(provider);
       const catalog = cached ?? await providerCatalog(provider, signal);
@@ -512,7 +545,7 @@ export function createDockyardLlmAdapter({
     },
 
     async resolveModel(provider, model, signal) {
-      await ensureRuntimeReady();
+      await ensurePreparedForListing();
       const fallback = resolveFallbackModelMetadata(provider, model);
       if (!providerHasConnectedAccount(runtime, provider)) return fallback;
       const cached = cachedProviderCatalog(provider);

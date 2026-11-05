@@ -25,6 +25,7 @@ const POLICY_KEYS = Object.freeze({
   sticky_session: "policy.sticky_session",
   round_robin: "policy.round_robin",
   failover: "policy.failover",
+  allowance_fullest: "policy.allowance_fullest",
 });
 
 function text(t, key, params) {
@@ -218,6 +219,9 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-health{color:#9ce5dc}.dockyard-dsh-health[data-bad=true]{color:#ff9a83}
 .dockyard-dsh-account-note{padding:4px 8px;border-radius:var(--dsw-radius-xs,4px);background:rgba(203,183,255,.07);color:var(--dsw-alias-label-caption,#8b93a1);font-size:11px;line-height:16px;text-align:left}
 .dockyard-dsh-account-error{max-width:100%;overflow:hidden;color:#ff9a83;font-size:11px;line-height:16px;text-align:left;text-overflow:ellipsis;white-space:nowrap}
+.dockyard-dsh-alert{max-width:100%;overflow:hidden;font-size:11px;line-height:16px;text-align:left;text-overflow:ellipsis;white-space:nowrap;color:#ffd28a}
+.dockyard-dsh-alert[data-severity="warning"]{color:#ff9a83}
+.dockyard-dsh-alert[data-severity="info"]{color:#9fc4ff}
 .dockyard-dsh-quota{display:flex;flex-direction:column;gap:5px}
 .dockyard-dsh-quota-row{display:flex;align-items:center;gap:8px}
 .dockyard-dsh-quota-copy{min-width:0;flex:1;color:var(--dsw-alias-label-tertiary,#a9b0ba);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -446,7 +450,35 @@ function quotaWindowRows(quota, t) {
 }
 
 function quotaRowsForAccount(account, t) {
-  return quotaWindowRows(account?.quota, t);
+  const rows = quotaWindowRows(account?.quota, t);
+  // A provider that reports a spendable amount (pay-as-you-go) shows it as one
+  // more row; the rendering below already knows how to draw a balance row.
+  const amount = account?.balance?.amount;
+  if (typeof amount === "number" && Number.isFinite(amount) && !rows.some((row) => row?.kind === "balance")) {
+    rows.push({
+      id: "balance",
+      kind: "balance",
+      name: text(t, "quota.balance"),
+      remaining: amount,
+      limit: account?.balance?.limit ?? null,
+      unit: account?.balance?.unit ?? null,
+      currency: account?.balance?.currency ?? account?.balance?.unit ?? null,
+      updatedAt: account?.balance?.updatedAt,
+    });
+  }
+  return rows;
+}
+
+/** Advisory quota warnings for one account, as a single line each. */
+function alertLines(account) {
+  const alerts = Array.isArray(account?.alerts) ? account.alerts : [];
+  return alerts
+    .filter((alert) => alert && typeof alert.message === "string")
+    .map((alert, index) => h("div", {
+      key: `${alert.kind ?? "alert"}-${alert.windowId ?? index}`,
+      className: "dockyard-dsh-alert",
+      "data-severity": alert.severity ?? "info",
+    }, alert.message));
 }
 
 function quotaPercent(window) {
@@ -1576,8 +1608,13 @@ function AccountCard({ account, current, providerId, controller, busy, t }) {
       h("span", { className: "dockyard-dsh-health", "data-bad": ["degraded", "cooldown", "expired", "exhausted"].includes(health) }, `${healthLabel(health, t)} · ${accountPlanLabel(account, t)}`),
       account.refresh?.nextRefreshAt ? h("span", null, `OAuth: ${formatDate(account.refresh.nextRefreshAt, t)}`) : null),
     account.resources?.identityNote ? h("div", { className: "dockyard-dsh-account-note" }, account.resources.identityNote) : null,
+    account.health?.status === "expired" && account.health?.cooldownUntil
+      ? h("div", { className: "dockyard-dsh-account-note" },
+        text(t, "account.relistAt", { time: formatDate(account.health.cooldownUntil, t) }))
+      : null,
     account.health?.lastError ? h("div", { className: "dockyard-dsh-account-error", title: account.health.lastError }, account.health.lastError) : null,
-    quotaView(account, t));
+    quotaView(account, t),
+    ...alertLines(account));
 }
 
 function candidateMatchesAccount(candidate, account) {

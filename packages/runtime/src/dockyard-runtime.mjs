@@ -1,4 +1,5 @@
 import { ACCOUNT_HEALTH, ACCOUNT_SELECTION_POLICY, ModuleRuntime, PROVIDER_BEHAVIOR_CAPABILITIES } from "../../core/src/index.mjs";
+import { evaluateQuotaAlerts } from "../../core/src/quota-alerts.mjs";
 import { AccountPool } from "../../account-pool/src/index.mjs";
 import { DshInjectionBridge } from "../../dsh-bridge/src/index.mjs";
 import { createDefaultSecretStore } from "../../vault/src/index.mjs";
@@ -331,6 +332,11 @@ export class DockyardRuntime {
   #providerImportQueues = new Map();
   #initialized = false;
   #initPromise = null;
+  // Phase 1 (pools, module registration, injection bridge) resolves here. The
+  // model picker only needs phase 1: auto-provisioning a free account can wait
+  // on a provider round-trip and must not hold the picker hostage.
+  #prepared = false;
+  #preparePromise = null;
 
   constructor({
     providers = createDefaultProviderEntries(),
@@ -363,10 +369,18 @@ export class DockyardRuntime {
     return this;
   }
 
-  async init() {
-    if (this.#initialized) return this;
-    if (this.#initPromise) return this.#initPromise;
-    this.#initPromise = (async () => {
+  /**
+   * Phase 1 of startup: build every account pool, register the provider
+   * modules, and mount the DSH injection bridge. Disk-bound and fast. The
+   * account auto-provisioning in {@link init} is deliberately not part of this
+   * phase, because it can wait on a provider's network round-trip.
+   *
+   * @returns The runtime, once the pools and routes exist.
+   */
+  async whenPrepared() {
+    if (this.#prepared) return this;
+    if (this.#preparePromise) return this.#preparePromise;
+    this.#preparePromise = (async () => {
       const state = await this.stateStore.load();
       if (state?.pools?.opencode || state?.pools?.kilo || state?.modelSelection?.providers?.opencode || state?.modelSelection?.providers?.kilo) {
         if (typeof this.stateStore.update === "function") {
@@ -385,7 +399,6 @@ export class DockyardRuntime {
       }
       await this.contextWindowOverrides.ready();
       await this.modelSelection.ready();
-      const autoImported = new Set();
       for (const entry of this.providers) {
         const providerId = entry.module.manifest.id;
         const stored = state.pools?.[providerId] ?? {};
@@ -406,6 +419,31 @@ export class DockyardRuntime {
         if (stored.defaultAccountId && pool.get(stored.defaultAccountId)) {
           pool.setDefaultAccount(stored.defaultAccountId);
         }
+        this.#entries.set(providerId, { ...entry, pool });
+        // A DSH host may already have mounted a provider module before the
+        // Dockyard integration starts. Reuse that registration instead of
+        // aborting the whole subscription snapshot with a module conflict.
+        if (!this.runtime.has(providerId)) await this.runtime.register(entry.module);
+        await this.bridge.mountProvider(entry.module, pool);
+      }
+      this.#prepared = true;
+      return this;
+    })();
+    try {
+      return await this.#preparePromise;
+    } finally {
+      this.#preparePromise = null;
+    }
+  }
+
+  async init() {
+    if (this.#initialized) return this;
+    if (this.#initPromise) return this.#initPromise;
+    this.#initPromise = (async () => {
+      await this.whenPrepared();
+      const autoImported = new Set();
+      for (const [providerId, entry] of this.#entries) {
+        const pool = entry.pool;
         const hasExpiredOfficialSession = pool.list().some((a) => a.resources?.accountScope === "active_official_session" && a.health?.status === ACCOUNT_HEALTH.EXPIRED);
         const hasNoEligible = pool.list().filter((a) => a.health?.status !== ACCOUNT_HEALTH.EXPIRED).length === 0;
         const autoProvision = this.hasProviderCapability(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT)
@@ -440,12 +478,6 @@ export class DockyardRuntime {
             // best-effort auto-import
           }
         }
-        this.#entries.set(providerId, { ...entry, pool });
-        // A DSH host may already have mounted a provider module before the
-        // Dockyard integration starts. Reuse that registration instead of
-        // aborting the whole subscription snapshot with a module conflict.
-        if (!this.runtime.has(providerId)) await this.runtime.register(entry.module);
-        await this.bridge.mountProvider(entry.module, pool);
       }
       // Free/zero-config providers start with an auto-provisioned account; make
       // sure that initial state is persisted even when no new import happened
@@ -836,6 +868,32 @@ export class DockyardRuntime {
     return { account: entry.pool.get(accountId), diagnostics };
   }
 
+  /**
+   * Retry accounts parked by an expired authorization once their cooldown has
+   * passed. Cheap when nothing is parked, so a host may call it on a timer.
+   *
+   * @returns {Promise<Array<{providerId: string, accountId: string}>>} Accounts
+   *   that were retried (whether or not they came back healthy).
+   */
+  async relistExpiredAccounts(providerId = null) {
+    await this.whenPrepared();
+    const providerIds = providerId ? [providerId] : [...this.#entries.keys()];
+    const relisted = [];
+    for (const id of providerIds) {
+      const pool = this.#entries.get(id)?.pool;
+      if (typeof pool?.relistable !== "function") continue;
+      for (const account of pool.relistable()) {
+        try {
+          await this.refreshAccount(id, account.accountId, { tolerateFailure: true });
+          relisted.push({ providerId: id, accountId: account.accountId });
+        } catch {
+          // Still parked; the next pass will try again.
+        }
+      }
+    }
+    return relisted;
+  }
+
   async refreshAll(providerId = null) {
     await this.init();
     if (!providerId) {
@@ -930,7 +988,19 @@ export class DockyardRuntime {
     await this.init();
     const entry = this.#entry(providerId);
     const accounts = entry.pool.list().map((account) => providerAccount(entry.pool, account.accountId));
-    return entry.module.getCatalog(providerContext(this, { ...context, accounts }));
+    // A provider serves a different model list per account (a paid tier and a
+    // free one differ), so discovery resolves the account that would serve the
+    // request instead of asking "the provider" in the abstract.
+    const accountId = context.accountId
+      ?? entry.pool.getDefaultAccountId()
+      ?? (accounts.length === 1 ? accounts[0].accountId : null);
+    return entry.module.getCatalog(providerContext(this, { ...context, accounts, accountId }));
+  }
+
+  /** The account a provider would use by default, if it has one. */
+  getDefaultAccountId(providerId) {
+    const pool = this.#entries.get(providerId)?.pool;
+    return typeof pool?.getDefaultAccountId === "function" ? pool.getDefaultAccountId() : null;
   }
 
   async invoke(providerId, request, context = {}) {
@@ -978,7 +1048,12 @@ export class DockyardRuntime {
         manifest: { ...entry.module.manifest },
         policy: entry.pool.policy,
         defaultAccountId: entry.pool.getDefaultAccountId(),
-        accounts: entry.pool.list(),
+        // Advisory warnings derived from what the provider already reported: a
+        // window nearly spent, or one that resets soon while mostly unused.
+        accounts: entry.pool.list().map((account) => ({
+          ...account,
+          alerts: evaluateQuotaAlerts(account),
+        })),
       })),
       routes: this.bridge.listRoutes(),
     };

@@ -44,18 +44,17 @@ async function openAiContent(content, attachments) {
       blocks.push({ type: "text", text: `[Tool Result ${part.toolCallId ?? part.id ?? ""}]\n${textFromContent(part.content ?? part.output ?? part.result ?? part.text)}` });
       continue;
     }
-    const call = toolCallPart(part);
-    if (call) {
-      blocks.push({ type: "text", text: `[Tool Call ${call.name ?? call.function?.name ?? "tool"}] ${JSON.stringify(parseToolArguments(call.arguments ?? call.input ?? call.function?.arguments))}` });
-      continue;
-    }
+    // A tool call is sent as a real `tool_calls` entry by buildGrokMessages.
+    // Flattening it into "[Tool Call name] {...}" text as well taught the model
+    // to imitate that literal format and print it instead of calling a tool.
+    if (toolCallPart(part)) continue;
     const text = textFromContent(part);
     if (text) blocks.push({ type: "text", text });
   }
   return blocks;
 }
 
-async function buildGrokMessages(request, attachments) {
+export async function buildGrokMessages(request, attachments) {
   const result = [];
   if (typeof request.system === "string" && request.system.length > 0) {
     result.push({ role: "system", content: request.system });

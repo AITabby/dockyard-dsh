@@ -369,3 +369,25 @@ test("hermes driver forwards the durable attachment service to the transport", a
   assert.ok(captured, "executor must be invoked");
   assert.equal(captured.attachments, attachments, "driver must forward context.attachments");
 });
+
+test("buildHermesMessages never sends an empty content array", async () => {
+  // The strict models on this gateway reject the whole request with
+  // "messages[N]: content must not be an empty array". An assistant turn that
+  // only called a tool used to produce exactly that.
+  const messages = await buildHermesMessages({
+    messages: [
+      { role: "user", content: "check the time" },
+      { role: "assistant", content: [{ type: "tool-call", id: "c1", name: "clock", arguments: { tz: "UTC" } }] },
+      { role: "tool", toolCallId: "c1", content: "12:00" },
+      { role: "assistant", content: [{ type: "text", text: "" }] },
+    ],
+  });
+  for (const message of messages) {
+    assert.notEqual(Array.isArray(message.content) && message.content.length === 0, true,
+      `message for ${message.role} has an empty content array`);
+  }
+  const call = messages.find((message) => message.role === "assistant" && message.tool_calls);
+  assert.equal(call.content, "");
+  assert.equal(call.tool_calls[0].function.name, "clock");
+  assert.equal(call.tool_calls[0].function.arguments, JSON.stringify({ tz: "UTC" }));
+});

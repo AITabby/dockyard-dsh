@@ -50,6 +50,9 @@ function contextLogger(ctx, name) {
  * their provider-neutral routes to DSH, so adding a future provider does not
  * require another branch in the DSH integration.
  */
+// How often parked accounts are retried, in milliseconds.
+const RELIST_INTERVAL_MS = 5 * 60 * 1000;
+
 export function apply(ctx, config = {}) {
   patchFakeIpVpnSupport();
   const runtimeOptions = { ...(config.runtimeOptions ?? {}) };
@@ -124,6 +127,15 @@ export function apply(ctx, config = {}) {
         .filter(([providerId]) => connected.has(providerId)
           || runtime.hasProviderCapability?.(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP))
         .map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [], secretStore: runtime.secretStore }).catch(() => null)));
+
+      // An account whose authorization expired is parked, not deleted: an
+      // official client may have rotated the token in the meantime. Retry those
+      // on a slow timer so the panel is not the only thing that revives one.
+      const relistTimer = setInterval(() => {
+        Promise.resolve(runtime.relistExpiredAccounts?.() ?? null).catch(() => {});
+      }, RELIST_INTERVAL_MS);
+      relistTimer.unref?.();
+      if (typeof ctx.on === "function") ctx.on("dispose", () => clearInterval(relistTimer));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
     });

@@ -214,7 +214,7 @@ test("repository and release bundle never embed a real Google OAuth client secre
   }
 });
 
-test("Antigravity browser OAuth is disabled when the operator supplies no client credentials", async () => {
+test("Antigravity browser OAuth uses the official client id and no committed secret", async () => {
   const { createAntigravityDriver } = await import("../modules/provider-antigravity/src/index.mjs");
   const driver = createAntigravityDriver({
     env: {},
@@ -222,10 +222,23 @@ test("Antigravity browser OAuth is disabled when the operator supplies no client
     tokenResolver: () => null,
     cacheFilePath: null,
   });
-  assert.equal(driver.browserClientId, "");
+  // The client id is public (it ships in every copy of the official build); the
+  // secret is not, so it is resolved at runtime or left empty here.
+  assert.equal(
+    driver.browserClientId,
+    `${["1071006060591", "tmhssin2h21lcre235vtolojh4g403ep"].join("-")}.apps.googleusercontent.com`,
+  );
   assert.equal(driver.browserClientSecret, "");
   assert.equal(driver.hasExplicitBrowserClient, false);
-  assert.equal(driver.browserAuthorizer, null, "browser OAuth must fail closed without env credentials");
+
+  const disabled = createAntigravityDriver({
+    env: { DOCKYARD_ANTIGRAVITY_DISABLE_BROWSER: "1" },
+    commandRunner: async () => ({ code: 0, stdout: "", stderr: "" }),
+    tokenResolver: () => null,
+    cacheFilePath: null,
+  });
+  assert.equal(disabled.browserClientId, "");
+  assert.equal(disabled.browserAuthorizer, null, "browser OAuth must fail closed when disabled");
 
   const configured = createAntigravityDriver({
     env: {

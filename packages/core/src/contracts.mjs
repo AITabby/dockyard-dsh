@@ -14,6 +14,10 @@ export const ACCOUNT_SELECTION_POLICY = Object.freeze({
   STICKY_SESSION: "sticky_session",
   ROUND_ROBIN: "round_robin",
   FAILOVER: "failover",
+  // Spread work towards the account with the most headroom left, so accounts
+  // whose windows reset later are not drained first. Falls back to round robin
+  // when no account reports quota windows.
+  ALLOWANCE_FULLEST: "allowance_fullest",
 });
 
 export const PROVIDER_CAPABILITIES = Object.freeze([
@@ -141,6 +145,16 @@ export function createAccountRecord(input, now = new Date()) {
   };
 }
 
+/** What a pay-as-you-go provider says is left to spend. */
+export function createBalanceSnapshot(input = {}, now = new Date()) {
+  return {
+    amount: numberOrNull(input.amount, "balance.amount"),
+    unit: stringOrNull(input.unit),
+    updatedAt: isoOrNull(input.updatedAt, "balance.updatedAt") ?? now.toISOString(),
+    source: stringOrNull(input.source) ?? "unknown",
+  };
+}
+
 export function accountSummary(account) {
   return {
     providerId: account.providerId,
@@ -149,6 +163,7 @@ export function accountSummary(account) {
     email: account.email,
     subscription: { ...account.subscription },
     quota: structuredClone(account.quota ?? {}),
+    balance: account.balance ? structuredClone(account.balance) : null,
     refresh: { ...account.refresh },
     resources: structuredClone(account.resources ?? {}),
     health: { ...account.health },

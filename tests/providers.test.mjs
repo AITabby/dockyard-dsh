@@ -739,7 +739,7 @@ test("Antigravity agy browser sessions refresh captured and legacy credentials t
   let quotaCredential = null;
   const driver = createAntigravityDriver({
     cliPath: "agy",
-    env: { HOME: home, DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath },
+    env: { DOCKYARD_ANTIGRAVITY_DISABLE_BROWSER: "1", HOME: home, DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath },
     commandRunner: async (_command, args, options) => {
       refreshCalls += 1;
       assert.deepEqual(args, ["models"]);
@@ -1948,7 +1948,10 @@ test("subscription drivers start browser OAuth without a local CLI", async () =>
   const antigravityUrl = new URL(antigravityStarted.authorizationUrl);
   assert.equal(antigravityUrl.origin, "https://accounts.google.com");
   assert.equal(antigravityUrl.pathname, "/o/oauth2/v2/auth");
-  assert.equal(antigravityUrl.searchParams.get("redirect_uri"), "http://localhost:51121/oauth-callback");
+  // The loopback listener falls back to an ephemeral port when 51121 is taken
+  // (a running DSH Web instance holding an auth session does that), and the URL
+  // then carries the port actually bound.
+  assert.match(antigravityUrl.searchParams.get("redirect_uri"), /^http:\/\/localhost:\d+\/oauth-callback$/);
   assert.equal(antigravityUrl.searchParams.get("code_challenge_method"), "S256");
   await antigravity.cancelAuthorization(antigravityStarted.sessionId);
 
