@@ -42,13 +42,13 @@ Defines `ModuleRuntime`, `EventBus`, provider contracts, account contracts, and 
 
 ### `dockyard-account-pool`
 
-Stores account metadata without raw credentials, resolves `credentialRef` values through a secure provider-owned resolver, and applies manual, sticky-session, round-robin, or failover selection.
+Stores account metadata without raw credentials, resolves `credentialRef` values through a secure provider-owned resolver, and applies manual, sticky-session, round-robin, failover, or most-allowance-left selection.
 
 Selection happens in the runtime, not in the menu bar, so concurrent DSH sessions follow the same policy.
 
 ### Provider modules
 
-The registered modules (see `scripts/build.mjs` and `packages/runtime/src/dockyard-runtime.mjs`) are `provider-codex` (id `openai-codex`), `provider-antigravity`, `provider-grok`, `provider-claude`, `provider-cursor`, `provider-opencode`, `provider-workbuddy`, `provider-kilo`, `provider-commandcode`, `provider-hermes`, and `provider-openrouter-free`. Each module receives a provider driver for:
+The registered modules (see `packages/runtime/src/dockyard-runtime.mjs`) are `provider-codex` (id `openai-codex`), `provider-antigravity`, `provider-grok`, `provider-claude`, `provider-cursor`, `provider-workbuddy`, `provider-commandcode`, `provider-hermes`, and `provider-openrouter-free`. `provider-opencode` and `provider-kilo` still exist and are validated by `scripts/build.mjs`, but they are no longer registered: neither free tier is open to third-party clients. Each module receives a provider driver for:
 
 - OAuth discovery and provider-native official authorization;
 - refresh and re-authentication;
@@ -66,11 +66,12 @@ The macOS menu bar is a host. It presents live state and sends commands, but it 
 
 The first slice (Codex + Antigravity OAuth, `AccountPool` import, DSH route
 mounting, and the macOS menu bar host) is long complete. The current runtime
-registers eleven provider modules (listed above); the DSH Web plugin is the
+registers nine provider modules (listed above); the DSH Web plugin is the
 primary host and the macOS menu bar remains an optional host. The
 `host consumes stable contracts` rule still applies: provider-specific
 behavior belongs in each module's manifest/capabilities, not in host-side
 `providerId === ...` branches. Security-relevant invariants (no embedded
-OAuth client credentials, fail-closed credential storage off macOS, HTTPS-only
-remote endpoints) are enforced by `tests/security-regression.test.mjs` and
+OAuth client credentials, fail-closed credential storage when neither the host
+Credentials service nor the macOS Keychain is available, HTTPS-only remote
+endpoints) are enforced by `tests/security-regression.test.mjs` and
 `tests/security.test.mjs`.

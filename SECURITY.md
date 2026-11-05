@@ -4,8 +4,8 @@ Dockyard DSH runs inside the DSH process and therefore has the permissions of
 the host process. The plugin can:
 
 - register an LLM adapter and provider-native request transports;
-- read and write provider credentials through DSH Credentials or macOS
-  Keychain;
+- read and write provider credentials through the host DSH Credentials service,
+  or the macOS Keychain on darwin;
 - start provider-owned OAuth CLI commands with isolated temporary profiles;
 - call the configured provider endpoints over HTTPS.
 
