@@ -252,6 +252,10 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
    gear is still shown beside it (the gear is not a direct child svg of the
    marked row). Hide every svg inside that one row so only the mark remains. */
 [data-dsh-market-nav-icon] svg{display:none!important}
+/* Dockyard subscription row: replace the shell's generic gear with a distinct
+   key-card glyph, so it no longer reads as a plugin settings section. */
+[data-dockyard-subscriptions-nav] svg{display:none!important}
+[data-dockyard-subscriptions-nav]::before{content:'';flex:none;width:16px;height:16px;background-color:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.4' stroke-linejoin='round'%3E%3Crect x='1.5' y='3.5' width='13' height='9' rx='1.5'/%3E%3Cpath d='M1.5 6.5h13M4 10h3'/%3E%3C/svg%3E") no-repeat center/16px 16px;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.4' stroke-linejoin='round'%3E%3Crect x='1.5' y='3.5' width='13' height='9' rx='1.5'/%3E%3Cpath d='M1.5 6.5h13M4 10h3'/%3E%3C/svg%3E") no-repeat center/16px 16px}
 `;
 
 function installStyles() {
@@ -323,6 +327,40 @@ export function syncModelMenuGroups(menu) {
  * section/title roles are stable API surface; generated CSS classes are not
  * used for the behavior.
  */
+// The shell gives every third-party settings section the same gear, so the
+// Dockyard subscription row would look like a generic plugin. Mark our own nav
+// row by its translated label (same technique as dshmarket's mark) so CSS can
+// hide the gear and paint a distinct glyph for it only.
+const SUBSCRIPTION_NAV_MARKER = "data-dockyard-subscriptions-nav";
+const SUBSCRIPTION_NAV_ROW_SELECTOR = '[role="dialog"] nav button';
+
+function installSubscriptionNavIcon(resolveLabel) {
+  if (typeof document === "undefined" || !document.body || typeof MutationObserver === "undefined") return () => {};
+  const sync = () => {
+    const wanted = String(resolveLabel() ?? "").trim();
+    for (const row of document.querySelectorAll(SUBSCRIPTION_NAV_ROW_SELECTOR)) {
+      if (wanted.length > 0 && String(row.textContent ?? "").trim() === wanted) row.setAttribute(SUBSCRIPTION_NAV_MARKER, "");
+      else row.removeAttribute(SUBSCRIPTION_NAV_MARKER);
+    }
+  };
+  let scheduled = false;
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    queueMicrotask(() => {
+      scheduled = false;
+      sync();
+    });
+  };
+  sync();
+  const observer = new MutationObserver(schedule);
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  return () => {
+    observer.disconnect();
+    for (const row of document.querySelectorAll(`[${SUBSCRIPTION_NAV_MARKER}]`)) row.removeAttribute(SUBSCRIPTION_NAV_MARKER);
+  };
+}
+
 function installModelMenuFolding() {
   if (typeof document === "undefined" || !document.body || typeof MutationObserver === "undefined") return () => {};
   const boundMenus = new Set();
@@ -2573,6 +2611,7 @@ export async function apply(ctx) {
   const disposeModelMenuFolding = installModelMenuFolding();
   const disposeLocale = ctx.locale.register(DOCKYARD_LOCALE_NS, DOCKYARD_LOCALES);
   const t = ctx.locale.bind(DOCKYARD_LOCALE_NS);
+  const disposeSubscriptionNavIcon = installSubscriptionNavIcon(() => text(t, "settings.subscriptionSection"));
   const disposeRemote = await ctx.remote.$mount(TYPERT_REMOTE);
   // Read the dynamically mounted namespace through the service registry. The
   // traceable `ctx.remote.dockyard` property requires a declared inject and
@@ -2610,6 +2649,7 @@ export async function apply(ctx) {
   });
   return async () => {
     disposeModelMenuFolding();
+    disposeSubscriptionNavIcon();
     disposeLocale?.();
     controller.dispose();
     await disposeRemote?.();
