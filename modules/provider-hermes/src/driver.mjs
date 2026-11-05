@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { createCredentialRef } from "../../../packages/vault/src/index.mjs";
 import {
   createAccountRecord,
   createQuotaSnapshot,
 } from "../../../packages/core/src/contracts.mjs";
+import { ValidationError } from "../../../packages/core/src/errors.mjs";
 import {
   assertSecureEndpointUrl,
   fetchJson,
@@ -19,6 +21,18 @@ import {
 } from "./native-transport.mjs";
 
 const PROVIDER_ID = "hermes";
+
+/** Stable per-key identifier so pasting the same key twice reuses one account. */
+function fingerprintApiKey(apiKey) {
+  return createHash("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
+}
+
+/** Display form of a key: never echo the whole secret back into the UI. */
+function maskApiKey(apiKey) {
+  const value = String(apiKey ?? "");
+  if (value.length <= 8) return "••••";
+  return `${value.slice(0, 4)}…${value.slice(-4)}`;
+}
 
 export const BUILTIN_HERMES_MODELS = Object.freeze([
   {
@@ -314,7 +328,10 @@ export class HermesDriver {
   }
 
   async importAccount(candidate, context = {}) {
-    const accountId = candidate?.accountId || "hermes-default";
+    const manual = candidate?.source === "manual_api_key";
+    const accountId = candidate?.accountId
+      || (manual ? `hermes-${fingerprintApiKey(candidate?.apiKey)}` : null)
+      || "hermes-default";
     const ref = createCredentialRef(PROVIDER_ID, accountId);
 
     if (context.secretStore) {
@@ -369,6 +386,30 @@ export class HermesDriver {
         status: "healthy",
       },
     });
+  }
+
+
+  /**
+   * Import a manually entered API Key. Hermes authenticates with static keys
+   * (~/.hermes/auth.json, ~/.nous/auth.json or an environment variable), never
+   * OAuth, so this is the panel's account entry point without the official CLI.
+   */
+  async importSource(source, context = {}) {
+    const rawKey = typeof source === "string"
+      ? source
+      : (source?.apiKey ?? source?.key ?? source?.token ?? "");
+    const apiKey = String(rawKey ?? "").trim();
+    if (!apiKey) throw new ValidationError("请输入有效的 Hermes / Nous API Key");
+    const label = typeof source === "object" && typeof source?.label === "string"
+      ? source.label.trim()
+      : "";
+    const masked = maskApiKey(apiKey);
+    return [await this.importAccount({
+      apiKey,
+      source: "manual_api_key",
+      displayName: label || `Hermes Key (${masked})`,
+      email: masked,
+    }, context)];
   }
 
   async getActiveSession() {

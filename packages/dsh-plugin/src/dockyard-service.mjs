@@ -449,10 +449,15 @@ export class DockyardDshService {
     const manifest = manifestFor(this.runtime, providerInput);
     if (!manifest) throw new Error(`未知 provider：${providerInput}`);
     if (!manifest.capabilities?.includes("oauth_authorization")) {
+      // A key-only provider has no authorization page to walk the user to; the
+      // useful instruction is where the key goes, not which client to log into.
+      const keyOnly = manifest.capabilities?.includes("api_key_auth");
       return {
         status: "unsupported",
         providerId: manifest.id,
-        instructions: `${providerName(manifest)} 没有独立的官方授权入口；请先在官方客户端或官方环境登录/切换账号，然后扫描本机登录态，再添加候选。`,
+        instructions: keyOnly
+          ? `${providerName(manifest)} 使用 API Key 认证；请在面板的「添加新的 API Key」中填入，或扫描本机已有的登录态。`
+          : `${providerName(manifest)} 没有独立的官方授权入口；请先在官方客户端或官方环境登录/切换账号，然后扫描本机登录态，再添加候选。`,
       };
     }
 

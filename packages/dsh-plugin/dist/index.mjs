@@ -14048,6 +14048,7 @@ function summarizeKiloCandidate(candidate2) {
 }
 
 // modules/provider-commandcode/src/driver.mjs
+import { createHash as createHash10 } from "node:crypto";
 import { existsSync as existsSync6, readdirSync as readdirSync2, readFileSync as readFileSync6 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
 import { join as join15 } from "node:path";
@@ -14611,6 +14612,14 @@ function createCommandCodeNativeExecutor({
 
 // modules/provider-commandcode/src/driver.mjs
 var PROVIDER_ID14 = "commandcode";
+function fingerprintApiKey(apiKey) {
+  return createHash10("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
+}
+function maskApiKey(apiKey) {
+  const value = String(apiKey ?? "");
+  if (value.length <= 8) return "\u2022\u2022\u2022\u2022";
+  return `${value.slice(0, 4)}\u2026${value.slice(-4)}`;
+}
 function capitalize(str) {
   if (!str || typeof str !== "string") return "";
   return str.charAt(0).toUpperCase() + str.slice(1);
@@ -14997,12 +15006,14 @@ var CommandCodeDriver = class {
   }
   async importAccount(candidate2, context = {}) {
     const auth = extractCommandCodeAuth();
-    const accountId = candidate2?.accountId || auth?.userId || "commandcode-default";
+    const manual = candidate2?.source === "manual_api_key";
+    const apiKey = candidate2?.apiKey || auth?.apiKey || "";
+    const accountId = candidate2?.accountId || (manual ? `commandcode-${fingerprintApiKey(apiKey)}` : auth?.userId) || "commandcode-default";
     const ref = createCredentialRef(PROVIDER_ID14, accountId);
     if (context.secretStore) {
       await context.secretStore.write(ref, {
         type: "commandcode_auth",
-        apiKey: auth?.apiKey || candidate2?.apiKey || "",
+        apiKey,
         userId: accountId,
         userName: candidate2?.displayName || auth?.userName || null,
         email: candidate2?.email || null
@@ -15032,6 +15043,24 @@ var CommandCodeDriver = class {
         status: "healthy"
       }
     });
+  }
+  /**
+   * Import a manually entered API Key. Command Code authenticates with a static
+   * key (environment variable or ~/.commandcode/auth.json), never OAuth, so this
+   * is the panel's account entry point for users who have no official CLI.
+   */
+  async importSource(source, context = {}) {
+    const rawKey = typeof source === "string" ? source : source?.apiKey ?? source?.key ?? source?.token ?? "";
+    const apiKey = String(rawKey ?? "").trim();
+    if (!apiKey) throw new ValidationError("\u8BF7\u8F93\u5165\u6709\u6548\u7684 Command Code API Key");
+    const label = typeof source === "object" && typeof source?.label === "string" ? source.label.trim() : "";
+    const masked = maskApiKey(apiKey);
+    return [await this.importAccount({
+      apiKey,
+      source: "manual_api_key",
+      displayName: label || `Command Code Key (${masked})`,
+      email: masked
+    }, context)];
   }
   async getActiveSession() {
     return this.discover().then((res) => Array.isArray(res?.candidates) ? res.candidates[0] : null);
@@ -15175,11 +15204,16 @@ function createCommandCodeModule({ driver = {} } = {}) {
       "invoke",
       "stream",
       PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
-      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP
+      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP,
+      // Authenticates with a static API Key; the panel renders a key field for it.
+      PROVIDER_BEHAVIOR_CAPABILITIES.API_KEY_AUTH
     ],
     driver
   });
 }
+
+// modules/provider-hermes/src/driver.mjs
+import { createHash as createHash11 } from "node:crypto";
 
 // modules/provider-hermes/src/native-transport.mjs
 import { existsSync as existsSync7, readFileSync as readFileSync7, statSync as statSync3 } from "node:fs";
@@ -15614,6 +15648,14 @@ function createHermesNativeExecutor({
 
 // modules/provider-hermes/src/driver.mjs
 var PROVIDER_ID16 = "hermes";
+function fingerprintApiKey2(apiKey) {
+  return createHash11("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
+}
+function maskApiKey2(apiKey) {
+  const value = String(apiKey ?? "");
+  if (value.length <= 8) return "\u2022\u2022\u2022\u2022";
+  return `${value.slice(0, 4)}\u2026${value.slice(-4)}`;
+}
 var BUILTIN_HERMES_MODELS = Object.freeze([
   {
     id: "deepseek/deepseek-v4.1-flash",
@@ -15876,7 +15918,8 @@ var HermesDriver = class {
     };
   }
   async importAccount(candidate2, context = {}) {
-    const accountId = candidate2?.accountId || "hermes-default";
+    const manual = candidate2?.source === "manual_api_key";
+    const accountId = candidate2?.accountId || (manual ? `hermes-${fingerprintApiKey2(candidate2?.apiKey)}` : null) || "hermes-default";
     const ref = createCredentialRef(PROVIDER_ID16, accountId);
     if (context.secretStore) {
       await context.secretStore.write(ref, {
@@ -15927,6 +15970,24 @@ var HermesDriver = class {
         status: "healthy"
       }
     });
+  }
+  /**
+   * Import a manually entered API Key. Hermes authenticates with static keys
+   * (~/.hermes/auth.json, ~/.nous/auth.json or an environment variable), never
+   * OAuth, so this is the panel's account entry point without the official CLI.
+   */
+  async importSource(source, context = {}) {
+    const rawKey = typeof source === "string" ? source : source?.apiKey ?? source?.key ?? source?.token ?? "";
+    const apiKey = String(rawKey ?? "").trim();
+    if (!apiKey) throw new ValidationError("\u8BF7\u8F93\u5165\u6709\u6548\u7684 Hermes / Nous API Key");
+    const label = typeof source === "object" && typeof source?.label === "string" ? source.label.trim() : "";
+    const masked = maskApiKey2(apiKey);
+    return [await this.importAccount({
+      apiKey,
+      source: "manual_api_key",
+      displayName: label || `Hermes Key (${masked})`,
+      email: masked
+    }, context)];
   }
   async getActiveSession() {
     return this.discover().then((res) => Array.isArray(res?.candidates) ? res.candidates[0] : null);
@@ -16028,7 +16089,9 @@ function createHermesModule({ driver = {} } = {}) {
       "invoke",
       "stream",
       PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
-      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP
+      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP,
+      // Authenticates with a static API Key; the panel renders a key field for it.
+      PROVIDER_BEHAVIOR_CAPABILITIES.API_KEY_AUTH
     ],
     driver
   });
@@ -16130,7 +16193,7 @@ function isOpenRouterModelCoolingDown(modelId, nowMs = Date.now()) {
 function hashApiKeyFingerprint(apiKey) {
   return crypto.createHash("sha256").update(String(apiKey ?? "")).digest("hex").slice(0, 12);
 }
-function maskApiKey(apiKey) {
+function maskApiKey3(apiKey) {
   const trimmed = String(apiKey ?? "").trim();
   if (trimmed.length <= 12) return "sk-or-***";
   return `${trimmed.slice(0, 9)}\u2026${trimmed.slice(-4)}`;
@@ -16208,9 +16271,9 @@ function discoverLocalOpenRouterKeys({ homeDir = os.homedir(), env = process.env
     discovered.push({
       apiKey: trimmed,
       fingerprint: fp,
-      maskedKey: maskApiKey(trimmed),
+      maskedKey: maskApiKey3(trimmed),
       source,
-      label: label || `OpenRouter Key (${maskApiKey(trimmed)})`
+      label: label || `OpenRouter Key (${maskApiKey3(trimmed)})`
     });
   };
   if (env?.OPENROUTER_FREE_API_KEY) {
@@ -16228,7 +16291,7 @@ function discoverLocalOpenRouterKeys({ homeDir = os.homedir(), env = process.env
         addCandidate(
           item.apiKey,
           `dsh_credentials:${item.ref}`,
-          item.label || `OpenRouter Key (${maskApiKey(item.apiKey)})`
+          item.label || `OpenRouter Key (${maskApiKey3(item.apiKey)})`
         );
       }
     }
@@ -17288,7 +17351,7 @@ var OpenRouterFreeDriver = class {
       throw new ValidationError("OpenRouter API Key is required to import account");
     }
     const fingerprint = candidate2.fingerprint ?? hashApiKeyFingerprint(apiKey);
-    const masked = maskApiKey(apiKey);
+    const masked = maskApiKey3(apiKey);
     const credentialRef = createCredentialRef(PROVIDER_ID17, candidate2.accountId);
     await writeSecret(context.secretStore, credentialRef, {
       type: "openrouter_free_auth",
@@ -17361,7 +17424,7 @@ var OpenRouterFreeDriver = class {
     }
     const customLabel = typeof source === "object" && typeof source?.label === "string" ? source.label.trim() : "";
     const fingerprint = hashApiKeyFingerprint(apiKey);
-    const masked = maskApiKey(apiKey);
+    const masked = maskApiKey3(apiKey);
     const accountId = `openrouter-free-${fingerprint}`;
     const account = await this.importAccount({
       candidateId: `openrouter-free:${accountId}`,
@@ -18970,10 +19033,11 @@ var DockyardDshService = class {
     const manifest = manifestFor2(this.runtime, providerInput);
     if (!manifest) throw new Error(`\u672A\u77E5 provider\uFF1A${providerInput}`);
     if (!manifest.capabilities?.includes("oauth_authorization")) {
+      const keyOnly = manifest.capabilities?.includes("api_key_auth");
       return {
         status: "unsupported",
         providerId: manifest.id,
-        instructions: `${providerName(manifest)} \u6CA1\u6709\u72EC\u7ACB\u7684\u5B98\u65B9\u6388\u6743\u5165\u53E3\uFF1B\u8BF7\u5148\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u5B98\u65B9\u73AF\u5883\u767B\u5F55/\u5207\u6362\u8D26\u53F7\uFF0C\u7136\u540E\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\uFF0C\u518D\u6DFB\u52A0\u5019\u9009\u3002`
+        instructions: keyOnly ? `${providerName(manifest)} \u4F7F\u7528 API Key \u8BA4\u8BC1\uFF1B\u8BF7\u5728\u9762\u677F\u7684\u300C\u6DFB\u52A0\u65B0\u7684 API Key\u300D\u4E2D\u586B\u5165\uFF0C\u6216\u626B\u63CF\u672C\u673A\u5DF2\u6709\u7684\u767B\u5F55\u6001\u3002` : `${providerName(manifest)} \u6CA1\u6709\u72EC\u7ACB\u7684\u5B98\u65B9\u6388\u6743\u5165\u53E3\uFF1B\u8BF7\u5148\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u5B98\u65B9\u73AF\u5883\u767B\u5F55/\u5207\u6362\u8D26\u53F7\uFF0C\u7136\u540E\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\uFF0C\u518D\u6DFB\u52A0\u5019\u9009\u3002`
       };
     }
     const existingStart = this.#authStartPromises.get(manifest.id);
@@ -19252,9 +19316,9 @@ var dockyardDshConstants = Object.freeze({
 });
 
 // packages/dsh-plugin/src/dockyard-credential-store.mjs
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 function dshCredentialRef(ref) {
-  const digest = createHash10("sha256").update(String(ref)).digest("hex");
+  const digest = createHash12("sha256").update(String(ref)).digest("hex");
   return `DOCKYARD_DSH_${digest}`;
 }
 function parseCredential(value) {

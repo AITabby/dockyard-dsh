@@ -2037,11 +2037,16 @@ function DockyardPopup({ providerId, provider, directory, modelDirectories, dire
       h("div", { className: "dockyard-dsh-toolbar" },
         h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy, onClick: onOpenOverview }, text(t, "subscription.all")),
         h("button", { type: "button", className: "dockyard-dsh-action dockyard-dsh-action-primary", disabled: busy, onClick: () => controller.refresh(providerId) }, controlState.action === "refresh" ? text(t, "status.refreshing") : text(t, "native.refresh")),
-        h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy || authInProgress, onClick: () => controller.login(providerId) }, controlState.action === "login"
-          ? (supportsOAuthLogin ? text(t, "status.waitingVerification") : text(t, "status.readingInstructions"))
-          : authInProgress ? text(t, "status.verificationInProgress")
-            : needsReauthorization && supportsOAuthLogin ? text(t, "auth.reauthorize")
-              : supportsOAuthLogin ? text(t, "auth.loginAdd") : text(t, "auth.officialInstructions")),
+        // A key-only provider authenticates by pasting a key into the form
+        // below; "official login instructions" would describe a flow it does
+        // not have, and would be the only thing on screen for the wrong reason.
+        supportsOAuthLogin || !supportsApiKeyAuth
+          ? h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy || authInProgress, onClick: () => controller.login(providerId) }, controlState.action === "login"
+            ? (supportsOAuthLogin ? text(t, "status.waitingVerification") : text(t, "status.readingInstructions"))
+            : authInProgress ? text(t, "status.verificationInProgress")
+              : needsReauthorization && supportsOAuthLogin ? text(t, "auth.reauthorize")
+                : supportsOAuthLogin ? text(t, "auth.loginAdd") : text(t, "auth.officialInstructions"))
+          : null,
         h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy, onClick: () => controller.scan(providerId) }, controlState.action === "scan" ? text(t, "status.scanning") : text(t, "auth.scanLocal"))),
       controlState.auth?.providerId === providerId
         ? controlState.auth.authorizationCodeRequired || providerId === "antigravity"

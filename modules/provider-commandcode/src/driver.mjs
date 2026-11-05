@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import {
   createAccountRecord,
   createQuotaSnapshot,
 } from "../../../packages/core/src/contracts.mjs";
+import { ValidationError } from "../../../packages/core/src/errors.mjs";
 import {
   resolveContextWindowFromModel,
   resolveMaxTokensFromModel,
@@ -24,6 +26,18 @@ import {
 } from "./native-transport.mjs";
 
 const PROVIDER_ID = "commandcode";
+
+/** Stable per-key identifier so pasting the same key twice reuses one account. */
+function fingerprintApiKey(apiKey) {
+  return createHash("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
+}
+
+/** Display form of a key: never echo the whole secret back into the UI. */
+function maskApiKey(apiKey) {
+  const value = String(apiKey ?? "");
+  if (value.length <= 8) return "••••";
+  return `${value.slice(0, 4)}…${value.slice(-4)}`;
+}
 
 function capitalize(str) {
   if (!str || typeof str !== "string") return "";
@@ -462,13 +476,18 @@ export class CommandCodeDriver {
 
   async importAccount(candidate, context = {}) {
     const auth = extractCommandCodeAuth();
-    const accountId = candidate?.accountId || auth?.userId || "commandcode-default";
+    const manual = candidate?.source === "manual_api_key";
+    // A key the user just pasted must survive the auth file that is still on disk.
+    const apiKey = candidate?.apiKey || auth?.apiKey || "";
+    const accountId = candidate?.accountId
+      || (manual ? `commandcode-${fingerprintApiKey(apiKey)}` : auth?.userId)
+      || "commandcode-default";
     const ref = createCredentialRef(PROVIDER_ID, accountId);
 
     if (context.secretStore) {
       await context.secretStore.write(ref, {
         type: "commandcode_auth",
-        apiKey: auth?.apiKey || candidate?.apiKey || "",
+        apiKey,
         userId: accountId,
         userName: candidate?.displayName || auth?.userName || null,
         email: candidate?.email || null,
@@ -498,6 +517,29 @@ export class CommandCodeDriver {
         status: "healthy",
       },
     });
+  }
+
+  /**
+   * Import a manually entered API Key. Command Code authenticates with a static
+   * key (environment variable or ~/.commandcode/auth.json), never OAuth, so this
+   * is the panel's account entry point for users who have no official CLI.
+   */
+  async importSource(source, context = {}) {
+    const rawKey = typeof source === "string"
+      ? source
+      : (source?.apiKey ?? source?.key ?? source?.token ?? "");
+    const apiKey = String(rawKey ?? "").trim();
+    if (!apiKey) throw new ValidationError("请输入有效的 Command Code API Key");
+    const label = typeof source === "object" && typeof source?.label === "string"
+      ? source.label.trim()
+      : "";
+    const masked = maskApiKey(apiKey);
+    return [await this.importAccount({
+      apiKey,
+      source: "manual_api_key",
+      displayName: label || `Command Code Key (${masked})`,
+      email: masked,
+    }, context)];
   }
 
   async getActiveSession() {
