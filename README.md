@@ -4,180 +4,118 @@
 
 [中文](#中文) · [English](#english)
 
-> **Current status / 当前状态:** Developer preview · **macOS DMG available** · **Windows EXE built; upload in progress.** · **Current release: v0.1.18**
+> Developer preview · 插件版本 **0.1.18** · macOS 与 Windows 均已验证 · Provider 逻辑全部留在各 provider 模块里
+
+---
 
 ## 中文
 
-### Dockyard DSH 是什么
+### 这是什么
 
-Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harness，提供一个统一的账号池、模型目录、额度状态和 provider-native 请求入口。它是 DSH 的原生 bundle/plugin，不需要另起一个代理网关，也不把 provider 逻辑塞进 DSH 核心。
+Dockyard DSH 把多个官方 OAuth 授权和官方客户端会话接入 DeepSeek Harness，提供**一个共享的账号池、模型目录、额度视图和 provider-native 请求链路**。它是 DSH 的原生 bundle/plugin：不需要另起代理网关，也不把 provider 逻辑写进 DSH 核心。
 
-当前包含的 provider 模块：
+### 支持的 provider
 
-- **Codex** — 官方浏览器 OAuth、CLI fallback 和原生 Responses 请求链路。
-- **Antigravity** — Google 官方浏览器 OAuth（沿用官方客户端身份，因此免费档位可用）、多账号各自独立的
-  refresh token、**按账号**拉取模型目录（不同账号的模型表不同）、额度/credits 和原生 Gemini SSE 请求链路。
-- **Grok** — xAI 官方浏览器 OAuth、CLI fallback、实时模型目录、官方 Build credits 周期和 provider-native streaming 请求。额度读取使用官方 `/billing?format=credits`（转发 `GetGrokCreditsConfig`）；若上游只返回周期，剩余值保持未知。
-- **Claude** — Claude 官方浏览器 OAuth（支持带 state 的手动回调地址/授权码）、CLI fallback 与原生请求适配。
-- **Cursor** — Cursor 官方浏览器登录轮询、CLI fallback 与原生请求适配。
-- **WorkBuddy** — WorkBuddy 国际版官方桌面端账号会话自动检测、零成本免费模型发现（`hy4free`、`hy4`、`deepseek-v4.1-flash`、`hy3`）、实时模型按需选择、推理档位与官方端点原生流式请求。它没有 OAuth 授权页，也没有可填写的 API Key：账号必须先在官方桌面端登录，插件只负责读取该客户端保存的会话。
-- **Command Code** — Command Code 官方网关直接接入，支持 100+ 款开源及旗舰大模型（DeepSeek V4.1 Flash/Pro、Claude Sonnet 5.5/4.6、Grok 4.7、Muse Spark 1.2、Mistral Large 4 等），自动读取本地认证、套餐订阅与多窗口额度（5 小时 / 每周），支持原生流式与 Native Tool Calling。
-- **OpenRouter Free** — 从本机 DSH 凭据与环境变量发现 OpenRouter API key，动态拉取 `:free` 模型目录、按上下文窗口匹配、实时额度路由，使用官方端点原生流式请求。
-- **Hermes** — Hermes 官方会话接入、实时模型目录与原生流式请求。
-- **Kilo** — Kilo 官方会话接入、实时模型目录与原生流式请求。
-- **OpenCode** — OpenCode 官方会话接入（provider id `opencode`）、实时模型目录与原生流式请求。
+| Provider | 账号来源 | 请求链路 |
+|---|---|---|
+| **Codex** | 官方浏览器 OAuth（loopback PKCE），CLI 作为兼容 fallback | 原生 Responses |
+| **Antigravity** | Google 官方浏览器 OAuth，**沿用官方客户端身份**（免费档位可用）；每个账号独立 refresh token | 原生 Gemini SSE |
+| **Grok** | xAI 官方浏览器 OAuth，CLI fallback | 原生流式；额度取官方 credits |
+| **Claude** | 官方浏览器 OAuth，支持带 `state` 的手动回调地址 | 原生请求适配 |
+| **Cursor** | 官方登录轮询（`loginDeepControl` + `/auth/poll`） | 原生请求适配 |
+| **WorkBuddy** | **仅 macOS**：读取官方桌面端已保存的会话。没有授权页，也没有可填写的 Key | 官方端点原生流式 |
+| **Command Code** | 本地认证文件，或在面板里粘贴 API Key | 官方网关，原生流式 + tool calling |
+| **Hermes** | 本地会话文件，或在面板里粘贴 API Key | 原生流式 |
+| **OpenRouter Free** | 从 DSH 凭据或环境变量发现 API Key | 官方端点，`:free` 目录动态拉取 |
 
-如果对应的官方客户端、CLI 或 OAuth 源没有安装、没有登录，Dockyard 会返回明确的 unavailable/degraded 状态；不会用硬编码的账号、模型、版本、套餐或额度伪造可用结果。
+官方客户端、CLI 或 OAuth 源缺失时，Dockyard 明确返回 `unavailable` / `degraded`；**不会用硬编码的账号、模型、版本、套餐或额度伪造可用结果**。
 
-### 主要功能
+> OpenCode 与 Kilo 在早期版本里出现过，现已移出插件：两者的免费额度不对第三方客户端开放（OpenCode 的免费档位只认官方客户端身份），留着只会给出不可用的假象。
 
-- 在 DSH 内使用 `/dockyard` 命令管理账号和 provider。
-- 点击“登录添加账号”直接打开 provider 官方浏览器授权页，选择账号并安全导入账号池；provider 不可用时保留 CLI fallback。
-- 扫描本机已有的官方登录态；扫描和新增账号是两个独立操作，已有账号不会被“新增”静默重复导入。
-- 支持手动选择、sticky session、round-robin、failover 和 **额度最充足优先**（按各账号最紧张窗口的剩余量选号）
-  五种账号池策略。
-- 读取 provider 返回的实时模型目录、推理档位、套餐和额度窗口。
-- 所有命令、模型选择和 LLM 生成都读取同一个 Dockyard runtime，不维护第二套账号池或额度缓存。
-- 额度是活的：窗口剩余偏低、或「即将重置却还剩很多」时在账号卡片上直接给出提示；provider 上报余额时一并显示。
-- 失效账号不丢弃：授权过期后进入冷却（默认 30 分钟），冷却结束自动重试刷新，成功即重新进入可用池。
+### 关键能力
 
-### 平台支持：macOS 与 Windows
+- **统一账号池**：五种策略——手动选择、会话粘性、轮询、故障转移、**额度最充足优先**（按各账号最紧窗口的剩余比例选号，无额度数据时回落轮询）。
+- **失效账号不丢弃**：授权过期后进入冷却（默认 30 分钟），冷却结束自动重试刷新，成功即重新进入可用池。
+- **按账号的模型目录**：Antigravity 等 provider 的模型表随账号不同（同一 provider 的付费档和免费档看到的模型就不一样），目录按账号分别缓存与展示。
+- **额度是活的**：窗口剩余 ≤15% 时提示偏低；**6 小时内要重置却还剩 ≥50%** 时提醒（这条最容易白白浪费）；provider 上报余额时一并显示。
+- **面板不打扰**：模型列表默认折叠、点开才读取一次；后台只静默刷新额度数字，不把面板切成加载态。
+- 所有命令、模型选择和生成共用同一个 runtime，不存在第二套账号池或额度缓存。
 
-**当前版本为 0.1.18；macOS DMG 已提供，Windows EXE 已完成构建，待上传到对应 Release 并完成下载验证。插件本身在 Windows 上可直接安装使用。**
+### 平台支持
 
-macOS 完整功能依赖以下原生能力：
+| | macOS | Windows |
+|---|---|---|
+| 浏览器 OAuth（Codex / Antigravity / Grok / Claude / Cursor） | ✅ | ✅ 同一套 loopback 链路 |
+| 凭据存储 | macOS Keychain + Swift helper | 宿主 DSH 的 Credentials 服务 |
+| CLI fallback | ✅ | ✅ 解析 `.cmd` shim 并经 `%ComSpec%` 启动，停止时 `taskkill` 清理进程树 |
+| 本机会话扫描 | ✅ | ❌ 按不可用降级，请改用浏览器 OAuth |
+| WorkBuddy | ✅ | ❌ 只能读 macOS 桌面端会话 |
 
-- 凭据存储使用 macOS Keychain 和 Swift helper。
-- 浏览器 OAuth 由 DSH GUI 打开 provider 官方授权页面，并使用 PKCE、state 校验和 loopback/manual-code 回调；CLI fallback 才使用官方 CLI。
-- 扫描模式仍可读取 Cursor、Antigravity 等 provider 的 macOS 官方桌面端或本机 CLI 会话状态。
+Windows 上如果宿主 DSH 没有 Credentials 服务，插件会**明确报错**，不会静默丢登录态。
 
-Windows 上的实际行为：
+### 安装
 
-- **浏览器 OAuth 可用。** Codex、Antigravity、Grok、Claude、Cursor 的授权页由 DSH GUI 在新标签页打开，回调走同一条 loopback 链路，与 macOS 无差别。
-- **凭据存储走 DSH Credentials 服务。** 插件的 macOS Keychain 后端只在 darwin 上可用；Windows 上读写凭证统一由宿主 DSH 的 Credentials 服务完成。宿主没有该服务时会明确报错，不会静默丢弃登录态。
-- **CLI fallback 可用。** npm 全局安装的 provider CLI 在 Windows 上是 `.cmd` shim，插件会解析并经由 `%ComSpec%` 启动；停止时用 `taskkill` 清理整棵进程树。
-- **本机会话扫描仍仅限 macOS。** `/dockyard scan` 读不到 Windows 上的官方桌面端登录态，此时按不可用降级；请改用浏览器 OAuth 添加账号。
-- **WorkBuddy 与 OpenCode 在 Windows 上不可用**：两者的账号都只能从 macOS 官方桌面端的本机会话读取，既没有浏览器 OAuth，也没有可填写的 Key，因此在 Windows 上会报告 unavailable。WorkBuddy 另有一个面向自动化的 `WORKBUDDY_ACCESS_TOKEN` 环境变量，属高级用法，不是面向用户的登录方式。
+#### 方式一：插件市场索引（DSH v0.2.1+）
 
-### macOS 独立应用与 DMG
+设置 → **插件** → **发现** → **管理索引源…**，添加：
 
-如果不想手动安装 Node.js、pnpm 或 DSH，可以直接下载自带完整运行时的 macOS 通用 DMG：
-
-[下载最新 Dockyard DSH DMG](https://github.com/AITabby/dockyard-dsh/releases/latest/download/Dockyard-DSH-macos-universal.dmg)
-
-也可以在 Mac 上自行构建：
-
-```sh
-./apps/macos/build-dmg.sh
+```
+https://raw.githubusercontent.com/AITabby/dockyard-dsh/main/market/index.json
 ```
 
-DMG 内置 Node.js、DSH CLI、完整 `web` profile 和 Dockyard 插件；双击 App 即可运行，不需要另外安装 Node.js、pnpm 或 DSH。它会在原生 WebKit 窗口中显示内置的 DSH Web profile；OAuth 授权页会交给系统默认浏览器打开。当前构建包含 Apple Silicon 和 Intel 两个架构。详细说明见 [`apps/macos/README.md`](apps/macos/README.md)。
+在列表里找到 **Dockyard DSH** 点安装即可。
 
-仍需注意：这是 macOS 专用、当前为本地 ad-hoc 签名的开发预览；某些 provider 的官方 CLI 扫描/兼容性 fallback 仍可能需要对应 CLI。
-Antigravity 的浏览器授权使用官方客户端的 OAuth client：client id 是公开常量，client secret 在首次授权时从本机已安装的
-官方客户端/`agy` 二进制中读取并缓存在本地（不进入仓库），也可以用 `DOCKYARD_ANTIGRAVITY_CLIENT_ID` / `_CLIENT_SECRET` 覆盖。
+#### 方式二：一条命令
 
-### 一条命令安装 Dockyard plugin
-
-已经有 DSH CLI 和 pnpm 时，把下面这一行交给终端或智能体执行即可：
-
-```sh
-dsh plugin --profile web add github:AITabby/dockyard-dsh
-```
-
-它把仓库中已提交的预构建 host/client bundle 安装到默认 `web` profile，安装过程中不执行 `prepare`。安装完成后重启 DSH Web。
-
-> `@dockyard-dsh/install` 安装器尚未发布到 npm，因此这里改用 DSH 自带的安装命令。
-
-### 从源码安装 Dockyard plugin / Web profile
-
-Dockyard DSH 作为源码 plugin 安装到已有 DSH Web profile 时，才需要先安装 DSH CLI，并确认 `dsh` 命令可用。
-
-当前上游 DSH CLI 的 npm 安装方式：
-
-```sh
-# DSH 当前是 developer preview；请使用上游要求的 Node.js 版本。
-# 当前上游 package.json 要求 Node 22.19+ 的 22.x，或 Node 24+。
-npm install --global @deepseek-ai/dsh
-npm install --global pnpm
-
-dsh --version
-pnpm --version
-```
-
-上游安装和兼容性变化以 [DeepSeek Harness 官方仓库](https://github.com/deepseek-ai/deepseek-harness) 为准。当前 bundle 已按 `@deepseek-ai/dsh@0.1.5-rc.2` 验证。DSH 仍处于 developer preview，升级已有 DSH_HOME 前请先备份数据，并先用独立的 `DSH_HOME` 验证。
-
-#### 通过 DSH 插件市场（发现页）图形化安装
-
-DSH（v0.2.1+）支持通过插件市场索引（Marketplace Index）在 Web 界面中一键安装：
-
-1. 打开 DSH Web 侧边栏 -> **设置 (Settings)** -> **插件 (Plugins)** -> **发现 (Discover)**。
-2. 点击 **管理索引源… (Index sources)**，添加 Dockyard 官方市场索引源：
-   ```
-   https://raw.githubusercontent.com/AITabby/dockyard-dsh/main/market/index.json
-   ```
-3. 在列表中找到 **Dockyard DSH**，点击 **安装 (Install)** 即可完成安装。
-
-#### 最简便的方式：直接安装到 DSH Web profile
-
-`web` 是 DSH 自带的完整 Web profile；不要新建只包含 Dockyard bundle 的空 profile，否则不会启动 Web GUI。
+已有 DSH CLI 和 pnpm 时：
 
 ```sh
 dsh plugin --profile web add github:AITabby/dockyard-dsh
 dsh web
 ```
 
-默认访问 `http://127.0.0.1:3080`。首次启动可先检查组合配置：
+默认地址 `http://127.0.0.1:3080`。仓库已提交构建产物（`dist/index.mjs`、`lib/client.js`），安装时不执行 `prepare`，装完重启 DSH Web 即可。
 
-```sh
-dsh web --dump-config
-```
-
-如需固定版本，建议 pin 到已验证的 commit：
+要固定版本就 pin 到已验证的 commit：
 
 ```sh
 dsh plugin --profile web add github:AITabby/dockyard-dsh#<commit-sha>
 ```
 
-当前发布 commit 已提交可运行的 host/client bundle，安装时不执行 `prepare`。但 `@earendil-works/pi-ai` 的传递依赖 `@google/genai` 与 `protobufjs` 带有构建脚本，pnpm 10+ 默认拦截，第一次安装会以 `ERR_PNPM_IGNORED_BUILDS` 结束并在 `package.json` 留下依赖但不会把它加入 profile 的 bundle 列表。两种处理方式：
+> **pnpm 10+ 的拦截**：传递依赖 `@google/genai` 与 `protobufjs` 带构建脚本，默认被拦，首次安装可能以 `ERR_PNPM_IGNORED_BUILDS` 结束且不会进入 profile 的 bundle 列表。处理方式二选一：
+>
+> - GUI 安装时按提示点 **Allow these scripts and retry**；
+> - 命令行安装时先在 profile 的 `pnpm-workspace.yaml` 写入，再重跑命令：
+>
+> ```yaml
+> allowBuilds:
+>   '@google/genai': true
+>   protobufjs: true
+> ```
 
-- 在 DSH Web 的 **Plugins** 页面安装时，按提示点 **Allow these scripts and retry**；
-- 用命令行安装时，先在 profile 的 `pnpm-workspace.yaml` 里加上这两个名字，再重跑上面的命令：
-
-```yaml
-allowBuilds:
-  '@google/genai': true
-  protobufjs: true
-```
-
-若你 pin 到旧 commit，或 pnpm 报告了其他构建脚本，请只在检查源码后按终端提示配置。
-
-#### 需要本地修改时：克隆后安装
+#### 方式三：克隆后安装（需要改代码时）
 
 ```sh
 git clone https://github.com/AITabby/dockyard-dsh.git
 cd dockyard-dsh
 npm install
-npm test                 # 可选：验证环境
-npm run build            # 修改 source 或 bundle 过期时需要
-
+npm run build            # 改了 source 或产物过期时才需要
 dsh plugin --profile web add .
 dsh web
 ```
 
-要隔离测试、不影响默认 DSH home：
+隔离测试、不影响默认 DSH home：
 
 ```sh
 DSH_HOME=/tmp/dockyard-dsh-home dsh plugin --profile web add .
-DSH_HOME=/tmp/dockyard-dsh-home dsh web --dump-config
 DSH_HOME=/tmp/dockyard-dsh-home dsh web
 ```
 
-仓库已提交 `packages/dsh-plugin/dist/index.mjs` 和 `packages/dsh-plugin/lib/client.js`；普通用户不需要先运行测试或构建即可使用已发布 commit。
+#### 可选：独立应用
 
-### DSH 内的命令
+不想自己装 Node.js / pnpm / DSH 时，[Releases](https://github.com/AITabby/dockyard-dsh/releases) 页面提供自带完整运行时的 macOS DMG 和 Windows EXE。**注意这些是较早版本的打包产物，可能落后于仓库里的插件版本**；需要最新功能请用上面三种方式之一。
 
-在运行中的 DSH profile 中：
+### 在 DSH 里使用
 
 ```text
 /dockyard status
@@ -191,225 +129,175 @@ DSH_HOME=/tmp/dockyard-dsh-home dsh web
 /dockyard remove <provider> <accountId>
 ```
 
-新增账号流程是 `/dockyard login <provider>`（直接打开官方浏览器 OAuth）；如果要导入已有本机登录态，则使用 `/dockyard scan <provider>` 后再 `/dockyard add <provider>`，最后用 `/dockyard status` 和 `/dockyard models <provider>` 检查实时状态。
+- **加新账号**：`/dockyard login <provider>` 直接打开官方浏览器授权页。
+- **导入已有登录态**：先 `/dockyard scan <provider>`，再 `/dockyard add <provider>`。扫描和新增是两个独立操作，已有账号不会被"新增"静默重复导入。
 
-### 官方浏览器 OAuth / active session 边界
+### Antigravity 说明
 
-- **Codex、Antigravity、Grok、Claude、Cursor** 的“登录添加账号”默认由 DSH 直接打开官方浏览器授权页，不要求本机先安装 CLI；CLI 仅作为兼容性 fallback。
-- Codex 使用 loopback PKCE；Antigravity 使用 Google loopback OAuth；Grok 使用 xAI loopback OAuth；Cursor 使用官方 `loginDeepControl` + `/auth/poll`；Claude 使用官方网页回调，手动输入时要求粘贴带 `state` 的完整回调地址或 `code#state`。
-- Antigravity 的 Google OAuth client ID/secret 必须通过 `DOCKYARD_ANTIGRAVITY_CLIENT_ID` 和 `DOCKYARD_ANTIGRAVITY_CLIENT_SECRET` 提供，仓库不内置凭据；需要浏览器 OAuth 时，先在启动 DSH 的 shell 中设置这两个环境变量（或写入 `~/.zshrc`），不要提交到仓库。
-- **扫描**仍可读取本机已有的官方客户端/CLI 会话；扫描和浏览器新增账号不会互相替代。
-- provider 的 OAuth endpoint、token response 或授权范围变化时，Dockyard 会显示 unavailable/degraded，不猜测未验证的字段。
+它是目前最需要解释的一个：
 
-### 凭据和安全边界
+- 授权走 Google 官方浏览器 OAuth，用的是**官方客户端自己的 OAuth client**。client id 是公开标识，client secret 在首次授权时**从本机已安装的官方客户端或 `agy` 二进制里读取**并缓存在本地，仓库内不保存任何凭据。
+- 想覆盖的话可以设置 `DOCKYARD_ANTIGRAVITY_CLIENT_ID` / `DOCKYARD_ANTIGRAVITY_CLIENT_SECRET`，自有 client 优先生效。
+- 账号拿到的 Code Assist 项目由插件按官方客户端的流程自动解析，必要时自动开通；**不需要你自己准备 Google Cloud 项目**。
+- 每个账号有独立的 refresh token 和独立的模型目录，因此可以多账号共存、切换、轮询。
+- 授权全程不调用 `agy`，所以不会触发 macOS 那个"找不到钥匙串"的系统弹窗。
 
-- 原始 OAuth/token 不写入 Git、账号池快照或页面状态；运行时只传递 opaque credential reference。
-- 浏览器 OAuth 的 refresh token 持久化在安全凭据存储中；支持 refresh 的 provider 会在重启后自动刷新短期 access token，只有 provider 撤销 refresh token 或改变协议时才需要重新授权。
-- macOS 默认使用 Keychain；非 macOS 默认 credential store 会 fail closed，不会静默退回不安全的内存存储。
-- 额度、模型、套餐、账号身份和过期时间都来自 provider 的实时结果；provider 不返回时保持 `unknown`/`null`。
-- 发布和提 issue 前请阅读 [`SECURITY.md`](SECURITY.md)，不要提交 token、OAuth 文件、Keychain 值或包含敏感信息的日志。
+### 凭据与安全
 
-### 开发与验证
+- 原始 OAuth token / secret 不进入 Git、账号池快照或页面状态；运行时只传递 opaque credential reference。
+- refresh token 存在安全凭据存储里，重启后自动续期；只有 provider 撤销或改变协议时才需要重新授权。
+- macOS 默认 Keychain；Windows 走宿主 Credentials 服务。宿主没有该服务时 fail closed，不退回不安全的内存存储。
+- 额度、模型、套餐、身份、过期时间都来自 provider 的实时结果；provider 不返回就保持 `unknown`/`null`。
+- 提 issue 前请读 [`SECURITY.md`](SECURITY.md)，不要提交 token、OAuth 文件、Keychain 值或含敏感信息的日志。
+
+### 开发
 
 ```sh
 npm install
 npm test
-npm run build
-npm run build:plugin
+npm run build          # 重建 host bundle 与 client bundle
 npm pack --dry-run
 ```
 
-发布包的关键内容是：
+发布包的关键内容：
 
 ```text
-packages/dsh-plugin/dist/index.mjs   # Node/host bundle
-packages/dsh-plugin/lib/client.js    # browser client bundle
-packages/dsh-plugin/cordis.patch.yml # DSH bundle layer
+packages/dsh-plugin/dist/index.mjs    # Node/host bundle
+packages/dsh-plugin/lib/client.js     # 浏览器 client bundle
+packages/dsh-plugin/cordis.patch.yml  # DSH bundle 层
 ```
 
-`npm pack --dry-run` 应只显示发布入口、client bundle、patch、必要的 package metadata 和安全说明。修改 provider source 后，重新执行 `npm run build`，再提交更新后的构建产物。
+改动 provider source 后必须重新 `npm run build` 并一起提交产物。
 
 ### 项目结构
 
 ```text
-packages/core/              模块生命周期、契约、事件和 DSH route
-packages/account-pool/      账号发现、选择、健康状态和 credential reference
-packages/runtime/           一个共享的 Dockyard runtime
-packages/dsh-plugin/        DSH bundle、LLM adapter、命令和 client UI
-packages/vault/             macOS Keychain backend
-modules/provider-*/         各 provider 自己的 OAuth、目录、额度和 native transport
-tests/                      安全、生命周期、provider 和 runtime 测试
+packages/core/          模块生命周期、契约、事件、DSH route
+packages/account-pool/  账号发现、选择策略、健康与冷却、credential reference
+packages/runtime/       共享的 Dockyard runtime
+packages/dsh-bridge/    DSH 注入桥与 LLM adapter
+packages/dsh-plugin/    DSH bundle、命令、面板 UI
+packages/vault/         macOS Keychain 后端
+modules/provider-*/     各 provider 自己的 OAuth、目录、额度和 native transport
+tests/                  安全、生命周期、provider 与 runtime 测试
 ```
 
-核心原则是：provider-specific 逻辑留在 provider module，账号选择留在 runtime，host 只消费稳定契约。不要在 host 中新增 provider 特判，也不要把动态 provider 数据写成常量。
+核心原则：**provider 特定逻辑留在 provider module，账号选择留在 runtime，host 只消费稳定契约。** 不要在 host 里加 provider 特判，也不要把动态 provider 数据写成常量。
 
 ### 已知限制
 
-- DSH 本身仍处于 developer preview，上游可能发生 breaking changes。
-- provider 的官方 CLI、客户端路径、OAuth 返回字段和额度接口都可能变化；Dockyard 对缺失字段保持未知。
-- 浏览器 OAuth 多账号依赖 provider 官方授权页和 token response；如果 provider 暂停或改变该流程，必须重新验证 endpoint，而不是猜测协议。
-- Windows 上浏览器 OAuth、CLI fallback 与原生 HTTPS 请求均可用；本机会话扫描和 WorkBuddy / OpenCode 仍仅限 macOS。Windows EXE 已完成构建但仍在上传和验证中。
+- DSH 本身仍是 developer preview，上游可能有 breaking changes。
+- provider 的 CLI、客户端路径、OAuth 返回字段和额度接口都可能变；缺失字段保持未知，不做猜测。
+- 浏览器多账号依赖 provider 官方授权页与 token response；对方改了流程就需要重新验证，而不是猜协议。
+- Windows 上的本机会话扫描与 WorkBuddy 不可用。
+
+---
 
 ## English
 
 ### What it is
 
-Dockyard DSH is a native DeepSeek Harness bundle/plugin that connects official OAuth and official client sessions to one shared account pool, model catalog, quota view, and provider-native request path. It does not require a second proxy gateway and it does not put provider-specific branches into the DSH core.
+Dockyard DSH connects official OAuth authorizations and official client sessions to one shared account pool, model catalog, quota view, and provider-native request path inside DeepSeek Harness. It is a native DSH bundle/plugin: no side-car gateway, and no provider logic pushed into the DSH core.
 
-Current provider modules:
+### Supported providers
 
-- **Codex** — official browser OAuth, CLI fallback, and native Responses transport.
-- **Antigravity** — Google browser OAuth, official local session, live model catalog, quota/credits, and native Gemini SSE transport.
-- **Grok** — xAI browser OAuth, CLI fallback, live model catalog, official Build credits periods, and provider-native streaming. Quota uses the official `/billing?format=credits` surface (forwarding `GetGrokCreditsConfig`); if the upstream only returns a period, the remaining value stays unknown.
-- **Claude** — official browser OAuth (including state-bound manual callback/code entry), CLI fallback, and native request adapter.
-- **Cursor** — official browser login polling, CLI fallback, and native request adapter.
-- **WorkBuddy** — WorkBuddy international desktop account-session auto-detection, zero-credit free model discovery (`hy4free`, `hy4`, `deepseek-v4.1-flash`, `hy3`), real-time model selection, reasoning tiers, and official streaming completions. It has neither an OAuth page nor an API Key field: the account has to be signed in to the official desktop client first, and the plugin only reads the session that client stores.
-- **Command Code** — direct integration with Command Code official gateway, supporting 100+ open-source and flagship LLMs (DeepSeek V4.1 Flash/Pro, Claude Sonnet 5.5/4.6, Grok 4.7, Muse Spark 1.2, Mistral Large 4, etc.), auto-detecting local credentials, subscription plans, multi-window quotas (5-hour / weekly), and full streaming with native tool-calling.
-- **OpenRouter Free** — discovers OpenRouter API keys from local DSH credentials and the environment, fetches a live `:free` model catalog, matches context windows, applies live quota routing, and streams through the official endpoint.
-- **Hermes** — official Hermes session integration, live model catalog, and native streaming.
-- **Kilo** — official Kilo session integration, live model catalog, and native streaming.
-- **OpenCode** — official OpenCode session integration (provider id `opencode`), live model catalog, and native streaming.
+| Provider | Account source | Transport |
+|---|---|---|
+| **Codex** | Official browser OAuth (loopback PKCE); CLI as compatibility fallback | Native Responses |
+| **Antigravity** | Google browser OAuth using the **official client identity** (so the free tier works); one refresh token per account | Native Gemini SSE |
+| **Grok** | xAI browser OAuth, CLI fallback | Native streaming; quota from official credits |
+| **Claude** | Official browser OAuth, plus state-bound manual callback entry | Native request adapter |
+| **Cursor** | Official login polling (`loginDeepControl` + `/auth/poll`) | Native request adapter |
+| **WorkBuddy** | **macOS only**: reads the session the official desktop client stored. No OAuth page, no key field | Official streaming |
+| **Command Code** | Local auth file, or paste an API key in the panel | Official gateway, streaming with tool calling |
+| **Hermes** | Local session file, or paste an API key in the panel | Native streaming |
+| **OpenRouter Free** | Discovers an API key from DSH credentials or the environment | Official endpoint, live `:free` catalog |
 
-When an official client, CLI, or OAuth source is missing or not signed in, Dockyard reports an explicit unavailable/degraded state. It does not invent accounts, models, versions, plans, or quota values.
+When an official client, CLI, or OAuth source is missing, Dockyard reports an explicit `unavailable` / `degraded` state. It never invents accounts, models, versions, plans, or quota values.
 
-### Features
+> OpenCode and Kilo appeared in early builds and have been removed: neither free tier is open to third-party clients (OpenCode grants it to the official client identity only), so keeping them would only promise something unusable.
 
-- Manage providers and accounts from DSH's `/dockyard` command surface.
-- Open each provider's official browser authorization page from “login/add account” and securely import the completed session; retain CLI fallback for compatibility.
-- Scan existing official login states separately from adding a new account; an existing account is never silently re-imported by Add.
-- Select accounts manually or with sticky-session, round-robin, or failover policies.
-- Read live provider model catalogs, reasoning tiers, plans, and quota windows.
-- Keep commands, model selection, and generation on the same Dockyard runtime and source of truth.
+### What you get
 
-### Platform support: macOS and Windows
+- **One account pool, five policies**: manual, sticky session, round robin, failover, and **most allowance left** — which picks the account with the largest remaining share of its tightest window, falling back to round robin when nothing reports quota.
+- **Expired accounts are parked, not dropped**: they get a cooldown (30 minutes by default) and are retried automatically, returning to the pool as soon as a refresh succeeds.
+- **Per-account model catalogs**: providers such as Antigravity expose different models per account (a paid tier and a free tier see different lists), so discovery and caching are account-scoped.
+- **Live quota awareness**: a window below 15% is flagged low, and a window that **resets within 6 hours while at least 50% unused** is flagged as about to be wasted. A reported balance is shown alongside.
+- **A panel that stays out of the way**: the model list is collapsed and read once when opened; background polls refresh only the quota numbers instead of flipping the panel into a loading state.
+- Commands, model selection, and generation all read the same runtime — there is no second pool or quota cache.
 
-**The current release is 0.1.18. The macOS DMG is available; the Windows EXE is built and waiting to be uploaded to the matching release. The plugin itself installs and runs on Windows today.**
+### Platform support
 
-The macOS integration depends on native behavior:
+| | macOS | Windows |
+|---|---|---|
+| Browser OAuth (Codex / Antigravity / Grok / Claude / Cursor) | ✅ | ✅ same loopback flow |
+| Credential storage | macOS Keychain + Swift helper | Host DSH Credentials service |
+| CLI fallback | ✅ | ✅ resolves `.cmd` shims through `%ComSpec%`, stops the tree with `taskkill` |
+| Local session scanning | ✅ | ❌ degrades to unavailable; use browser OAuth |
+| WorkBuddy | ✅ | ❌ it can only read a macOS desktop session |
 
-- Credentials use the macOS Keychain and a Swift helper.
-- Browser OAuth is opened by the DSH GUI and uses PKCE, state validation, loopback callbacks, or manual-code entry; the official CLI is only a fallback.
-- Scan mode still reads macOS desktop or local CLI session state for providers that expose it.
+On Windows, a host without the Credentials service produces a clear error rather than silently dropping the login.
 
-What Windows does today:
+### Install
 
-- **Browser OAuth works.** The authorization page for Codex, Antigravity, Grok, Claude and Cursor opens in a new DSH GUI tab, and the callback uses the same loopback flow as on macOS.
-- **Credentials go through the host DSH Credentials service.** The plugin's macOS Keychain backend only exists on darwin; on Windows every credential read and write is delegated to DSH. A host without that service reports a clear error instead of silently dropping the login.
-- **CLI fallback works.** A provider CLI installed through npm is a `.cmd` shim on Windows; the plugin resolves the shim and launches it through `%ComSpec%`, and stops the whole tree with `taskkill`.
-- **Local session scanning stays macOS-only.** `/dockyard scan` cannot read a Windows desktop login, so it degrades to unavailable; add accounts with browser OAuth instead.
-- **WorkBuddy and OpenCode are unavailable on Windows.** Both derive the account from a macOS desktop client session, and neither offers a browser OAuth flow or a key field, so they report unavailable there. WorkBuddy also honours a `WORKBUDDY_ACCESS_TOKEN` environment variable for automation; that is an advanced escape hatch, not a user-facing sign-in.
+#### Option 1: marketplace index (DSH v0.2.1+)
 
-### Standalone macOS app and DMG
+Settings → **Plugins** → **Discover** → **Manage index sources…**, add:
 
-If you do not want to install Node.js, pnpm, or DSH manually, download the self-contained universal DMG:
-
-[Download the latest Dockyard DSH DMG](https://github.com/AITabby/dockyard-dsh/releases/latest/download/Dockyard-DSH-macos-universal.dmg)
-
-Or build it on macOS:
-
-```sh
-./apps/macos/build-dmg.sh
+```
+https://raw.githubusercontent.com/AITabby/dockyard-dsh/main/market/index.json
 ```
 
-The DMG embeds Node.js, the DSH CLI, the complete `web` profile, and the Dockyard plugin. Launching the app is enough; no separate Node.js, pnpm, or DSH installation is required. OAuth authorization pages open in the system default browser. See [`apps/macos/README.md`](apps/macos/README.md) for details. The current build includes Apple Silicon and Intel slices. This is a macOS-only developer preview with a local ad-hoc signature; some provider CLI scan/compatibility fallbacks still require their provider CLI, and Antigravity browser OAuth still requires the official OAuth client configuration.
+Then find **Dockyard DSH** and install.
 
-### One-command Dockyard plugin install
+#### Option 2: one command
 
-With the DSH CLI and pnpm already available, give this single command to a terminal or an agent:
-
-```sh
-dsh plugin --profile web add github:AITabby/dockyard-dsh
-```
-
-It installs the prebuilt Dockyard host/client bundle committed in the repository into the default `web` profile, without running `prepare`. Restart DSH Web after installation.
-
-> The `@dockyard-dsh/install` installer is not published to npm yet, so this uses DSH's own install command instead.
-
-### Installing the source plugin into an existing DSH Web profile
-
-Dockyard DSH is a DSH plugin, not a standalone agent. This prerequisite applies when installing the source plugin into an existing DSH profile; install the DSH CLI first and verify that the `dsh` command is available:
-
-```sh
-# DSH is currently a developer preview. Use the Node.js version required by DSH.
-# The current upstream package declares Node 22.19+ on the 22.x line, or Node 24+.
-npm install --global @deepseek-ai/dsh
-npm install --global pnpm
-
-dsh --version
-pnpm --version
-```
-
-Follow the [official DeepSeek Harness repository](https://github.com/deepseek-ai/deepseek-harness) for upstream installation and compatibility changes. The current bundle is verified against `@deepseek-ai/dsh@0.1.5-rc.2`. DSH remains in developer preview; back up an existing DSH_HOME and verify with an isolated DSH_HOME before upgrading it.
-
-#### Installing via the DSH Plugin Marketplace (Discover tab)
-
-DSH (v0.2.1+) supports visual plugin installation via market indexes:
-
-1. Open DSH Web -> **Settings** -> **Plugins** -> **Discover** tab.
-2. Click **Manage index sources...** and add the Dockyard DSH market index URL:
-   ```
-   https://raw.githubusercontent.com/AITabby/dockyard-dsh/main/market/index.json
-   ```
-3. Find **Dockyard DSH** in the list and click **Install**.
-
-#### Shortest path: install directly into the DSH Web profile
-
-`web` is DSH's complete built-in Web profile. Do not create an empty custom profile if you want the GUI.
+With the DSH CLI and pnpm already installed:
 
 ```sh
 dsh plugin --profile web add github:AITabby/dockyard-dsh
 dsh web
 ```
 
-The default URL is `http://127.0.0.1:3080`. To inspect the composed configuration first:
+The default URL is `http://127.0.0.1:3080`. The runnable bundles are committed, so nothing is built at install time; restart DSH Web afterwards.
 
-```sh
-dsh web --dump-config
-```
-
-For a reproducible install, pin a verified commit:
+Pin a verified commit for a reproducible install:
 
 ```sh
 dsh plugin --profile web add github:AITabby/dockyard-dsh#<commit-sha>
 ```
 
-The current release commit includes the runnable host/client bundles and does not run `prepare` at install time. However, `@earendil-works/pi-ai`'s transitive dependencies `@google/genai` and `protobufjs` ship build scripts that pnpm 10+ blocks by default, so the first install ends with `ERR_PNPM_IGNORED_BUILDS`, leaving the dependency in `package.json` but without adding it to the profile's bundle list. Two ways to handle it:
+> **pnpm 10+ blocks build scripts.** The transitive dependencies `@google/genai` and `protobufjs` ship them, so a first install can end with `ERR_PNPM_IGNORED_BUILDS` without registering the bundle. Either click **Allow these scripts and retry** in the GUI, or add them to the profile's `pnpm-workspace.yaml` first:
+>
+> ```yaml
+> allowBuilds:
+>   '@google/genai': true
+>   protobufjs: true
+> ```
 
-- Installing from the DSH Web **Plugins** page: click **Allow these scripts and retry** when prompted;
-- Installing from the command line: add both names to the profile's `pnpm-workspace.yaml` first, then re-run the command:
-
-```yaml
-allowBuilds:
-  '@google/genai': true
-  protobufjs: true
-```
-
-If you pin an older commit, or pnpm reports a different build hook, inspect the source and follow the exact configuration it prints.
-
-#### When you need local changes: clone and install
+#### Option 3: clone and install (when you need changes)
 
 ```sh
 git clone https://github.com/AITabby/dockyard-dsh.git
 cd dockyard-dsh
 npm install
-npm test                 # optional environment check
-npm run build            # needed after source or bundle changes
-
+npm run build            # only after source or bundle changes
 dsh plugin --profile web add .
 dsh web
 ```
 
-For an isolated test that does not touch the default DSH home:
+Isolated install that leaves your default DSH home alone:
 
 ```sh
 DSH_HOME=/tmp/dockyard-dsh-home dsh plugin --profile web add .
-DSH_HOME=/tmp/dockyard-dsh-home dsh web --dump-config
 DSH_HOME=/tmp/dockyard-dsh-home dsh web
 ```
 
-The repository commits `packages/dsh-plugin/dist/index.mjs` and `packages/dsh-plugin/lib/client.js`, so normal users do not need to run tests or build before using a released commit.
+#### Optional: standalone app
 
-### DSH commands
+[Releases](https://github.com/AITabby/dockyard-dsh/releases) carries a self-contained macOS DMG and a Windows EXE. **Those are older packaging builds and may lag the plugin version in this repository**; use one of the three options above for the current code.
+
+### Using it in DSH
 
 ```text
 /dockyard status
@@ -418,66 +306,67 @@ The repository commits `packages/dsh-plugin/dist/index.mjs` and `packages/dsh-pl
 /dockyard login <provider>
 /dockyard refresh [provider]
 /dockyard models <provider>
-/dockyard policy <provider> <manual|sticky_session|round_robin|failover> [accountId]
+/dockyard policy <provider> <manual|sticky_session|round_robin|failover|allowance_fullest> [accountId]
 /dockyard use <provider> <accountId>
 /dockyard remove <provider> <accountId>
 ```
 
-For a new account, use `/dockyard login <provider>` to open official browser OAuth. To import an existing local session, use `/dockyard scan <provider>` followed by `/dockyard add <provider>`, then inspect `/dockyard status` and `/dockyard models <provider>`.
+- **Add an account**: `/dockyard login <provider>` opens the official browser authorization page.
+- **Import an existing login**: `/dockyard scan <provider>` then `/dockyard add <provider>`. Scanning and adding are separate, so an existing account is never silently re-imported.
 
-### Official browser OAuth and active-session boundaries
+### About Antigravity
 
-- **Codex, Antigravity, Grok, Claude, and Cursor** open the provider's official browser authorization page directly when Login/Add is clicked; a local CLI is not required. The CLI remains a compatibility fallback.
-- Codex uses loopback PKCE; Antigravity uses Google loopback OAuth; Grok uses xAI loopback OAuth; Cursor uses the official `loginDeepControl` + `/auth/poll` flow; Claude uses the official hosted callback and requires a callback URL containing `state` (or `code#state`) for manual entry.
-- Antigravity browser OAuth requires `DOCKYARD_ANTIGRAVITY_CLIENT_ID` and `DOCKYARD_ANTIGRAVITY_CLIENT_SECRET`; the repository does not embed OAuth credentials. Set them in the shell that launches DSH (or in `~/.zshrc`), never commit them. Without them, use an existing local/CLI session through Scan or the CLI fallback.
-- **Scan** can still read an existing official desktop/CLI session. Scan and browser account addition are separate operations.
-- If a provider changes an OAuth endpoint, token response, or scope, Dockyard reports unavailable/degraded rather than guessing undocumented fields.
+- Authorization uses Google browser OAuth with the **OAuth client the official build ships**. The client id is a public identifier; the matching secret is read at first authorization from the official client or `agy` binary installed on the machine and cached locally. The repository stores no credentials.
+- `DOCKYARD_ANTIGRAVITY_CLIENT_ID` / `DOCKYARD_ANTIGRAVITY_CLIENT_SECRET` override it with your own client.
+- The Code Assist project is resolved the way the official client does it, and provisioned when the account has none — **you do not need to prepare a Google Cloud project**.
+- Each account keeps its own refresh token and its own model catalog, so several accounts can coexist, be switched, and be rotated.
+- Authorization never invokes `agy`, which is why the macOS "keychain not found" dialog no longer appears.
 
 ### Credentials and security
 
-- Raw OAuth/token values are not stored in Git, account-pool snapshots, or page state; the runtime uses opaque credential references.
-- Browser OAuth refresh tokens persist in secure credential storage; providers with refresh support renew short-lived access tokens after restart, while provider revocation or protocol changes still require reauthorization.
-- macOS uses Keychain by default. Non-macOS defaults fail closed instead of silently falling back to an unsafe in-memory store.
-- Provider models, plans, quotas, identities, and expiry values come from live provider responses; missing values remain `unknown`/`null`.
+- Raw OAuth tokens and secrets are not stored in Git, account-pool snapshots, or page state; the runtime passes opaque credential references.
+- Refresh tokens live in secure credential storage and renew access tokens after a restart; only provider revocation or protocol changes require reauthorization.
+- macOS uses the Keychain; Windows delegates to the host Credentials service. Without that service the plugin fails closed instead of falling back to an unsafe in-memory store.
+- Models, plans, quotas, identities, and expiry come from live provider responses; missing values stay `unknown`/`null`.
 - Read [`SECURITY.md`](SECURITY.md) before filing issues. Never commit tokens, OAuth files, Keychain values, or sensitive logs.
 
-### Development and verification
+### Development
 
 ```sh
 npm install
 npm test
-npm run build
-npm run build:plugin
+npm run build          # rebuild the host and client bundles
 npm pack --dry-run
 ```
 
-The distributable entry points are:
+Distributable entry points:
 
 ```text
-packages/dsh-plugin/dist/index.mjs   # Node/host bundle
-packages/dsh-plugin/lib/client.js    # browser client bundle
-packages/dsh-plugin/cordis.patch.yml # DSH bundle layer
+packages/dsh-plugin/dist/index.mjs    # Node/host bundle
+packages/dsh-plugin/lib/client.js     # browser client bundle
+packages/dsh-plugin/cordis.patch.yml  # DSH bundle layer
 ```
 
-After changing provider source, run `npm run build` and commit the refreshed artifacts together with the source change.
+After changing provider source, run `npm run build` and commit the refreshed artifacts with the change.
 
 ### Project layout
 
 ```text
-packages/core/              lifecycle, contracts, events, and DSH routes
-packages/account-pool/      account discovery, selection, health, and references
-packages/runtime/           the shared Dockyard runtime
-packages/dsh-plugin/        DSH bundle, LLM adapter, commands, and client UI
-packages/vault/             macOS Keychain backend
-modules/provider-*/         provider OAuth, catalog, quota, and native transport
-tests/                      security, lifecycle, provider, and runtime tests
+packages/core/          lifecycle, contracts, events, DSH routes
+packages/account-pool/  account discovery, selection policies, health and cooldown, references
+packages/runtime/       the shared Dockyard runtime
+packages/dsh-bridge/    DSH injection bridge and LLM adapter
+packages/dsh-plugin/    DSH bundle, commands, and the panel UI
+packages/vault/         macOS Keychain backend
+modules/provider-*/     provider OAuth, catalog, quota, and native transport
+tests/                  security, lifecycle, provider, and runtime tests
 ```
 
-The core rule is simple: provider-specific logic stays in provider modules, account selection stays in the runtime, and hosts consume stable contracts. Do not add provider-specific branches to a host or hard-code dynamic provider data.
+The rule is simple: provider-specific logic stays in provider modules, account selection stays in the runtime, and hosts consume stable contracts. Do not add provider-specific branches to a host or hard-code dynamic provider data.
 
 ### Known limitations
 
 - DeepSeek Harness is still a developer preview and may introduce breaking changes.
-- Official provider CLIs, desktop paths, OAuth fields, and quota APIs can change; missing fields remain unknown.
-- Browser account-pool behavior depends on each provider's official OAuth page and token response; endpoint changes require re-verification rather than guessed protocol fields.
-- On Windows, browser OAuth, CLI fallback and the native HTTPS transports all work; local session scanning and WorkBuddy / OpenCode remain macOS-only. The Windows EXE is built but is still being uploaded and verified.
+- Provider CLIs, desktop paths, OAuth fields, and quota APIs can change; missing fields stay unknown rather than guessed.
+- Multi-account browser flows depend on each provider's official authorization page and token response; a changed flow has to be re-verified, not guessed.
+- On Windows, local session scanning and WorkBuddy are unavailable.

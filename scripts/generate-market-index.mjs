@@ -151,6 +151,12 @@ const indexDocument = {
           zh: "macOS 原生",
         },
       },
+      windows: {
+        title: {
+          en: "Windows",
+          zh: "Windows 原生",
+        },
+      },
       oauth: {
         title: {
           en: "Official OAuth",
@@ -180,8 +186,8 @@ const indexDocument = {
         zh: "Dockyard 账号池与原生 Provider",
       },
       description: {
-        en: "Native account-pool and provider plugin for DeepSeek Harness (Codex, Antigravity, Grok, Claude, Cursor, WorkBuddy Free, Command Code).",
-        zh: "DeepSeek Harness 原生账号池与官方 Provider 插件（支持 Codex、Antigravity、Grok、Claude、Cursor、WorkBuddy 零配置免费大模型、Command Code 官方 100+ 模型）。",
+        en: "Native account-pool and provider plugin for DeepSeek Harness — Codex, Antigravity, Grok, Claude, Cursor, WorkBuddy, Command Code, Hermes and OpenRouter Free, on macOS and Windows.",
+        zh: "DeepSeek Harness 原生账号池与官方 Provider 插件——支持 Codex、Antigravity、Grok、Claude、Cursor、WorkBuddy、Command Code、Hermes、OpenRouter Free，macOS 与 Windows 均可使用。",
       },
       icon: iconDataUrl,
       author: "AITabby",
@@ -191,7 +197,7 @@ const indexDocument = {
       },
       metadata: {
         category: "providers",
-        labels: ["macos", "oauth", "account-pool", "free-tier"],
+        labels: ["macos", "windows", "oauth", "account-pool", "free-tier"],
         keywords: [
           "dsh",
           "deepseek-harness",

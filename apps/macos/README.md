@@ -37,4 +37,9 @@ User data is kept outside the app bundle under:
 
 The embedded DSH profile is copied there on first launch. Logs are written to its `Logs/` directory.
 
-Provider OAuth still follows the provider's own authorization requirements. In particular, Antigravity browser OAuth requires user-provided `DOCKYARD_ANTIGRAVITY_CLIENT_ID` and `DOCKYARD_ANTIGRAVITY_CLIENT_SECRET`; these are not embedded in the app or repository.
+Provider OAuth still follows the provider's own authorization requirements.
+Antigravity works out of the box: it authorizes with the OAuth client the
+official Antigravity build ships, whose secret is read from that build on first
+authorization and cached locally. `DOCKYARD_ANTIGRAVITY_CLIENT_ID` and
+`DOCKYARD_ANTIGRAVITY_CLIENT_SECRET` override it when you want your own client;
+no credential is embedded in the app or the repository.
