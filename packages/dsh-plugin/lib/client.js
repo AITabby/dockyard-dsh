@@ -15706,6 +15706,7 @@ var DOCKYARD_LOCALES = Object.freeze({
     "contextWindow.scopeProvider": "\u5F53\u524D provider",
     "contextWindow.warning": "\u81EA\u5B9A\u4E49\u503C\u53EA\u5F71\u54CD DSH \u5B9E\u9645\u53D1\u9001\u7684\u4E0A\u4E0B\u6587\uFF0C\u4E0D\u4F1A\u6539\u53D8\u5382\u5546\u771F\u5B9E\u80FD\u529B\u3002",
     "modelSelection.title": "\u53EF\u7528\u6A21\u578B\u9009\u62E9",
+    "modelSelection.collapsedHint": "\u70B9\u51FB\u5C55\u5F00\uFF08\u5C55\u5F00\u65F6\u624D\u8BFB\u53D6\uFF09",
     "modelSelection.subtitle": "\u624B\u52A8\u9009\u62E9\u8981\u542F\u7528\u7684\u6A21\u578B\uFF0C\u4FDD\u5B58\u540E\u7ACB\u5373\u751F\u6548",
     "modelSelection.loading": "\u6B63\u5728\u8BFB\u53D6\u6A21\u578B\u5217\u8868\u2026",
     "modelSelection.noModels": "\u6682\u65E0\u53EF\u7528\u6A21\u578B",
@@ -15930,6 +15931,7 @@ var DOCKYARD_LOCALES = Object.freeze({
     "contextWindow.scopeProvider": "Current provider",
     "contextWindow.warning": "Custom values only limit the context DSH sends; they do not change the provider's real capability.",
     "modelSelection.title": "Available Models",
+    "modelSelection.collapsedHint": "Expand to load",
     "modelSelection.subtitle": "Manually select enabled models; takes effect immediately upon saving",
     "modelSelection.loading": "Loading model list\u2026",
     "modelSelection.noModels": "No models available",
@@ -16690,6 +16692,9 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-account-note{padding:4px 8px;border-radius:var(--dsw-radius-xs,4px);background:rgba(203,183,255,.07);color:var(--dsw-alias-label-caption,#8b93a1);font-size:11px;line-height:16px;text-align:left}
 .dockyard-dsh-account-error{max-width:100%;overflow:hidden;color:#ff9a83;font-size:11px;line-height:16px;text-align:left;text-overflow:ellipsis;white-space:nowrap}
 .dockyard-dsh-alert{max-width:100%;overflow:hidden;font-size:11px;line-height:16px;text-align:left;text-overflow:ellipsis;white-space:nowrap;color:#ffd28a}
+.dockyard-dsh-model-section-toggle{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:0;border:0;background:none;color:inherit;font:inherit;cursor:pointer;text-align:left}
+.dockyard-dsh-model-section-toggle:hover .dockyard-dsh-model-section-label{text-decoration:underline}
+.dockyard-dsh-model-section-label{flex:0 0 auto}
 .dockyard-dsh-alert[data-severity="warning"]{color:#ff9a83}
 .dockyard-dsh-alert[data-severity="info"]{color:#9fc4ff}
 .dockyard-dsh-quota{display:flex;flex-direction:column;gap:5px}
@@ -17503,6 +17508,8 @@ function ContextWindowSection({ providerId, current: current2, model, accountId 
   );
 }
 function ModelSelectionSection({ providerId, remote, directory, modelDirectories, refreshToken = 0, t }) {
+  const [open, setOpen] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const [state, setState] = useState({
     status: "loading",
     models: [],
@@ -17515,6 +17522,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
   useEffect(() => {
+    if (!open) return void 0;
     let cancelled = false;
     setState({ status: "loading", models: [], enabledModelIds: null });
     setTestStates({});
@@ -17527,6 +17535,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
       if (cancelled) return;
       const models2 = Array.isArray(data?.models) ? data.models : [];
       const enabled = Array.isArray(data?.enabledModelIds) ? data.enabledModelIds : null;
+      setLoaded(true);
       setState({
         status: "ready",
         models: models2,
@@ -17545,22 +17554,44 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
     return () => {
       cancelled = true;
     };
-  }, [providerId, remote, refreshToken, t]);
+  }, [providerId, remote, open, t]);
   const models = state.models;
-  if (state.status === "loading") {
-    return h(
+  const sectionShell = (body) => h(
+    "div",
+    {
+      className: "dockyard-dsh-section dockyard-dsh-model-selection",
+      "data-open": Boolean(open)
+    },
+    h(
       "div",
-      { className: "dockyard-dsh-section dockyard-dsh-model-selection" },
+      { className: "dockyard-dsh-section-title" },
       h(
-        "div",
-        { className: "dockyard-dsh-section-title" },
-        h("span", null, text(t, "modelSelection.title")),
-        h("span", { className: "dockyard-dsh-section-value" }, text(t, "modelSelection.loading"))
+        "button",
+        {
+          type: "button",
+          className: "dockyard-dsh-model-section-toggle",
+          "aria-expanded": Boolean(open),
+          onClick: () => setOpen((value) => !value)
+        },
+        h("span", { className: "dockyard-dsh-model-section-label" }, text(t, "modelSelection.title")),
+        h(
+          "span",
+          { className: "dockyard-dsh-section-value" },
+          loaded ? text(t, "modelSelection.enabledCount", { enabled: selectedIds.size, total: models.length }) : text(t, "modelSelection.collapsedHint")
+        ),
+        h(ChevronIcon, { open })
       )
-    );
+    ),
+    ...open ? body : []
+  );
+  if (!open) return sectionShell([]);
+  if (state.status === "loading") {
+    return sectionShell([
+      h("div", { className: "dockyard-dsh-section-value" }, text(t, "modelSelection.loading"))
+    ]);
   }
-  if (state.status !== "loading" && models.length === 0) {
-    return null;
+  if (models.length === 0) {
+    return sectionShell([]);
   }
   const query = search.trim().toLowerCase();
   const filtered = query ? models.filter((m) => m.id.toLowerCase().includes(query) || m.name && m.name.toLowerCase().includes(query)) : models;
@@ -17780,19 +17811,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
       )
     );
   };
-  return h(
-    "div",
-    { className: "dockyard-dsh-section dockyard-dsh-model-selection" },
-    h(
-      "div",
-      { className: "dockyard-dsh-section-title" },
-      h("span", null, text(t, "modelSelection.title")),
-      h(
-        "span",
-        { className: "dockyard-dsh-section-value" },
-        text(t, "modelSelection.enabledCount", { enabled: selectedIds.size, total: models.length })
-      )
-    ),
+  return sectionShell([
     h(
       "div",
       { className: "dockyard-dsh-model-search-row" },
@@ -17895,7 +17914,21 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
       className: "dockyard-dsh-context-window-message",
       "data-error": message.error
     }, message.text) : null
-  );
+  ]);
+}
+function ChevronIcon({ open }) {
+  return h("span", {
+    className: "dockyard-dsh-chevron",
+    "data-open": Boolean(open),
+    "aria-hidden": true
+  }, h("svg", {
+    viewBox: "0 0 14 14",
+    focusable: "false",
+    "aria-hidden": true
+  }, h("path", {
+    d: "M11.8486 5.5L11.4238 5.92383L8.69727 8.65137C8.44157 8.90706 8.21562 9.13382 8.01172 9.29785C7.79912 9.46883 7.55595 9.61756 7.25 9.66602C7.08435 9.69222 6.91565 9.69222 6.75 9.66602C6.44405 9.61756 6.20088 9.46883 5.98828 9.29785C5.78438 9.13382 5.55843 8.90706 5.30273 8.65137L2.57617 5.92383L2.15137 5.5L3 4.65137L3.42383 5.07617L6.15137 7.80273C6.42595 8.07732 6.59876 8.24849 6.74023 8.3623C6.87291 8.46904 6.92272 8.47813 6.9375 8.48047C6.97895 8.48703 7.02105 8.48703 7.0625 8.48047C7.07728 8.47813 7.12709 8.46904 7.25977 8.3623C7.40124 8.24849 7.57405 8.07732 7.84863 7.80273L10.5762 5.07617L11 4.65137L11.8486 5.5Z",
+    fill: "currentColor"
+  })));
 }
 function quotaView(account, t) {
   const rows = quotaRowsForAccount(account, t);

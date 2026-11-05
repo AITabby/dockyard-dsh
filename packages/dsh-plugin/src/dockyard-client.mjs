@@ -220,6 +220,9 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-account-note{padding:4px 8px;border-radius:var(--dsw-radius-xs,4px);background:rgba(203,183,255,.07);color:var(--dsw-alias-label-caption,#8b93a1);font-size:11px;line-height:16px;text-align:left}
 .dockyard-dsh-account-error{max-width:100%;overflow:hidden;color:#ff9a83;font-size:11px;line-height:16px;text-align:left;text-overflow:ellipsis;white-space:nowrap}
 .dockyard-dsh-alert{max-width:100%;overflow:hidden;font-size:11px;line-height:16px;text-align:left;text-overflow:ellipsis;white-space:nowrap;color:#ffd28a}
+.dockyard-dsh-model-section-toggle{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:0;border:0;background:none;color:inherit;font:inherit;cursor:pointer;text-align:left}
+.dockyard-dsh-model-section-toggle:hover .dockyard-dsh-model-section-label{text-decoration:underline}
+.dockyard-dsh-model-section-label{flex:0 0 auto}
 .dockyard-dsh-alert[data-severity="warning"]{color:#ff9a83}
 .dockyard-dsh-alert[data-severity="info"]{color:#9fc4ff}
 .dockyard-dsh-quota{display:flex;flex-direction:column;gap:5px}
@@ -1132,6 +1135,11 @@ function ContextWindowSection({ providerId, current, model, accountId = null, ke
 }
 
 function ModelSelectionSection({ providerId, remote, directory, modelDirectories, refreshToken = 0, t }) {
+  // The list is collapsed until asked for. Reloading it on every periodic
+  // status refresh made the panel look like it was refreshing under the cursor
+  // while the user was picking models.
+  const [open, setOpen] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const [state, setState] = useState({
     status: "loading",
     models: [],
@@ -1145,6 +1153,9 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
   const [message, setMessage] = useState(null);
 
   useEffect(() => {
+    // Nothing is fetched until the section is opened; opening it reads the
+    // catalog once, and the periodic status refresh no longer touches it.
+    if (!open) return undefined;
     let cancelled = false;
     setState({ status: "loading", models: [], enabledModelIds: null });
     setTestStates({});
@@ -1161,6 +1172,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
         if (cancelled) return;
         const models = Array.isArray(data?.models) ? data.models : [];
         const enabled = Array.isArray(data?.enabledModelIds) ? data.enabledModelIds : null;
+        setLoaded(true);
         setState({
           status: "ready",
           models,
@@ -1181,18 +1193,41 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
     return () => {
       cancelled = true;
     };
-  }, [providerId, remote, refreshToken, t]);
+  }, [providerId, remote, open, t]);
 
   const models = state.models;
+
+  // One collapsible section for every provider: collapsed it costs nothing,
+  // and opening it reads the catalog once.
+  const sectionShell = (body) => h("div", {
+    className: "dockyard-dsh-section dockyard-dsh-model-selection",
+    "data-open": Boolean(open),
+  },
+    h("div", { className: "dockyard-dsh-section-title" },
+      h("button", {
+        type: "button",
+        className: "dockyard-dsh-model-section-toggle",
+        "aria-expanded": Boolean(open),
+        onClick: () => setOpen((value) => !value),
+      },
+        h("span", { className: "dockyard-dsh-model-section-label" }, text(t, "modelSelection.title")),
+        h("span", { className: "dockyard-dsh-section-value" },
+          loaded
+            ? text(t, "modelSelection.enabledCount", { enabled: selectedIds.size, total: models.length })
+            : text(t, "modelSelection.collapsedHint")),
+        h(ChevronIcon, { open }))),
+    ...(open ? body : []));
+
+  if (!open) return sectionShell([]);
+
   if (state.status === "loading") {
-    return h("div", { className: "dockyard-dsh-section dockyard-dsh-model-selection" },
-      h("div", { className: "dockyard-dsh-section-title" },
-        h("span", null, text(t, "modelSelection.title")),
-        h("span", { className: "dockyard-dsh-section-value" }, text(t, "modelSelection.loading"))));
+    return sectionShell([
+      h("div", { className: "dockyard-dsh-section-value" }, text(t, "modelSelection.loading")),
+    ]);
   }
 
-  if (state.status !== "loading" && models.length === 0) {
-    return null;
+  if (models.length === 0) {
+    return sectionShell([]);
   }
 
   const query = search.trim().toLowerCase();
@@ -1421,11 +1456,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
         renderTestBadge(item.id)));
   };
 
-  return h("div", { className: "dockyard-dsh-section dockyard-dsh-model-selection" },
-    h("div", { className: "dockyard-dsh-section-title" },
-      h("span", null, text(t, "modelSelection.title")),
-      h("span", { className: "dockyard-dsh-section-value" },
-        text(t, "modelSelection.enabledCount", { enabled: selectedIds.size, total: models.length }))),
+  return sectionShell([
     h("div", { className: "dockyard-dsh-model-search-row" },
       h("input", {
         type: "text",
@@ -1506,7 +1537,8 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
     message ? h("div", {
       className: "dockyard-dsh-context-window-message",
       "data-error": message.error,
-    }, message.text) : null);
+    }, message.text) : null,
+  ]);
 }
 
 function ChevronIcon({ open }) {
