@@ -272,7 +272,7 @@ export class DockyardDshService {
     return { accounts: imports, diagnostics, scan };
   }
 
-  async refresh(providerInput = null) {
+  async refresh(providerInput = null, { forceCatalog = false } = {}) {
     await this.ready;
     const providerId = providerInput ? providerIdFor(this.runtime, providerInput) : null;
     if (providerInput && !providerId) throw new Error(`未知 provider：${providerInput}`);
@@ -281,15 +281,21 @@ export class DockyardDshService {
     if (existing) return existing;
     const promise = (async () => {
       const results = await this.runtime.refreshAll(providerId);
-      if (providerId) {
-        await this.runtime.getCatalog(providerId, { force: true }).catch(() => null);
-      } else {
-        const manifests = this.runtime.listProviderManifests?.() ?? [];
-        await Promise.all(manifests.map((m) => this.runtime.getCatalog(m.id, { force: true }).catch(() => null)));
+      // Reloading every catalog on each poll made DSH re-list models forever
+      // ("正在刷新模型列表…"). Model discovery refreshes on its own schedule and
+      // announces itself only when the set actually changes, so a poll that
+      // found nothing new stays silent.
+      if (forceCatalog) {
+        if (providerId) {
+          await this.runtime.getCatalog(providerId, { force: true }).catch(() => null);
+        } else {
+          const manifests = this.runtime.listProviderManifests?.() ?? [];
+          await Promise.all(manifests.map((m) => this.runtime.getCatalog(m.id, { force: true }).catch(() => null)));
+        }
+        try {
+          this.notifyAdaptersUpdated?.();
+        } catch {}
       }
-      try {
-        this.notifyAdaptersUpdated?.();
-      } catch {}
       return results;
     })().finally(() => {
       if (this.#refreshPromises.get(refreshKey) === promise) this.#refreshPromises.delete(refreshKey);

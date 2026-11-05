@@ -153,3 +153,45 @@ test("a reported balance is kept with the account", () => {
   assert.equal(stored.balance.amount, 12.5);
   assert.equal(stored.balance.unit, "CNY");
 });
+
+// A poll that finds no new models must stay silent: DSH re-lists the whole
+// picker on every "adapters updated" event, which looked like the model list
+// was refreshing forever.
+test("listModels does not announce an unchanged catalog", async () => {
+  const { DockyardRuntime } = await import("../packages/runtime/src/dockyard-runtime.mjs");
+  const { createDockyardLlmAdapter } = await import("../packages/dsh-bridge/src/llm-adapter.mjs");
+  const { MemorySecretStore } = await import("../packages/vault/src/index.mjs");
+
+  const stateStore = { async load() { return {}; }, async update(fn) { return fn({}); }, async save() { return {}; } };
+  const secretStore = new MemorySecretStore();
+  let catalogCalls = 0;
+  const runtime = {
+    async init() { return this; },
+    async whenPrepared() { return this; },
+    listProviderIds() { return ["pool-test"]; },
+    hasProviderCapability() { return true; },
+    snapshot() {
+      return { providers: [{ providerId: "pool-test", accounts: [{ accountId: "a", health: { status: "healthy" } }] }] };
+    },
+    getDefaultAccountId() { return "a"; },
+    async getCatalog() {
+      catalogCalls += 1;
+      return { models: [{ id: "m1", name: "M1" }] };
+    },
+    getModelSelection() { return null; },
+    hasProviderCapability: () => true,
+  };
+  const changes = [];
+  const adapter = createDockyardLlmAdapter({
+    runtime,
+    providerIds: ["pool-test"],
+    onCatalogChanged: (provider) => changes.push(provider),
+  });
+  await adapter.listModels("pool-test");
+  assert.equal(catalogCalls, 1);
+  assert.deepEqual(changes, [], "the first read has nothing to compare against");
+
+  await adapter.listModels("pool-test");
+  assert.equal(catalogCalls, 1, "a cached list is not re-fetched");
+  assert.deepEqual(changes, []);
+});

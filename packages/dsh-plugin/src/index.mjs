@@ -144,6 +144,14 @@ export function apply(ctx, config = {}) {
   const adapter = createDockyardLlmAdapter({
     runtime,
     providerIds: config.providers ?? runtime.listProviderIds(),
+    // Only announced when a catalog's model set really changed, so the picker
+    // is not re-listed on every poll.
+    onCatalogChanged: () => {
+      try {
+        ctx.emit("llm/adapters-updated");
+        ctx.llm?.emitAdaptersUpdated?.();
+      } catch {}
+    },
     catalogCachePath: config.catalogCachePath ?? defaultCatalogCachePath(),
     // Resolve this only when a request is actually streamed. The attachment
     // service is installed by DSH's base profile after plugin composition;

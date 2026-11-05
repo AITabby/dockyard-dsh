@@ -2613,7 +2613,8 @@ function createDockyardLlmAdapter({
   runtime,
   providerIds,
   attachmentsResolver = null,
-  catalogCachePath = null
+  catalogCachePath = null,
+  onCatalogChanged = null
 } = {}) {
   if (!runtime) throw new ValidationError("Dockyard runtime is required");
   const owned = [...providerIds ?? runtime.listProviderIds?.() ?? []];
@@ -2652,6 +2653,10 @@ function createDockyardLlmAdapter({
       );
     });
   }
+  function modelSignature(catalog) {
+    const ids = Array.isArray(catalog?.models) ? catalog.models.map((model) => model?.id).filter(Boolean) : [];
+    return ids.sort().join("\n");
+  }
   function catalogAccountId(provider) {
     try {
       return runtime.getDefaultAccountId?.(provider) ?? null;
@@ -2674,8 +2679,15 @@ function createDockyardLlmAdapter({
       const accountId = catalogAccountId(provider);
       promise = Promise.resolve().then(() => runtime.getCatalog(provider, { force, ...accountId ? { accountId } : {} })).then((catalog) => {
         if (Array.isArray(catalog?.models) && catalog.models.length > 0) {
+          const previous = catalogCache.get(key)?.value;
           catalogCache.set(key, { value: catalog, fetchedAt: Date.now() });
           saveDiskCatalogCache(catalogCachePath, catalogCache);
+          if (previous && modelSignature(previous) !== modelSignature(catalog)) {
+            try {
+              onCatalogChanged?.(provider);
+            } catch {
+            }
+          }
         }
         return catalog;
       }).finally(() => {
@@ -2687,7 +2699,14 @@ function createDockyardLlmAdapter({
   }
   function cachedProviderCatalog(provider) {
     const key = catalogKey(provider);
-    const entry = catalogCache.get(key);
+    let entry = catalogCache.get(key);
+    if (!entry) {
+      const legacy = catalogCache.get(provider);
+      if (legacy) {
+        catalogCache.set(key, { ...legacy, fetchedAt: 0 });
+        entry = catalogCache.get(key);
+      }
+    }
     if (!entry) return null;
     if (Date.now() - entry.fetchedAt >= STREAM_CATALOG_REFRESH_MS && !catalogPromises.has(key)) {
       void providerCatalog(provider, void 0, { force: true }).catch(() => {
@@ -19483,7 +19502,7 @@ var DockyardDshService = class {
     }
     return { accounts: imports, diagnostics, scan };
   }
-  async refresh(providerInput = null) {
+  async refresh(providerInput = null, { forceCatalog = false } = {}) {
     await this.ready;
     const providerId = providerInput ? providerIdFor(this.runtime, providerInput) : null;
     if (providerInput && !providerId) throw new Error(`\u672A\u77E5 provider\uFF1A${providerInput}`);
@@ -19492,15 +19511,17 @@ var DockyardDshService = class {
     if (existing) return existing;
     const promise = (async () => {
       const results = await this.runtime.refreshAll(providerId);
-      if (providerId) {
-        await this.runtime.getCatalog(providerId, { force: true }).catch(() => null);
-      } else {
-        const manifests = this.runtime.listProviderManifests?.() ?? [];
-        await Promise.all(manifests.map((m) => this.runtime.getCatalog(m.id, { force: true }).catch(() => null)));
-      }
-      try {
-        this.notifyAdaptersUpdated?.();
-      } catch {
+      if (forceCatalog) {
+        if (providerId) {
+          await this.runtime.getCatalog(providerId, { force: true }).catch(() => null);
+        } else {
+          const manifests = this.runtime.listProviderManifests?.() ?? [];
+          await Promise.all(manifests.map((m) => this.runtime.getCatalog(m.id, { force: true }).catch(() => null)));
+        }
+        try {
+          this.notifyAdaptersUpdated?.();
+        } catch {
+        }
       }
       return results;
     })().finally(() => {
@@ -20771,6 +20792,15 @@ function apply(ctx, config = {}) {
   const adapter = createDockyardLlmAdapter({
     runtime,
     providerIds: config.providers ?? runtime.listProviderIds(),
+    // Only announced when a catalog's model set really changed, so the picker
+    // is not re-listed on every poll.
+    onCatalogChanged: () => {
+      try {
+        ctx.emit("llm/adapters-updated");
+        ctx.llm?.emitAdaptersUpdated?.();
+      } catch {
+      }
+    },
     catalogCachePath: config.catalogCachePath ?? defaultCatalogCachePath(),
     // Resolve this only when a request is actually streamed. The attachment
     // service is installed by DSH's base profile after plugin composition;

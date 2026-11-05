@@ -380,6 +380,7 @@ export function createDockyardLlmAdapter({
   providerIds,
   attachmentsResolver = null,
   catalogCachePath = null,
+  onCatalogChanged = null,
 } = {}) {
   if (!runtime) throw new ValidationError("Dockyard runtime is required");
   const owned = [...(providerIds ?? runtime.listProviderIds?.() ?? [])];
@@ -438,6 +439,11 @@ export function createDockyardLlmAdapter({
    * tier and a free one expose different model lists, so caching them per
    * provider made switching accounts look like it changed nothing.
    */
+  function modelSignature(catalog) {
+    const ids = Array.isArray(catalog?.models) ? catalog.models.map((model) => model?.id).filter(Boolean) : [];
+    return ids.sort().join("\n");
+  }
+
   function catalogAccountId(provider) {
     try {
       return runtime.getDefaultAccountId?.(provider) ?? null;
@@ -464,8 +470,18 @@ export function createDockyardLlmAdapter({
         .then(() => runtime.getCatalog(provider, { force, ...(accountId ? { accountId } : {}) }))
         .then((catalog) => {
           if (Array.isArray(catalog?.models) && catalog.models.length > 0) {
+            const previous = catalogCache.get(key)?.value;
             catalogCache.set(key, { value: catalog, fetchedAt: Date.now() });
             saveDiskCatalogCache(catalogCachePath, catalogCache);
+            // Tell the host only when the set changed: an unchanged re-read used
+            // to re-list models in DSH's picker forever.
+            if (previous && modelSignature(previous) !== modelSignature(catalog)) {
+              try {
+                onCatalogChanged?.(provider);
+              } catch {
+                // A host that is not listening must never break discovery.
+              }
+            }
           }
           return catalog;
         })
@@ -479,7 +495,16 @@ export function createDockyardLlmAdapter({
 
   function cachedProviderCatalog(provider) {
     const key = catalogKey(provider);
-    const entry = catalogCache.get(key);
+    let entry = catalogCache.get(key);
+    if (!entry) {
+      // Entries written by an older build are keyed by provider alone; adopt one
+      // rather than treating the upgrade as a cold cache.
+      const legacy = catalogCache.get(provider);
+      if (legacy) {
+        catalogCache.set(key, { ...legacy, fetchedAt: 0 });
+        entry = catalogCache.get(key);
+      }
+    }
     if (!entry) return null;
     if (Date.now() - entry.fetchedAt >= STREAM_CATALOG_REFRESH_MS && !catalogPromises.has(key)) {
       // Refresh metadata opportunistically, but never put model generation
