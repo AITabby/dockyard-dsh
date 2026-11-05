@@ -179,7 +179,6 @@ test("listModels does not announce an unchanged catalog", async () => {
       return { models: [{ id: "m1", name: "M1" }] };
     },
     getModelSelection() { return null; },
-    hasProviderCapability: () => true,
   };
   const changes = [];
   const adapter = createDockyardLlmAdapter({
