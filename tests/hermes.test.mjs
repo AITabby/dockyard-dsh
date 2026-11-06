@@ -48,7 +48,7 @@ test("Hermes provider module manifest and builtin models", async () => {
   assert.ok(BUILTIN_HERMES_MODELS.length >= 6);
   const deepseekFlash = BUILTIN_HERMES_MODELS.find((m) => m.id === "deepseek/deepseek-v4.1-flash");
   assert.ok(deepseekFlash);
-  assert.equal(deepseekFlash.name, "DeepSeek: DeepSeek V4.1 Flash");
+  assert.equal(deepseekFlash.name, "DeepSeek V4.1 Flash", "the vendor prefix is not repeated in the builtin table");
   assert.equal(deepseekFlash.contextWindow, 1048576);
 
   const beamFree = BUILTIN_HERMES_MODELS.find((m) => m.id === "reflection/beam-1.0-501b-a23b:free");

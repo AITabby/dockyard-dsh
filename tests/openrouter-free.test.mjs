@@ -104,7 +104,7 @@ test("buildOpenRouterFreeCatalogFromRaw prioritizes router, stealth, and limited
   assert.equal(catalog[1].contextWindow, 262144);
   assert.equal(ids[2], "x-ai/grok-4.2-promo", "limited-time 0-cost model should be next");
   assert.equal(catalog[2].freeKind, "limited_free");
-  assert.equal(catalog[2].name, "xAI: Grok 4.2 Promo");
+  assert.equal(catalog[2].name, "Grok 4.2 Promo", "vendor prefixes are stripped from upstream names");
   assert.equal(catalog[2].contextWindow, 256000);
   assert.ok(ids.includes("thinkingmachines/inkling:free"));
   assert.ok(!ids.includes("nvidia/nemotron-3.5-content-safety:free"));

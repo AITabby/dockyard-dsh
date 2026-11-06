@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { stripVendorPrefix } from "../packages/providers/src/provider-utils.mjs";
 import { dirname, join } from "node:path";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -79,6 +80,17 @@ const antigravityTestEnv = {
   DOCKYARD_ANTIGRAVITY_CLIENT_SECRET: "test-google-client-secret",
 };
 
+
+test("vendor prefixes are stripped from aggregator model names", () => {
+  assert.equal(stripVendorPrefix("DeepSeek: DeepSeek V4.1 Flash"), "DeepSeek V4.1 Flash");
+  assert.equal(stripVendorPrefix("OpenAI: GPT-6 Luna"), "GPT-6 Luna");
+  assert.equal(stripVendorPrefix("Anthropic: Claude Haiku 5.5"), "Claude Haiku 5.5");
+  // A name without a vendor prefix is returned unchanged.
+  assert.equal(stripVendorPrefix("Gemini 3.8 Flash"), "Gemini 3.8 Flash");
+  // A prefix that is not a plain vendor label is part of the model name.
+  assert.equal(stripVendorPrefix("GPT-4: 32k context variant"), "GPT-4: 32k context variant");
+  assert.equal(stripVendorPrefix(""), "");
+});
 test("Codex driver imports local OAuth and parses live multi-window quota", async () => {
   const home = await mkdtemp(join(tmpdir(), "dockyard-codex-"));
   try {

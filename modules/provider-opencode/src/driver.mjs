@@ -7,6 +7,7 @@ import {
   assertSecureEndpointUrl,
   fetchJson,
   resolveReasoningFromModel,
+  stripVendorPrefix,
   stringValue,
 } from "../../../packages/providers/src/provider-utils.mjs";
 import {
@@ -254,7 +255,7 @@ export function parseOpencodeCatalog(data, { registry = [], installedIds = null 
     const regModel = findOpencodeRegistryModel(id, registry);
     const builtin = builtinMap.get(id);
     const isFree = id.includes("-free") || id === "big-pickle";
-    const name = stringValue(item?.name) ?? regModel?.name ?? builtin?.name ?? (isFree ? `${id} (Free)` : id);
+    const name = stripVendorPrefix(stringValue(item?.name) ?? regModel?.name ?? builtin?.name ?? (isFree ? `${id} (Free)` : id));
     const contextWindow = Number.isInteger(item?.contextWindow)
       ? item.contextWindow
       : Number.isInteger(regModel?.contextWindow)

@@ -12,6 +12,7 @@ import {
   sanitizeToolCallId,
   textFromContent,
 } from "../../../packages/providers/src/native-transport.mjs";
+import { stripVendorPrefix } from "../../../packages/providers/src/provider-utils.mjs";
 
 export const OPENROUTER_API_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 export const OPENROUTER_MODELS_ENDPOINT = "https://openrouter.ai/api/v1/models";
@@ -325,7 +326,7 @@ export function normalizeOpenRouterFreeModelEntry(item) {
     .replace(/\s*\[free\]\s*$/i, "")
     .trim();
 
-  const name = isRouter ? "Free Models Router" : rawName;
+  const name = isRouter ? "Free Models Router" : stripVendorPrefix(rawName);
 
   const rawContextLength = Number(item.top_provider?.context_length || item.context_length);
   const contextWindow = rawContextLength > 0

@@ -12,6 +12,7 @@ import {
   resolveContextWindowFromModel,
   resolveMaxTokensFromModel,
   resolveReasoningFromModel,
+  stripVendorPrefix,
   stringValue,
 } from "../../../packages/providers/src/provider-utils.mjs";
 import {
@@ -38,7 +39,7 @@ function maskApiKey(apiKey) {
 export const BUILTIN_HERMES_MODELS = Object.freeze([
   {
     id: "deepseek/deepseek-v4.1-flash",
-    name: "DeepSeek: DeepSeek V4.1 Flash",
+    name: "DeepSeek V4.1 Flash",
     contextWindow: 1048576,
     maxTokens: 131072,
     inputModalities: ["text", "image"],
@@ -54,7 +55,7 @@ export const BUILTIN_HERMES_MODELS = Object.freeze([
   },
   {
     id: "reflection/beam-1.0-501b-a23b:free",
-    name: "Reflection: Beam 1.0 501B A23B (Free)",
+    name: "Beam 1.0 501B A23B (Free)",
     contextWindow: 262144,
     maxTokens: 131072,
     inputModalities: ["text"],
@@ -72,7 +73,7 @@ export const BUILTIN_HERMES_MODELS = Object.freeze([
   },
   {
     id: "ornith/ornith-1.5-122b:free",
-    name: "Ornith: Ornith 1.5 122B (Free)",
+    name: "Ornith 1.5 122B (Free)",
     contextWindow: 262144,
     maxTokens: 262144,
     inputModalities: ["text", "image"],
@@ -80,7 +81,7 @@ export const BUILTIN_HERMES_MODELS = Object.freeze([
   },
   {
     id: "stepfun/step-3.7-flash:free",
-    name: "StepFun: Step 3.7 Flash (Free)",
+    name: "Step 3.7 Flash (Free)",
     contextWindow: 262144,
     maxTokens: 32768,
     inputModalities: ["text"],
@@ -88,28 +89,28 @@ export const BUILTIN_HERMES_MODELS = Object.freeze([
   },
   {
     id: "openai/gpt-6.1-terra-pro",
-    name: "OpenAI: GPT-6.1 Terra Pro",
+    name: "GPT-6.1 Terra Pro",
     contextWindow: 1000000,
     maxTokens: 65536,
     inputModalities: ["text", "image"],
   },
   {
     id: "anthropic/claude-haiku-5.5",
-    name: "Anthropic: Claude Haiku 5.5",
+    name: "Claude Haiku 5.5",
     contextWindow: 1000000,
     maxTokens: 65536,
     inputModalities: ["text", "image"],
   },
   {
     id: "z-ai/glm-5.3",
-    name: "Z.ai: GLM 5.3",
+    name: "GLM 5.3",
     contextWindow: 1048576,
     maxTokens: 131072,
     inputModalities: ["text"],
   },
   {
     id: "particle-ai/particle-1",
-    name: "Particle AI: Particle-1",
+    name: "Particle-1",
     contextWindow: 1048576,
     maxTokens: 131072,
     inputModalities: ["text", "image"],
@@ -142,7 +143,7 @@ export function parseHermesCatalog(data) {
     }
 
     const builtin = builtinMap.get(id);
-    const name = stringValue(item?.name) ?? builtin?.name ?? id;
+    const name = stripVendorPrefix(stringValue(item?.name) ?? builtin?.name ?? id);
 
     const contextWindow = resolveContextWindowFromModel(item, builtin?.contextWindow ?? 262144);
     const maxTokens = resolveMaxTokensFromModel(item, builtin?.maxTokens ?? 32768);

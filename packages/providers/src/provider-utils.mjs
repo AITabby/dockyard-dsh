@@ -85,6 +85,20 @@ export function resolveMaxTokensFromModel(model, fallback = 16384) {
   return fallback;
 }
 
+/**
+ * Aggregator catalogs (OpenRouter/Nous style) prefix every model with its vendor
+ * ("DeepSeek: DeepSeek V4.1 Flash", "OpenAI: GPT-6 Luna"). The model picker
+ * already groups models by provider and the id still carries the vendor, so the
+ * prefix is noise on every row. Only a plain vendor label is stripped: a prefix
+ * that contains digits or punctuation is part of the model name, not a vendor.
+ */
+export function stripVendorPrefix(name) {
+  if (typeof name !== "string") return name;
+  const match = /^([A-Za-z][A-Za-z .&+\-]{0,23}):\s+(\S.*)$/u.exec(name.trim());
+  if (!match) return name;
+  return match[2].trim();
+}
+
 export function resolveReasoningFromModel(model) {
   if (!model) return undefined;
   if (model.reasoning === false) return undefined;

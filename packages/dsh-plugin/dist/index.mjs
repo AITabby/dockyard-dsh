@@ -1523,6 +1523,12 @@ function resolveMaxTokensFromModel(model, fallback = 16384) {
   }
   return fallback;
 }
+function stripVendorPrefix(name2) {
+  if (typeof name2 !== "string") return name2;
+  const match = /^([A-Za-z][A-Za-z .&+\-]{0,23}):\s+(\S.*)$/u.exec(name2.trim());
+  if (!match) return name2;
+  return match[2].trim();
+}
 function resolveReasoningFromModel(model) {
   if (!model) return void 0;
   if (model.reasoning === false) return void 0;
@@ -16364,7 +16370,7 @@ function maskApiKey2(apiKey) {
 var BUILTIN_HERMES_MODELS = Object.freeze([
   {
     id: "deepseek/deepseek-v4.1-flash",
-    name: "DeepSeek: DeepSeek V4.1 Flash",
+    name: "DeepSeek V4.1 Flash",
     contextWindow: 1048576,
     maxTokens: 131072,
     inputModalities: ["text", "image"],
@@ -16380,7 +16386,7 @@ var BUILTIN_HERMES_MODELS = Object.freeze([
   },
   {
     id: "reflection/beam-1.0-501b-a23b:free",
-    name: "Reflection: Beam 1.0 501B A23B (Free)",
+    name: "Beam 1.0 501B A23B (Free)",
     contextWindow: 262144,
     maxTokens: 131072,
     inputModalities: ["text"],
@@ -16398,7 +16404,7 @@ var BUILTIN_HERMES_MODELS = Object.freeze([
   },
   {
     id: "ornith/ornith-1.5-122b:free",
-    name: "Ornith: Ornith 1.5 122B (Free)",
+    name: "Ornith 1.5 122B (Free)",
     contextWindow: 262144,
     maxTokens: 262144,
     inputModalities: ["text", "image"],
@@ -16406,7 +16412,7 @@ var BUILTIN_HERMES_MODELS = Object.freeze([
   },
   {
     id: "stepfun/step-3.7-flash:free",
-    name: "StepFun: Step 3.7 Flash (Free)",
+    name: "Step 3.7 Flash (Free)",
     contextWindow: 262144,
     maxTokens: 32768,
     inputModalities: ["text"],
@@ -16414,28 +16420,28 @@ var BUILTIN_HERMES_MODELS = Object.freeze([
   },
   {
     id: "openai/gpt-6.1-terra-pro",
-    name: "OpenAI: GPT-6.1 Terra Pro",
+    name: "GPT-6.1 Terra Pro",
     contextWindow: 1e6,
     maxTokens: 65536,
     inputModalities: ["text", "image"]
   },
   {
     id: "anthropic/claude-haiku-5.5",
-    name: "Anthropic: Claude Haiku 5.5",
+    name: "Claude Haiku 5.5",
     contextWindow: 1e6,
     maxTokens: 65536,
     inputModalities: ["text", "image"]
   },
   {
     id: "z-ai/glm-5.3",
-    name: "Z.ai: GLM 5.3",
+    name: "GLM 5.3",
     contextWindow: 1048576,
     maxTokens: 131072,
     inputModalities: ["text"]
   },
   {
     id: "particle-ai/particle-1",
-    name: "Particle AI: Particle-1",
+    name: "Particle-1",
     contextWindow: 1048576,
     maxTokens: 131072,
     inputModalities: ["text", "image"]
@@ -16460,7 +16466,7 @@ function parseHermesCatalog(data) {
       }
     }
     const builtin = builtinMap.get(id);
-    const name2 = stringValue(item?.name) ?? builtin?.name ?? id;
+    const name2 = stripVendorPrefix(stringValue(item?.name) ?? builtin?.name ?? id);
     const contextWindow = resolveContextWindowFromModel(item, builtin?.contextWindow ?? 262144);
     const maxTokens = resolveMaxTokensFromModel(item, builtin?.maxTokens ?? 32768);
     const inputModalities = Array.isArray(item?.architecture?.input_modalities) ? [...item.architecture.input_modalities] : builtin?.inputModalities ? [...builtin.inputModalities] : ["text"];
@@ -17040,7 +17046,7 @@ function normalizeOpenRouterFreeModelEntry(item) {
   const kind = classifyOpenRouterFreeKind(item);
   const isRouter = kind === "router";
   const rawName = String(item.name || id).replace(/\s*\(free\)\s*$/i, "").replace(/\s*\[free\]\s*$/i, "").trim();
-  const name2 = isRouter ? "Free Models Router" : rawName;
+  const name2 = isRouter ? "Free Models Router" : stripVendorPrefix(rawName);
   const rawContextLength = Number(item.top_provider?.context_length || item.context_length);
   const contextWindow = rawContextLength > 0 ? rawContextLength : isRouter ? 2e5 : 131072;
   const rawMaxCompletion = Number(item.top_provider?.max_completion_tokens);

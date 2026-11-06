@@ -9,6 +9,7 @@ import {
   resolveContextWindowFromModel,
   resolveMaxTokensFromModel,
   resolveReasoningFromModel,
+  stripVendorPrefix,
   stringValue,
 } from "../../../packages/providers/src/provider-utils.mjs";
 import { createKiloNativeExecutor } from "./native-transport.mjs";
@@ -144,7 +145,7 @@ export function parseKiloCatalog(data) {
     seen.add(id);
 
     const builtin = builtinMap.get(id);
-    const name = stringValue(item?.name) ?? builtin?.name ?? id;
+    const name = stripVendorPrefix(stringValue(item?.name) ?? builtin?.name ?? id);
 
     // Real context window and max tokens directly from the model data:
     const contextWindow = resolveContextWindowFromModel(item, builtin?.contextWindow ?? 256000);
