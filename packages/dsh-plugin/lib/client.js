@@ -16728,6 +16728,14 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
    key-card glyph, so it no longer reads as a plugin settings section. */
 [data-dockyard-subscriptions-nav] svg{display:none!important}
 [data-dockyard-subscriptions-nav]::before{content:'';flex:none;width:16px;height:16px;background-color:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.4' stroke-linejoin='round'%3E%3Crect x='1.5' y='3.5' width='13' height='9' rx='1.5'/%3E%3Cpath d='M1.5 6.5h13M4 10h3'/%3E%3C/svg%3E") no-repeat center/16px 16px;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.4' stroke-linejoin='round'%3E%3Crect x='1.5' y='3.5' width='13' height='9' rx='1.5'/%3E%3Cpath d='M1.5 6.5h13M4 10h3'/%3E%3C/svg%3E") no-repeat center/16px 16px}
+/* Alignment: each nav row is button.navCell (flex, gap:8px) containing
+   span.navIcon (16px) + span.navLabel. Custom marks are drawn on the button's
+   ::before, and the native svg is hidden, but the now-empty span.navIcon is
+   still a flex child and adds a second 8px gap \u2014 pushing third-party labels
+   8px right of the native rows. Hide that empty icon span so ::before becomes
+   the only 16px slot and the labels line up exactly with native sections. */
+[data-dsh-market-nav-icon] > span[class*="navIcon"],
+[data-dockyard-subscriptions-nav] > span[class*="navIcon"]{display:none!important}
 `;
 function installStyles() {
   if (typeof document === "undefined" || document.querySelector(`style[data-dockyard-dsh="${STYLE_ID}"]`)) return;
