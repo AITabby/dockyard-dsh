@@ -158,6 +158,9 @@ test("root install entry and published subpackage declare the same dependencies 
   const published = JSON.parse(readFileSync(new URL("../packages/dsh-plugin/package.json", import.meta.url), "utf8"));
 
   assert.deepEqual(root.dependencies, published.dependencies);
+  assert.deepEqual(root.peerDependencies, published.peerDependencies);
+  assert.deepEqual(root.peerDependenciesMeta, published.peerDependenciesMeta);
+  assert.deepEqual(root.devDependencies, published.devDependencies);
   assert.deepEqual(root.dsh.client.inject, published.dsh.client.inject);
   assert.equal(root.version, published.version);
 });

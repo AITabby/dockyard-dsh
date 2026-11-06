@@ -1,6 +1,6 @@
 {
   "name": "@dockyard-dsh/plugin",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "description": "A native account-pool and provider plugin for DeepSeek Harness (macOS and Windows).",
   "license": "MIT",
   "type": "module",
@@ -50,6 +50,49 @@
     }
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "^0.82.1",
+    "immer": "^10.1.1",
+    "ipaddr.js": "^2.5.0",
+    "zod": "^4.4.3",
+    "zustand": "~4.4.7"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-api-remotes": ">=0.1.7-alpha.2",
+    "@deepseek-ai/dsh-client-store": ">=0.1.7-alpha.2",
+    "@deepseek-ai/dsh-client-ui-conversation": ">=0.1.7-alpha.2",
+    "@deepseek-ai/dsh-client-ui-model-selection": ">=0.1.7-alpha.2",
+    "@deepseek-ai/dsh-llm": ">=0.1.7-alpha.2",
+    "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.7-alpha.2",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.1.7-alpha.2",
+    "react": "^18.3.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-api-remotes": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-store": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-conversation": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-model-selection": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm-pi-ai": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
     "@deepseek-ai/dsh-api-remotes": "^0.1.7-alpha.2",
     "@deepseek-ai/dsh-client-store": "^0.1.7-alpha.2",
     "@deepseek-ai/dsh-client-ui-conversation": "^0.1.7-alpha.2",
@@ -57,14 +100,7 @@
     "@deepseek-ai/dsh-llm": "^0.1.7-alpha.2",
     "@deepseek-ai/dsh-llm-pi-ai": "^0.1.7-alpha.2",
     "@deepseek-ai/dsh-typert-protocol": "^0.1.7-alpha.2",
-    "@earendil-works/pi-ai": "^0.82.1",
-    "immer": "^10.1.1",
-    "ipaddr.js": "^2.5.0",
-    "react": "^18.3.1",
-    "zod": "^4.4.3",
-    "zustand": "~4.4.7"
-  },
-  "devDependencies": {
-    "esbuild": "^0.25.0"
+    "esbuild": "^0.25.0",
+    "react": "^18.3.1"
   }
 }
