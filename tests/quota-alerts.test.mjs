@@ -109,3 +109,37 @@ test("an empty or missing model table yields no list", () => {
   assert.equal(modelsFromFetchAvailableModels({ models: {} }), null);
   assert.equal(modelsFromFetchAvailableModels(null), null);
 });
+
+test("only the rows the account's own picker offers become agent models", () => {
+  const models = modelsFromFetchAvailableModels({
+    models: {
+      "gemini-3.8-flash-high": { displayName: "Gemini 3.8 Flash (High)" },
+      "gemini-3.8-flash-tiered": { supportsThinking: true },
+      "gemini-2.5-flash": { displayName: "Gemini 3.5 Flash Lite" },
+      "gemini-3.5-flash-lite": { displayName: "Gemini 3.5 Flash Lite" },
+      "gemini-3.1-flash-image": { displayName: "Gemini 3.1 Flash Image" },
+      "gemini-4-argon-disabled": { displayName: "Gemini 4 Argon", disabled: true },
+      "chat_20706": { isInternal: true },
+      "tab_flash_lite_preview": { maxTokens: 16_384 },
+      "claude-sonnet-4-6": { displayName: "Claude Sonnet 4.6 (Thinking)" },
+    },
+    agentModelSorts: [{
+      displayName: "Recommended",
+      groups: [{ modelIds: ["gemini-3.8-flash-high", "claude-sonnet-4-6", "gemini-4-argon-disabled"] }],
+    }],
+  });
+  // Picker order, and only picker rows: no editor buffers, no tab previews, no
+  // image generators, and no legacy aliases that duplicate another model name.
+  assert.deepEqual(models.map((model) => model.id), ["gemini-3.8-flash-high", "claude-sonnet-4-6"]);
+});
+
+test("without a picker the internal editor rows are still left out", () => {
+  const models = modelsFromFetchAvailableModels({
+    models: {
+      "gemini-3.8-flash-high": { displayName: "Gemini 3.8 Flash (High)" },
+      "chat_20706": { isInternal: true },
+      retired: { displayName: "Retired", disabled: true },
+    },
+  });
+  assert.deepEqual(models.map((model) => model.id), ["gemini-3.8-flash-high"]);
+});

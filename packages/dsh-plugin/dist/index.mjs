@@ -6447,16 +6447,18 @@ async function fetchAntigravityAvailableModels({
 function modelsFromFetchAvailableModels(raw) {
   const table = raw?.models;
   if (!table || typeof table !== "object") return null;
-  const entries = Object.entries(table).filter(([id, info]) => typeof id === "string" && id.length > 0 && info && info.disabled !== true);
-  if (entries.length === 0) return null;
   const order = [];
   for (const sort of Array.isArray(raw?.agentModelSorts) ? raw.agentModelSorts : []) {
     for (const group of Array.isArray(sort?.groups) ? sort.groups : []) {
       for (const id of Array.isArray(group?.modelIds) ? group.modelIds : []) {
-        if (!order.includes(id)) order.push(id);
+        if (typeof id === "string" && id.length > 0 && !order.includes(id)) order.push(id);
       }
     }
   }
+  const selectable = Object.entries(table).filter(([id, info]) => typeof id === "string" && id.length > 0 && info && info.disabled !== true && info.isInternal !== true);
+  const picked = order.length > 0 ? selectable.filter(([id]) => order.includes(id)) : [];
+  const entries = picked.length > 0 ? picked : selectable;
+  if (entries.length === 0) return null;
   const models = entries.map(([id, info]) => ({
     id,
     name: typeof info.displayName === "string" && info.displayName.trim() ? info.displayName.trim() : id,
@@ -7672,16 +7674,18 @@ function persistableCatalog(value) {
     source: typeof value?.source === "string" ? value.source : "official_antigravity_cli"
   };
 }
+var ANTIGRAVITY_CATALOG_CACHE_SCHEMA = 2;
 async function readAntigravityCatalogCache(filePath) {
-  if (!filePath) return { schema: 1, entries: {} };
+  if (!filePath) return { schema: ANTIGRAVITY_CATALOG_CACHE_SCHEMA, entries: {} };
   try {
     const parsed = JSON.parse(await readFile4(filePath, "utf8"));
+    const usable = parsed?.schema === ANTIGRAVITY_CATALOG_CACHE_SCHEMA;
     return {
-      schema: 1,
-      entries: parsed?.entries && typeof parsed.entries === "object" ? parsed.entries : {}
+      schema: ANTIGRAVITY_CATALOG_CACHE_SCHEMA,
+      entries: usable && parsed?.entries && typeof parsed.entries === "object" ? parsed.entries : {}
     };
   } catch {
-    return { schema: 1, entries: {} };
+    return { schema: ANTIGRAVITY_CATALOG_CACHE_SCHEMA, entries: {} };
   }
 }
 async function writeAntigravityCatalogCache(filePath, cache) {
@@ -7690,7 +7694,7 @@ async function writeAntigravityCatalogCache(filePath, cache) {
   const entries = Object.entries(cache.entries ?? {}).slice(-8);
   const tempPath = `${filePath}.${randomUUID4()}.tmp`;
   try {
-    await writeFile2(tempPath, JSON.stringify({ schema: 1, entries: Object.fromEntries(entries) }), {
+    await writeFile2(tempPath, JSON.stringify({ schema: ANTIGRAVITY_CATALOG_CACHE_SCHEMA, entries: Object.fromEntries(entries) }), {
       encoding: "utf8",
       mode: 384
     });

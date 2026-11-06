@@ -665,22 +665,37 @@ export async function fetchAntigravityAvailableModels({
   return modelsFromFetchAvailableModels(raw);
 }
 
-/** Flatten fetchAvailableModels' map (and picker order) into catalog rows. */
+/**
+ * Flatten fetchAvailableModels' map into catalog rows.
+ *
+ * The reply's `models` table is a superset of what the official client offers:
+ * it also carries editor-only rows (`chat_*` buffers, `tab_*` previews), image
+ * generators and legacy aliases whose `displayName` is borrowed from another
+ * model (so several ids render as the same label). `agentModelSorts` is the
+ * account's own model picker, so when it is present it decides both which rows
+ * are selectable and in what order; ids outside it are not agent models.
+ */
 export function modelsFromFetchAvailableModels(raw) {
   const table = raw?.models;
   if (!table || typeof table !== "object") return null;
-  const entries = Object.entries(table).filter(([id, info]) => (
-    typeof id === "string" && id.length > 0 && info && info.disabled !== true
-  ));
-  if (entries.length === 0) return null;
   const order = [];
   for (const sort of Array.isArray(raw?.agentModelSorts) ? raw.agentModelSorts : []) {
     for (const group of Array.isArray(sort?.groups) ? sort.groups : []) {
       for (const id of Array.isArray(group?.modelIds) ? group.modelIds : []) {
-        if (!order.includes(id)) order.push(id);
+        if (typeof id === "string" && id.length > 0 && !order.includes(id)) order.push(id);
       }
     }
   }
+  const selectable = Object.entries(table).filter(([id, info]) => (
+    typeof id === "string"
+      && id.length > 0
+      && info
+      && info.disabled !== true
+      && info.isInternal !== true
+  ));
+  const picked = order.length > 0 ? selectable.filter(([id]) => order.includes(id)) : [];
+  const entries = picked.length > 0 ? picked : selectable;
+  if (entries.length === 0) return null;
   const models = entries.map(([id, info]) => ({
     id,
     name: typeof info.displayName === "string" && info.displayName.trim() ? info.displayName.trim() : id,

@@ -648,16 +648,22 @@ function persistableCatalog(value) {
   };
 }
 
+// Bump this whenever the row-selection rules change: a persisted list written
+// by an older build must be refetched instead of being served once more with
+// the previous (wider) set of rows.
+const ANTIGRAVITY_CATALOG_CACHE_SCHEMA = 2;
+
 async function readAntigravityCatalogCache(filePath) {
-  if (!filePath) return { schema: 1, entries: {} };
+  if (!filePath) return { schema: ANTIGRAVITY_CATALOG_CACHE_SCHEMA, entries: {} };
   try {
     const parsed = JSON.parse(await readFile(filePath, "utf8"));
+    const usable = parsed?.schema === ANTIGRAVITY_CATALOG_CACHE_SCHEMA;
     return {
-      schema: 1,
-      entries: parsed?.entries && typeof parsed.entries === "object" ? parsed.entries : {},
+      schema: ANTIGRAVITY_CATALOG_CACHE_SCHEMA,
+      entries: usable && parsed?.entries && typeof parsed.entries === "object" ? parsed.entries : {},
     };
   } catch {
-    return { schema: 1, entries: {} };
+    return { schema: ANTIGRAVITY_CATALOG_CACHE_SCHEMA, entries: {} };
   }
 }
 
@@ -667,7 +673,7 @@ async function writeAntigravityCatalogCache(filePath, cache) {
   const entries = Object.entries(cache.entries ?? {}).slice(-8);
   const tempPath = `${filePath}.${randomUUID()}.tmp`;
   try {
-    await writeFile(tempPath, JSON.stringify({ schema: 1, entries: Object.fromEntries(entries) }), {
+    await writeFile(tempPath, JSON.stringify({ schema: ANTIGRAVITY_CATALOG_CACHE_SCHEMA, entries: Object.fromEntries(entries) }), {
       encoding: "utf8",
       mode: 0o600,
     });
