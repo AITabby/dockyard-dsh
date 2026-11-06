@@ -594,7 +594,15 @@ export function createDockyardLlmAdapter({
     },
 
     async *stream(options) {
-      await ensureRuntimeReady();
+      // The pools and routes are ready after the prepared phase; waiting for a
+      // provider round-trip there would sit in front of the first token. Fall
+      // back to the full init only when the account itself is still missing.
+      if (typeof runtime.whenPrepared === "function") {
+        await runtime.whenPrepared();
+        if (!providerHasConnectedAccount(runtime, options.provider)) await ensureRuntimeReady();
+      } else {
+        await ensureRuntimeReady();
+      }
       if (!providerHasConnectedAccount(runtime, options.provider)) {
         throw new ValidationError(`Provider ${options.provider} has no connected Dockyard account`);
       }

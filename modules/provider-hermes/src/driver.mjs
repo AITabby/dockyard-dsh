@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { createCredentialRef } from "../../../packages/vault/src/index.mjs";
 import {
   createAccountRecord,
+  createBalanceSnapshot,
   createQuotaSnapshot,
 } from "../../../packages/core/src/contracts.mjs";
 import { ValidationError } from "../../../packages/core/src/errors.mjs";
@@ -281,7 +282,8 @@ export class HermesDriver {
     }
 
     const candidates = auth.accounts.map((acc, index) => {
-      const balance = typeof acc.balance === "number" ? acc.balance : (index === 0 ? 50.0 : 10.0);
+      // Pay-as-you-go money: real when the auth file says so, unknown otherwise.
+      const amount = typeof acc.balance === "number" && Number.isFinite(acc.balance) ? acc.balance : null;
       return {
         candidateId: acc.accountId || `hermes-acc-${index + 1}`,
         accountId: acc.accountId || `hermes-acc-${index + 1}`,
@@ -289,28 +291,18 @@ export class HermesDriver {
         email: acc.email || null,
         apiKey: acc.apiKey,
         subscription: {
-          plan: `Nous Portal ($${balance.toFixed(2)} 不限时)`,
+          plan: amount === null ? "Nous Portal" : `Nous Portal (本地记录 $${amount.toFixed(2)})`,
         },
-        quota: {
-          remaining: balance,
-          limit: balance,
-          unit: "",
-          updatedAt: new Date().toISOString(),
-          windows: [
-            {
-              id: "hermes-balance",
-              name: "充值金额",
-              remaining: balance,
-              limit: balance,
-              unit: "",
-              updatedAt: new Date().toISOString(),
-            },
-          ],
-        },
+        // A balance is not a quota window: it has no cap to divide by and never
+        // resets, so reporting one produced a meaningless 100% bar.
+        balance: amount === null ? null : createBalanceSnapshot({ amount, unit: "USD", source: "nous_portal_billing" }),
+        // Kept as an empty snapshot so every candidate has the same shape; a
+        // balance provider has no windows to report.
+        quota: createQuotaSnapshot({}),
         resources: {
           quotaSource: "nous_portal_billing",
           quotaAvailable: true,
-          quotaDiagnostic: "按量充值金额（不限时）；以 Portal 控制台为准",
+          quotaDiagnostic: "按量充值余额；以 Portal 控制台为准",
           quotaUrl: "https://portal.nousresearch.com",
         },
         source: "hermes_auth",
@@ -344,9 +336,9 @@ export class HermesDriver {
       }).catch(() => {});
     }
 
-    const balance = typeof candidate?.quota?.remaining === "number"
-      ? candidate.quota.remaining
-      : (accountId.includes("2") ? 10.0 : 50.0);
+    const amount = typeof candidate?.balance?.amount === "number" && Number.isFinite(candidate.balance.amount)
+      ? candidate.balance.amount
+      : null;
 
     return createAccountRecord({
       accountId,
@@ -358,28 +350,13 @@ export class HermesDriver {
         credentialRef: ref,
       },
       subscription: {
-        plan: candidate?.subscription?.plan || `Nous Portal ($${balance.toFixed(2)} 不限时)`,
+        plan: candidate?.subscription?.plan || (amount === null ? "Nous Portal" : `Nous Portal ($${amount.toFixed(2)} 不限时)`),
       },
-      quota: createQuotaSnapshot({
-        remaining: balance,
-        limit: balance,
-        unit: "",
-        updatedAt: new Date().toISOString(),
-        windows: [
-          {
-            id: "hermes-balance",
-            name: "充值金额",
-            remaining: balance,
-            limit: balance,
-            unit: "",
-            updatedAt: new Date().toISOString(),
-          },
-        ],
-      }),
+      balance: amount === null ? null : createBalanceSnapshot({ amount, unit: "USD", source: "nous_portal_billing" }),
       resources: {
         quotaSource: "nous_portal_billing",
         quotaAvailable: true,
-        quotaDiagnostic: "按量充值金额（不限时）；以 Portal 控制台为准",
+        quotaDiagnostic: "按量充值余额；以 Portal 控制台为准",
         quotaUrl: "https://portal.nousresearch.com",
       },
       health: {
@@ -436,32 +413,52 @@ export class HermesDriver {
       };
     }
 
-    const balance = typeof account?.quota?.remaining === "number"
-      ? account.quota.remaining
-      : (account?.accountId?.includes("2") ? 10.0 : 50.0);
+    // Re-read the auth file: it is the only place a balance lives, and it may
+    // have been topped up since the account was imported.
+    const authNow = extractHermesAuth();
+    const authMatch = Array.isArray(authNow?.accounts)
+      ? authNow.accounts.find((entry) => entry?.accountId === account?.accountId)
+      : null;
+    const amount = typeof authMatch?.balance === "number" && Number.isFinite(authMatch.balance)
+      ? authMatch.balance
+      : (typeof account?.balance?.amount === "number" && Number.isFinite(account.balance.amount)
+        ? account.balance.amount
+        : null);
 
     return {
       health: { status: "healthy" },
-      quota: createQuotaSnapshot({
-        remaining: balance,
-        limit: balance,
-        unit: "",
-        updatedAt: new Date().toISOString(),
-        windows: [
-          {
-            id: "hermes-balance",
-            name: "充值金额",
-            remaining: balance,
-            limit: balance,
-            unit: "",
-            updatedAt: new Date().toISOString(),
-          },
-        ],
-      }),
+      // An empty quota snapshot keeps the shape stable and tells the runtime this
+      // refresh already answered the quota question; the money travels beside it.
+      quota: createQuotaSnapshot({}),
+      balance: amount === null ? null : createBalanceSnapshot({ amount, unit: "USD", source: "nous_portal_billing" }),
       resources: {
         quotaSource: "nous_portal_billing",
         quotaAvailable: true,
-        quotaDiagnostic: "按量充值金额（不限时）；以 Portal 控制台为准",
+        quotaDiagnostic: "按量充值余额；以 Portal 控制台为准",
+        quotaUrl: "https://portal.nousresearch.com",
+      },
+    };
+  }
+
+  /**
+   * Quota for a balance provider: there is no window to report, only what is
+   * left to spend. The auth file is re-read so a top-up shows up without
+   * re-importing the account.
+   */
+  async getQuota(account, context = {}) {
+    const auth = extractHermesAuth();
+    const match = Array.isArray(auth?.accounts)
+      ? auth.accounts.find((entry) => entry?.accountId === account?.accountId)
+      : null;
+    const amount = typeof match?.balance === "number" && Number.isFinite(match.balance)
+      ? match.balance
+      : (typeof account?.balance?.amount === "number" ? account.balance.amount : null);
+    return {
+      quota: createQuotaSnapshot({}),
+      balance: amount === null ? null : createBalanceSnapshot({ amount, unit: "USD", source: "nous_portal_billing" }),
+      resources: {
+        quotaSource: "nous_portal_billing",
+        quotaDiagnostic: "按量充值余额；以 Portal 控制台为准",
         quotaUrl: "https://portal.nousresearch.com",
       },
     };

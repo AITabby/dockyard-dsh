@@ -190,6 +190,7 @@ tests/                  安全、生命周期、provider 与 runtime 测试
 - provider 的 CLI、客户端路径、OAuth 返回字段和额度接口都可能变；缺失字段保持未知，不做猜测。
 - 浏览器多账号依赖 provider 官方授权页与 token response；对方改了流程就需要重新验证，而不是猜协议。
 - Windows 上的本机会话扫描与 WorkBuddy 不可用。
+- **首字延迟主要不在插件**：实测直连上游首包约 2.8s，经插件约 2.6s（预热后几乎不额外增加）。界面上更长的等待通常来自 DSH 侧的上下文组装，以及切换模型后该模型的提示缓存需要重建；长会话定期开新会话、减少切换模型都能明显改善。
 
 ---
 
@@ -370,3 +371,4 @@ The rule is simple: provider-specific logic stays in provider modules, account s
 - Provider CLIs, desktop paths, OAuth fields, and quota APIs can change; missing fields stay unknown rather than guessed.
 - Multi-account browser flows depend on each provider's official authorization page and token response; a changed flow has to be re-verified, not guessed.
 - On Windows, local session scanning and WorkBuddy are unavailable.
+- **Time to first token is mostly not the plugin**: a direct upstream call starts streaming in about 2.8s, and through the plugin in about 2.6s once warm. Longer waits in the UI usually come from DSH assembling the context, plus the prompt cache being rebuilt after a model switch; starting a fresh session and switching models less often both help.

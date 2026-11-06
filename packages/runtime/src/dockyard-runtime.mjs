@@ -1062,7 +1062,7 @@ export class DockyardRuntime {
   #applyPatch(pool, accountId, patch = {}) {
     if (!patch || typeof patch !== "object") return;
     const input = { accountId };
-    for (const key of ["email", "displayName", "subscription", "quota", "refresh", "resources"]) {
+    for (const key of ["email", "displayName", "subscription", "quota", "balance", "refresh", "resources"]) {
       if (patch[key] !== undefined) input[key] = patch[key];
     }
     if (patch.identity?.email !== undefined) input.email = patch.identity.email;

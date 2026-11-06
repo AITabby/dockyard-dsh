@@ -131,6 +131,7 @@ export function createAccountRecord(input, now = new Date()) {
       expiresAt: isoOrNull(input.subscription?.expiresAt, "subscription.expiresAt"),
     },
     quota: createQuotaSnapshot(input.quota ?? {}, now),
+    balance: input.balance ? createBalanceSnapshot(input.balance, now) : null,
     refresh: createRefreshState(input.refresh ?? {}),
     resources: objectOrEmpty(input.resources),
     health: {

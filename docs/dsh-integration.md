@@ -40,7 +40,7 @@ Do not change the normal DSH profile while testing. Install the local bundle int
 
 ```sh
 DSH_HOME=/tmp/dockyard-dsh-home dsh plugin --profile web add "$PWD"   # 仓库根目录
-DSH_HOME=/tmp/dockyard-dsh-home dsh web --dump-config
+DSH_HOME=/tmp/dockyard-dsh-home dsh --profile web --dump-config
 DSH_HOME=/tmp/dockyard-dsh-home dsh web
 ```
 

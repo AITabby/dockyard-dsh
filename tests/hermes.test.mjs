@@ -248,12 +248,14 @@ test("HermesDriver discovers both configured accounts and imports into account p
     const cand1 = discovery.candidates[0];
     const cand2 = discovery.candidates[1];
     assert.equal(cand1.candidateId, "hermes-acc-1");
-    assert.equal(cand1.quota.remaining, 50);
-    assert.equal(cand1.quota.windows[0].remaining, 50);
+    // A pay-as-you-go balance is money, not a quota window: it has no cap to
+    // divide by, so it is reported as a balance and never as a 100% window.
+    assert.equal(cand1.balance.amount, 50);
+    assert.equal(cand1.balance.unit, "USD");
+    assert.equal(cand1.quota.windows.length, 0);
     assert.ok(cand1.resources?.quotaDiagnostic);
     assert.equal(cand2.candidateId, "hermes-acc-2");
-    assert.equal(cand2.quota.remaining, 10);
-    assert.equal(cand2.quota.windows[0].remaining, 10);
+    assert.equal(cand2.balance.amount, 10);
 
     const mockSecretStore = {
       data: new Map(),
@@ -266,12 +268,12 @@ test("HermesDriver discovers both configured accounts and imports into account p
 
     assert.equal(acc1.providerId, "hermes");
     assert.equal(acc1.accountId, "hermes-acc-1");
-    assert.equal(acc1.quota.remaining, 50);
+    assert.equal(acc1.balance.amount, 50);
     assert.ok(acc1.resources?.quotaDiagnostic);
 
     assert.equal(acc2.providerId, "hermes");
     assert.equal(acc2.accountId, "hermes-acc-2");
-    assert.equal(acc2.quota.remaining, 10);
+    assert.equal(acc2.balance.amount, 10);
   } finally {
     if (prevAuthPath === undefined) delete process.env.HERMES_AUTH_PATH;
     else process.env.HERMES_AUTH_PATH = prevAuthPath;
@@ -390,4 +392,25 @@ test("buildHermesMessages never sends an empty content array", async () => {
   assert.equal(call.content, "");
   assert.equal(call.tool_calls[0].function.name, "clock");
   assert.equal(call.tool_calls[0].function.arguments, JSON.stringify({ tz: "UTC" }));
+});
+
+test("HermesDriver never invents a balance the auth file does not carry", async () => {
+  const tempAuthPath = join(tmpdir(), `hermes-test-nobalance-${Date.now()}.json`);
+  writeFileSync(tempAuthPath, JSON.stringify({
+    accounts: [{ accountId: "hermes-acc-9", displayName: "Hermes No Balance", apiKey: "sk-hermes-9" }],
+  }));
+  const prevAuthPath = process.env.HERMES_AUTH_PATH;
+  process.env.HERMES_AUTH_PATH = tempAuthPath;
+  try {
+    const driver = createHermesDriver();
+    const discovery = await driver.discover();
+    const candidate = discovery.candidates[0];
+    assert.equal(candidate.balance, null, "no balance was reported, so none may be shown");
+    assert.equal(candidate.quota.windows.length, 0);
+    assert.equal(candidate.subscription.plan, "Nous Portal");
+  } finally {
+    if (prevAuthPath === undefined) delete process.env.HERMES_AUTH_PATH;
+    else process.env.HERMES_AUTH_PATH = prevAuthPath;
+    try { unlinkSync(tempAuthPath); } catch {}
+  }
 });

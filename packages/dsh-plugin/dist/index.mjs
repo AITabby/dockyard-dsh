@@ -1174,6 +1174,7 @@ function createAccountRecord(input, now = /* @__PURE__ */ new Date()) {
       expiresAt: isoOrNull(input.subscription?.expiresAt, "subscription.expiresAt")
     },
     quota: createQuotaSnapshot(input.quota ?? {}, now),
+    balance: input.balance ? createBalanceSnapshot(input.balance, now) : null,
     refresh: createRefreshState(input.refresh ?? {}),
     resources: objectOrEmpty(input.resources),
     health: {
@@ -2784,7 +2785,12 @@ function createDockyardLlmAdapter({
       };
     },
     async *stream(options) {
-      await ensureRuntimeReady();
+      if (typeof runtime.whenPrepared === "function") {
+        await runtime.whenPrepared();
+        if (!providerHasConnectedAccount(runtime, options.provider)) await ensureRuntimeReady();
+      } else {
+        await ensureRuntimeReady();
+      }
       if (!providerHasConnectedAccount(runtime, options.provider)) {
         throw new ValidationError(`Provider ${options.provider} has no connected Dockyard account`);
       }
@@ -16425,7 +16431,7 @@ var HermesDriver = class {
       };
     }
     const candidates = auth.accounts.map((acc, index) => {
-      const balance = typeof acc.balance === "number" ? acc.balance : index === 0 ? 50 : 10;
+      const amount = typeof acc.balance === "number" && Number.isFinite(acc.balance) ? acc.balance : null;
       return {
         candidateId: acc.accountId || `hermes-acc-${index + 1}`,
         accountId: acc.accountId || `hermes-acc-${index + 1}`,
@@ -16433,28 +16439,18 @@ var HermesDriver = class {
         email: acc.email || null,
         apiKey: acc.apiKey,
         subscription: {
-          plan: `Nous Portal ($${balance.toFixed(2)} \u4E0D\u9650\u65F6)`
+          plan: amount === null ? "Nous Portal" : `Nous Portal (\u672C\u5730\u8BB0\u5F55 $${amount.toFixed(2)})`
         },
-        quota: {
-          remaining: balance,
-          limit: balance,
-          unit: "",
-          updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-          windows: [
-            {
-              id: "hermes-balance",
-              name: "\u5145\u503C\u91D1\u989D",
-              remaining: balance,
-              limit: balance,
-              unit: "",
-              updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-            }
-          ]
-        },
+        // A balance is not a quota window: it has no cap to divide by and never
+        // resets, so reporting one produced a meaningless 100% bar.
+        balance: amount === null ? null : createBalanceSnapshot({ amount, unit: "USD", source: "nous_portal_billing" }),
+        // Kept as an empty snapshot so every candidate has the same shape; a
+        // balance provider has no windows to report.
+        quota: createQuotaSnapshot({}),
         resources: {
           quotaSource: "nous_portal_billing",
           quotaAvailable: true,
-          quotaDiagnostic: "\u6309\u91CF\u5145\u503C\u91D1\u989D\uFF08\u4E0D\u9650\u65F6\uFF09\uFF1B\u4EE5 Portal \u63A7\u5236\u53F0\u4E3A\u51C6",
+          quotaDiagnostic: "\u6309\u91CF\u5145\u503C\u4F59\u989D\uFF1B\u4EE5 Portal \u63A7\u5236\u53F0\u4E3A\u51C6",
           quotaUrl: "https://portal.nousresearch.com"
         },
         source: "hermes_auth",
@@ -16483,7 +16479,7 @@ var HermesDriver = class {
       }).catch(() => {
       });
     }
-    const balance = typeof candidate2?.quota?.remaining === "number" ? candidate2.quota.remaining : accountId.includes("2") ? 10 : 50;
+    const amount = typeof candidate2?.balance?.amount === "number" && Number.isFinite(candidate2.balance.amount) ? candidate2.balance.amount : null;
     return createAccountRecord({
       accountId,
       providerId: PROVIDER_ID16,
@@ -16494,28 +16490,13 @@ var HermesDriver = class {
         credentialRef: ref
       },
       subscription: {
-        plan: candidate2?.subscription?.plan || `Nous Portal ($${balance.toFixed(2)} \u4E0D\u9650\u65F6)`
+        plan: candidate2?.subscription?.plan || (amount === null ? "Nous Portal" : `Nous Portal ($${amount.toFixed(2)} \u4E0D\u9650\u65F6)`)
       },
-      quota: createQuotaSnapshot({
-        remaining: balance,
-        limit: balance,
-        unit: "",
-        updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-        windows: [
-          {
-            id: "hermes-balance",
-            name: "\u5145\u503C\u91D1\u989D",
-            remaining: balance,
-            limit: balance,
-            unit: "",
-            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-          }
-        ]
-      }),
+      balance: amount === null ? null : createBalanceSnapshot({ amount, unit: "USD", source: "nous_portal_billing" }),
       resources: {
         quotaSource: "nous_portal_billing",
         quotaAvailable: true,
-        quotaDiagnostic: "\u6309\u91CF\u5145\u503C\u91D1\u989D\uFF08\u4E0D\u9650\u65F6\uFF09\uFF1B\u4EE5 Portal \u63A7\u5236\u53F0\u4E3A\u51C6",
+        quotaDiagnostic: "\u6309\u91CF\u5145\u503C\u4F59\u989D\uFF1B\u4EE5 Portal \u63A7\u5236\u53F0\u4E3A\u51C6",
         quotaUrl: "https://portal.nousresearch.com"
       },
       health: {
@@ -16563,29 +16544,38 @@ var HermesDriver = class {
         health: { status: "auth_expired" }
       };
     }
-    const balance = typeof account?.quota?.remaining === "number" ? account.quota.remaining : account?.accountId?.includes("2") ? 10 : 50;
+    const authNow = extractHermesAuth();
+    const authMatch = Array.isArray(authNow?.accounts) ? authNow.accounts.find((entry) => entry?.accountId === account?.accountId) : null;
+    const amount = typeof authMatch?.balance === "number" && Number.isFinite(authMatch.balance) ? authMatch.balance : typeof account?.balance?.amount === "number" && Number.isFinite(account.balance.amount) ? account.balance.amount : null;
     return {
       health: { status: "healthy" },
-      quota: createQuotaSnapshot({
-        remaining: balance,
-        limit: balance,
-        unit: "",
-        updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-        windows: [
-          {
-            id: "hermes-balance",
-            name: "\u5145\u503C\u91D1\u989D",
-            remaining: balance,
-            limit: balance,
-            unit: "",
-            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-          }
-        ]
-      }),
+      // An empty quota snapshot keeps the shape stable and tells the runtime this
+      // refresh already answered the quota question; the money travels beside it.
+      quota: createQuotaSnapshot({}),
+      balance: amount === null ? null : createBalanceSnapshot({ amount, unit: "USD", source: "nous_portal_billing" }),
       resources: {
         quotaSource: "nous_portal_billing",
         quotaAvailable: true,
-        quotaDiagnostic: "\u6309\u91CF\u5145\u503C\u91D1\u989D\uFF08\u4E0D\u9650\u65F6\uFF09\uFF1B\u4EE5 Portal \u63A7\u5236\u53F0\u4E3A\u51C6",
+        quotaDiagnostic: "\u6309\u91CF\u5145\u503C\u4F59\u989D\uFF1B\u4EE5 Portal \u63A7\u5236\u53F0\u4E3A\u51C6",
+        quotaUrl: "https://portal.nousresearch.com"
+      }
+    };
+  }
+  /**
+   * Quota for a balance provider: there is no window to report, only what is
+   * left to spend. The auth file is re-read so a top-up shows up without
+   * re-importing the account.
+   */
+  async getQuota(account, context = {}) {
+    const auth = extractHermesAuth();
+    const match = Array.isArray(auth?.accounts) ? auth.accounts.find((entry) => entry?.accountId === account?.accountId) : null;
+    const amount = typeof match?.balance === "number" && Number.isFinite(match.balance) ? match.balance : typeof account?.balance?.amount === "number" ? account.balance.amount : null;
+    return {
+      quota: createQuotaSnapshot({}),
+      balance: amount === null ? null : createBalanceSnapshot({ amount, unit: "USD", source: "nous_portal_billing" }),
+      resources: {
+        quotaSource: "nous_portal_billing",
+        quotaDiagnostic: "\u6309\u91CF\u5145\u503C\u4F59\u989D\uFF1B\u4EE5 Portal \u63A7\u5236\u53F0\u4E3A\u51C6",
         quotaUrl: "https://portal.nousresearch.com"
       }
     };
@@ -19022,7 +19012,7 @@ var DockyardRuntime = class {
   #applyPatch(pool, accountId, patch = {}) {
     if (!patch || typeof patch !== "object") return;
     const input = { accountId };
-    for (const key of ["email", "displayName", "subscription", "quota", "refresh", "resources"]) {
+    for (const key of ["email", "displayName", "subscription", "quota", "balance", "refresh", "resources"]) {
       if (patch[key] !== void 0) input[key] = patch[key];
     }
     if (patch.identity?.email !== void 0) input.email = patch.identity.email;
