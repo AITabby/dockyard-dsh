@@ -1994,13 +1994,6 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
         ? text(t, "status.readingSubscriptions")
         : text(t, "status.subscriptionReady")))),
     h("div", { className: "dockyard-dsh-popup-scroll" },
-      h("div", { className: "dockyard-dsh-toolbar" },
-        h("button", {
-          type: "button",
-          className: "dockyard-dsh-action",
-          disabled: busy,
-          onClick: () => controller.refreshAll(),
-        }, controlState.action === "refresh" ? text(t, "status.refreshing") : text(t, "subscription.refreshAll"))),
       h("div", { className: "dockyard-dsh-section" },
         h("div", { className: "dockyard-dsh-section-title" },
           h("span", null, text(t, "subscription.providers")),
@@ -2027,8 +2020,7 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
               h("div", { className: "dockyard-dsh-provider-card-main" },
                 h("div", { className: "dockyard-dsh-provider-card-title-row" },
                   h("span", { className: "dockyard-dsh-provider-row-name" }, displayName),
-                  h("span", { className: "dockyard-dsh-provider-row-arrow", "aria-hidden": true }, "›")),
-                h("div", { className: "dockyard-dsh-provider-row-meta" }, `${providerOverviewSummary(provider, t)}${modelCount ? ` · ${modelCount}` : ""}`)),
+                  h("span", { className: "dockyard-dsh-provider-row-arrow", "aria-hidden": true }, "›"))),
               h("div", { className: "dockyard-dsh-provider-card-meta" },
                 h("span", { className: "dockyard-dsh-provider-card-badge" }, providerId)));
          })))));
