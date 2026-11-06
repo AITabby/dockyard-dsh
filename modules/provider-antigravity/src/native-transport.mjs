@@ -716,7 +716,7 @@ export function collapseAntigravityTierFamilies(models, { defaultModelId = null 
     const name = stripTierLabel(preferred.model.name)
       ?? stripTierLabel(members[0].model.name)
       ?? familyId;
-    collapsed.set(familyId, {
+    const familyRow = {
       ...preferred.model,
       id: preferred.model.id,
       name,
@@ -724,7 +724,10 @@ export function collapseAntigravityTierFamilies(models, { defaultModelId = null 
         efforts: tiers.map((tierId) => ({ id: tierId, name: tierLabel(tierId) })),
         defaultEffort: preferred.tierId,
       },
-    });
+    };
+    // The family is usable again as soon as one tier is served.
+    if (!members.every((member) => member.model.unavailable === true)) delete familyRow.unavailable;
+    collapsed.set(familyId, familyRow);
   }
   if (collapsed.size === 0) return rows;
 
@@ -764,19 +767,20 @@ export function modelsFromFetchAvailableModels(raw) {
       }
     }
   }
-  const selectable = Object.entries(table).filter(([id, info]) => (
-    typeof id === "string"
-      && id.length > 0
-      && info
-      && info.disabled !== true
-      && info.isInternal !== true
+  // Rows the account cannot use right now (an exhausted quota, a model the
+  // official client greys out as "Unavailable") stay in the list so the picker
+  // can show them, but they are never selectable.
+  const agentRows = Object.entries(table).filter(([id, info]) => (
+    typeof id === "string" && id.length > 0 && info && info.isInternal !== true
   ));
-  const picked = order.length > 0 ? selectable.filter(([id]) => order.includes(id)) : [];
-  const entries = picked.length > 0 ? picked : selectable;
+  const enabledRows = agentRows.filter(([, info]) => info.disabled !== true);
+  const picked = order.length > 0 ? agentRows.filter(([id]) => order.includes(id)) : enabledRows;
+  const entries = picked.length > 0 ? picked : enabledRows;
   if (entries.length === 0) return null;
   const models = entries.map(([id, info]) => ({
     id,
     name: typeof info.displayName === "string" && info.displayName.trim() ? info.displayName.trim() : id,
+    ...(info.disabled === true ? { unavailable: true } : {}),
     ...(Number.isFinite(info.maxTokens) && info.maxTokens > 0 ? { contextWindow: info.maxTokens } : {}),
     ...(Number.isFinite(info.maxOutputTokens) && info.maxOutputTokens > 0 ? { maxTokens: info.maxOutputTokens } : {}),
     ...(info.supportsImages === true ? { inputModalities: ["text", "image"] } : {}),

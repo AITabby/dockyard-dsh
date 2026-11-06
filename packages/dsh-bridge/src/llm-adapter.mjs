@@ -123,7 +123,10 @@ function providerCatalogModels(providerId, catalog) {
   const seen = new Set();
   return catalog.models
     .filter((model) => {
-      if (!model || typeof model.id !== "string" || model.id.length === 0 || seen.has(model.id)) return false;
+      // A model the provider currently cannot serve (exhausted quota) is shown
+      // in the settings picker only; the composer must not offer it.
+      if (!model || model.unavailable === true) return false;
+      if (typeof model.id !== "string" || model.id.length === 0 || seen.has(model.id)) return false;
       seen.add(model.id);
       return true;
     })

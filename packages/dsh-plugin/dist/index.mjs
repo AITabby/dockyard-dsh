@@ -2566,7 +2566,8 @@ function providerCatalogModels(providerId, catalog) {
   if (!Array.isArray(catalog?.models)) return [];
   const seen = /* @__PURE__ */ new Set();
   return catalog.models.filter((model) => {
-    if (!model || typeof model.id !== "string" || model.id.length === 0 || seen.has(model.id)) return false;
+    if (!model || model.unavailable === true) return false;
+    if (typeof model.id !== "string" || model.id.length === 0 || seen.has(model.id)) return false;
     seen.add(model.id);
     return true;
   }).map((model) => {
@@ -6542,7 +6543,7 @@ function collapseAntigravityTierFamilies(models, { defaultModelId = null } = {})
     if (tiers.length < 2) continue;
     const preferred = members.find((member) => member.model.id === defaultModelId) ?? members.find((member) => member.tierId === "medium") ?? members[0];
     const name2 = stripTierLabel(preferred.model.name) ?? stripTierLabel(members[0].model.name) ?? familyId;
-    collapsed.set(familyId, {
+    const familyRow = {
       ...preferred.model,
       id: preferred.model.id,
       name: name2,
@@ -6550,7 +6551,9 @@ function collapseAntigravityTierFamilies(models, { defaultModelId = null } = {})
         efforts: tiers.map((tierId) => ({ id: tierId, name: tierLabel(tierId) })),
         defaultEffort: preferred.tierId
       }
-    });
+    };
+    if (!members.every((member) => member.model.unavailable === true)) delete familyRow.unavailable;
+    collapsed.set(familyId, familyRow);
   }
   if (collapsed.size === 0) return rows;
   const result = [];
@@ -6578,13 +6581,15 @@ function modelsFromFetchAvailableModels(raw) {
       }
     }
   }
-  const selectable = Object.entries(table).filter(([id, info]) => typeof id === "string" && id.length > 0 && info && info.disabled !== true && info.isInternal !== true);
-  const picked = order.length > 0 ? selectable.filter(([id]) => order.includes(id)) : [];
-  const entries = picked.length > 0 ? picked : selectable;
+  const agentRows = Object.entries(table).filter(([id, info]) => typeof id === "string" && id.length > 0 && info && info.isInternal !== true);
+  const enabledRows = agentRows.filter(([, info]) => info.disabled !== true);
+  const picked = order.length > 0 ? agentRows.filter(([id]) => order.includes(id)) : enabledRows;
+  const entries = picked.length > 0 ? picked : enabledRows;
   if (entries.length === 0) return null;
   const models = entries.map(([id, info]) => ({
     id,
     name: typeof info.displayName === "string" && info.displayName.trim() ? info.displayName.trim() : id,
+    ...info.disabled === true ? { unavailable: true } : {},
     ...Number.isFinite(info.maxTokens) && info.maxTokens > 0 ? { contextWindow: info.maxTokens } : {},
     ...Number.isFinite(info.maxOutputTokens) && info.maxOutputTokens > 0 ? { maxTokens: info.maxOutputTokens } : {},
     ...info.supportsImages === true ? { inputModalities: ["text", "image"] } : {}
@@ -19727,9 +19732,10 @@ var DockyardDshService = class {
       }
     }
     const models = catalog?.models ?? [];
+    const usable = models.filter((model) => model?.unavailable !== true);
     const enabledModelIds = reconcileModelSelection(
       this.runtime.getModelSelection(providerId, accountId),
-      models
+      usable.length > 0 ? usable : models
     );
     return {
       providerId,

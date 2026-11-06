@@ -383,9 +383,10 @@ export class DockyardDshService {
     const models = catalog?.models ?? [];
     // The saved selection may predate this catalog: reconcile it so a further
     // filter cannot hide every model the account actually serves.
+    const usable = models.filter((model) => model?.unavailable !== true);
     const enabledModelIds = reconcileModelSelection(
       this.runtime.getModelSelection(providerId, accountId),
-      models,
+      usable.length > 0 ? usable : models,
     );
     return {
       providerId,

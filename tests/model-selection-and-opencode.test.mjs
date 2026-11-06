@@ -85,13 +85,19 @@ test("the model panel reads the catalog and selection of the account it shows", 
       catalogCalls.push({ providerId, context });
       return {
         models: context.accountId === "account-b"
-          ? [{ id: "gemini-3.8-flash-high" }, { id: "claude-sonnet-4-6" }]
+          ? [
+              { id: "gemini-3.8-flash-high" },
+              { id: "claude-sonnet-4-6" },
+              { id: "gemini-4-argon-disabled", unavailable: true },
+            ]
           : [{ id: "gemini-4-argon-medium" }, { id: "gemini-3.8-flash-high" }],
       };
     },
     getModelSelection: (providerId, accountId) => {
       calls.push({ method: "get", providerId, accountId });
-      return accountId === "account-b" ? ["claude-sonnet-4-6"] : ["gemini-4-argon-medium"];
+      return accountId === "account-b"
+        ? ["claude-sonnet-4-6", "gemini-4-argon-disabled"]
+        : ["gemini-4-argon-medium"];
     },
     setModelSelection: async (providerId, enabledModelIds, accountId) => {
       calls.push({ method: "set", providerId, accountId, enabledModelIds });
@@ -106,7 +112,12 @@ test("the model panel reads the catalog and selection of the account it shows", 
   assert.equal(catalogCalls[0].context.accountId, "account-a");
 
   const forB = await service.getModelSelection("antigravity", "account-b");
-  assert.deepEqual(forB.models.map((model) => model.id), ["gemini-3.8-flash-high", "claude-sonnet-4-6"]);
+  // The unavailable row is listed (the picker greys it out) but never enabled.
+  assert.deepEqual(forB.models.map((model) => model.id), [
+    "gemini-3.8-flash-high",
+    "claude-sonnet-4-6",
+    "gemini-4-argon-disabled",
+  ]);
   assert.deepEqual(forB.enabledModelIds, ["claude-sonnet-4-6"]);
   assert.equal(catalogCalls[1].context.accountId, "account-b");
 

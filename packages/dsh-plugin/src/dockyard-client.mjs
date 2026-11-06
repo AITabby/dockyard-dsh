@@ -190,6 +190,10 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-model-item-title{display:flex;align-items:center;min-width:0;width:100%;color:var(--dsw-alias-label-primary,#f5f7fb);font-size:13px;font-weight:500;line-height:18px}
 .dockyard-dsh-model-item-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 1 auto}
 .dockyard-dsh-free-badge{display:inline-flex;align-items:center;flex:none;margin-left:6px;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:600;line-height:14px;background:rgba(34,197,94,.15);color:#4ade80;border:.5px solid rgba(34,197,94,.35);white-space:nowrap}
+.dockyard-dsh-model-item[data-unavailable="true"]{opacity:.5}
+.dockyard-dsh-model-item[data-unavailable="true"]:hover{background:transparent}
+.dockyard-dsh-model-item[data-unavailable="true"] .dockyard-dsh-model-item-main{cursor:not-allowed}
+.dockyard-dsh-unavailable-badge{display:inline-flex;align-items:center;flex:none;margin-left:6px;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:600;line-height:14px;background:rgba(148,163,184,.16);color:#94a3b8;border:.5px solid rgba(148,163,184,.4);white-space:nowrap}
 .dockyard-dsh-model-item-id{color:var(--dsw-alias-label-caption,#8b93a1);font:400 11px/15px ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dockyard-dsh-model-item-extra{display:flex;align-items:center;gap:6px;flex-shrink:0}
 .dockyard-dsh-model-test-btn{appearance:none;box-sizing:border-box;height:24px;padding:0 8px;border:.5px solid var(--dsw-alias-border-l3,rgba(255,255,255,.14));border-radius:var(--dsw-radius-xs,6px);background:rgba(255,255,255,.05);color:var(--dsw-alias-label-secondary,#a0a6b5);cursor:pointer;font:500 11px/22px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap;transition:all 120ms ease}
@@ -1238,7 +1242,7 @@ function ModelSelectionSection({ providerId, accountId = null, remote, directory
         if (enabled !== null) {
           setSelectedIds(new Set(enabled));
         } else {
-          setSelectedIds(new Set(models.map((m) => m.id)));
+          setSelectedIds(new Set(models.filter((m) => m?.unavailable !== true).map((m) => m.id)));
         }
       })
       .catch((error) => {
@@ -1253,6 +1257,8 @@ function ModelSelectionSection({ providerId, accountId = null, remote, directory
   }, [providerId, accountId, remote, open, t]);
 
   const models = state.models;
+  // Models the account cannot use right now are listed greyed out, never enabled.
+  const usableModelIds = () => models.filter((m) => m?.unavailable !== true).map((m) => m.id);
 
   // One collapsible section for every provider: collapsed it costs nothing,
   // and opening it reads the catalog once.
@@ -1270,7 +1276,7 @@ function ModelSelectionSection({ providerId, accountId = null, remote, directory
         h("span", { className: "dockyard-dsh-model-section-label" }, text(t, "modelSelection.title")),
         h("span", { className: "dockyard-dsh-section-value" },
           loaded
-            ? text(t, "modelSelection.enabledCount", { enabled: selectedIds.size, total: models.length })
+            ? text(t, "modelSelection.enabledCount", { enabled: selectedIds.size, total: usableModelIds().length })
             : text(t, "modelSelection.collapsedHint")),
         h(ChevronIcon, { open }))),
     ...(open ? body : []));
@@ -1295,6 +1301,7 @@ function ModelSelectionSection({ providerId, accountId = null, remote, directory
     : models;
 
   const toggleModel = (id) => {
+    if (models.some((model) => model.id === id && model.unavailable === true)) return;
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) {
@@ -1309,11 +1316,11 @@ function ModelSelectionSection({ providerId, accountId = null, remote, directory
   const isFreeModel = (m) => m.free === true || (m.free === undefined && Boolean(m.id?.includes(":free") || m.name?.toLowerCase().includes("free")));
 
   const selectAll = () => {
-    setSelectedIds(new Set(models.map((m) => m.id)));
+    setSelectedIds(new Set(usableModelIds()));
   };
 
   const selectFree = () => {
-    const freeIds = models.filter(isFreeModel).map((m) => m.id);
+    const freeIds = models.filter((m) => m?.unavailable !== true && isFreeModel(m)).map((m) => m.id);
     setSelectedIds(new Set(freeIds));
   };
 
@@ -1329,7 +1336,10 @@ function ModelSelectionSection({ providerId, accountId = null, remote, directory
     setSaving(true);
     setMessage(null);
     try {
-      const enabledList = models.length > 0 && selectedIds.size === models.length
+      // "everything" means every model the account can use; greyed-out rows are
+      // never part of a saved selection.
+      const usableIds = usableModelIds();
+      const enabledList = usableIds.length > 0 && usableIds.every((id) => selectedIds.has(id))
         ? null
         : Array.from(selectedIds);
       unwrapRemote(await remote.setModelSelection({
@@ -1482,7 +1492,8 @@ function ModelSelectionSection({ providerId, accountId = null, remote, directory
   };
 
   const renderModelItem = (item) => {
-    const checked = selectedIds.has(item.id);
+    const unavailable = item.unavailable === true;
+    const checked = !unavailable && selectedIds.has(item.id);
     const meta = item.contextWindow ? ` · ${Math.round(item.contextWindow / 1024)}k context` : "";
     const freeBadgeText = item.freeKind === "stealth"
       ? "STEALTH"
@@ -1494,24 +1505,28 @@ function ModelSelectionSection({ providerId, accountId = null, remote, directory
     return h("div", {
       key: item.id,
       className: "dockyard-dsh-model-item",
+      "data-unavailable": unavailable ? "true" : undefined,
     },
       h("label", {
         className: "dockyard-dsh-model-item-main",
+        title: unavailable ? text(t, "modelSelection.unavailableTooltip") : undefined,
       },
         h("input", {
           type: "checkbox",
           className: "dockyard-dsh-model-checkbox",
           checked,
+          disabled: unavailable,
           onChange: () => toggleModel(item.id),
         }),
         h("div", { className: "dockyard-dsh-model-item-info" },
           h("div", { className: "dockyard-dsh-model-item-title" },
             h("span", { className: "dockyard-dsh-model-item-name" }, cleanDisplayName(item.name, item.id)),
+            unavailable ? h("span", { className: "dockyard-dsh-unavailable-badge" }, text(t, "modelSelection.unavailable")) : null,
             isFreeModel(item) ? h("span", { className: "dockyard-dsh-free-badge" }, freeBadgeText) : null,
           ),
           h("div", { className: "dockyard-dsh-model-item-id" }, `${item.id}${meta}`))),
       h("div", { className: "dockyard-dsh-model-item-extra" },
-        renderTestBadge(item.id)));
+        unavailable ? null : renderTestBadge(item.id)));
   };
 
   return sectionShell([

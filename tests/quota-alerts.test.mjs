@@ -84,7 +84,10 @@ test("a low balance is reported when a threshold is configured", () => {
 
 // Antigravity serves a different model list per account, so discovery asks the
 // account itself (v1internal:fetchAvailableModels) instead of the local CLI.
-import { modelsFromFetchAvailableModels } from "../modules/provider-antigravity/src/native-transport.mjs";
+import {
+  collapseAntigravityTierFamilies,
+  modelsFromFetchAvailableModels,
+} from "../modules/provider-antigravity/src/native-transport.mjs";
 
 test("fetchAvailableModels replies are read as one row per enabled model", () => {
   const models = modelsFromFetchAvailableModels({
@@ -130,7 +133,15 @@ test("only the rows the account's own picker offers become agent models", () => 
   });
   // Picker order, and only picker rows: no editor buffers, no tab previews, no
   // image generators, and no legacy aliases that duplicate another model name.
-  assert.deepEqual(models.map((model) => model.id), ["gemini-3.8-flash-high", "claude-sonnet-4-6"]);
+  // A picker row the account cannot use stays, marked unavailable.
+  assert.deepEqual(models.map((model) => model.id), [
+    "gemini-3.8-flash-high",
+    "claude-sonnet-4-6",
+    "gemini-4-argon-disabled",
+  ]);
+  assert.equal(models.at(-1).name, "Gemini 4 Argon");
+  assert.equal(models.at(-1).unavailable, true);
+  assert.equal(models[0].unavailable, undefined);
 });
 
 test("tiered families fold into one model with the tiers as efforts", () => {
@@ -171,6 +182,23 @@ test("tiered families fold into one model with the tiers as efforts", () => {
   assert.equal(gemini.contextWindow, 1_048_576);
   assert.equal(models[1].reasoning, undefined);
   assert.equal(models[2].name, "GPT-OSS 120B (Medium)");
+});
+
+test("a folded tier family is greyed out only when every tier is unavailable", () => {
+  const allDown = collapseAntigravityTierFamilies([
+    { id: "gemini-x-low", name: "Gemini X (Low)", unavailable: true },
+    { id: "gemini-x-high", name: "Gemini X (High)", unavailable: true },
+  ]);
+  assert.equal(allDown.length, 1);
+  assert.equal(allDown[0].name, "Gemini X");
+  assert.equal(allDown[0].unavailable, true);
+
+  const partial = collapseAntigravityTierFamilies([
+    { id: "gemini-x-low", name: "Gemini X (Low)", unavailable: true },
+    { id: "gemini-x-high", name: "Gemini X (High)" },
+  ]);
+  assert.equal(partial.length, 1);
+  assert.equal(partial[0].unavailable, undefined);
 });
 
 test("without a picker the internal editor rows are still left out", () => {
