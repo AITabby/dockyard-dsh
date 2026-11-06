@@ -2299,7 +2299,7 @@ var AccountPool = class {
   #eligibleAccounts(now = this.clock(), { allowExhausted = false } = {}) {
     return [...this.#accounts.values()].filter((account) => {
       if (account.health.status === ACCOUNT_HEALTH.EXPIRED) return false;
-      if (allowExhausted && account.health.status === ACCOUNT_HEALTH.EXHAUSTED) return true;
+      if (allowExhausted) return true;
       if (!account.health.cooldownUntil) {
         return account.health.status !== ACCOUNT_HEALTH.EXHAUSTED;
       }

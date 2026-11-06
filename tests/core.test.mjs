@@ -418,6 +418,77 @@ test("a spent account waiting for its quota reset still serves a free model", as
   assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "stop" } });
 });
 
+test("failing a paid model first does not block the free model afterwards", async () => {
+  const pool = new AccountPool({
+    providerId: "test-provider",
+    policy: ACCOUNT_SELECTION_POLICY.MANUAL,
+    clock: fixedNow,
+  });
+  addAccount(pool, "account-one", { remaining: 0, limit: 10, unit: "requests" });
+  const attempts = [];
+  const providerModule = {
+    manifest: { id: "test-provider" },
+    async getCatalog() {
+      return { models: [{ id: "paid-model" }, { id: "free-model", free: true }] };
+    },
+    async *stream(request) {
+      attempts.push(request.model);
+      if (request.model === "paid-model") {
+        const error = new Error("rate limited");
+        error.rateLimited = true;
+        error.cooldownUntil = "2026-08-20T00:00:00.000Z";
+        throw error;
+      }
+      yield { type: "block-start", index: 0, blockType: "text" };
+      yield { type: "text-delta", index: 0, text: "ok" };
+      yield { type: "finish", reason: { kind: "stop" } };
+    },
+  };
+  const route = createProviderRoute({ providerModule, accountPool: pool });
+
+  // The paid model fails and records a cooldown on the account.
+  await assert.rejects((async () => {
+    for await (const _chunk of route.stream({ model: "paid-model" }, {})) {}
+  })());
+  assert.equal(pool.get("account-one").health.status, "cooldown");
+
+  // A paid model stays blocked by that cooldown...
+  await assert.rejects((async () => {
+    for await (const _chunk of route.stream({ model: "paid-model" }, {})) {}
+  })());
+  // ...but the free model is still reachable, whatever order the user clicks in.
+  const chunks = [];
+  for await (const chunk of route.stream({ model: "free-model" }, {})) chunks.push(chunk);
+  assert.deepEqual(attempts, ["paid-model", "free-model"]);
+  assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "stop" } });
+});
+
+test("an expired account is never used, not even for a free model", async () => {
+  const pool = new AccountPool({
+    providerId: "test-provider",
+    policy: ACCOUNT_SELECTION_POLICY.MANUAL,
+    clock: fixedNow,
+  });
+  addAccount(pool, "account-expired", { remaining: 5, limit: 10, unit: "requests" });
+  pool.report("account-expired", { status: "auth_expired", message: "token expired" });
+  const providerModule = {
+    manifest: { id: "test-provider" },
+    async getCatalog() {
+      return { models: [{ id: "free-model", free: true }] };
+    },
+    async *stream() {
+      yield { type: "finish", reason: { kind: "stop" } };
+    },
+  };
+  const route = createProviderRoute({ providerModule, accountPool: pool });
+  await assert.rejects(
+    (async () => {
+      for await (const _chunk of route.stream({ model: "free-model" }, {})) {}
+    })(),
+    /No eligible accounts/,
+  );
+});
+
 test("provider route rejects an empty successful stream instead of yielding a blank finish", async () => {
   const pool = new AccountPool({
     providerId: "test-provider",
