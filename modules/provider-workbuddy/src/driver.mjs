@@ -59,7 +59,7 @@ function envAccessToken() {
 export const BUILTIN_WORKBUDDY_FREE_MODELS = Object.freeze([
   {
     id: "hy4free",
-    name: "Hy4 (WorkBuddy Free)",
+    name: "Hy4",
     contextWindow: 1000000,
     maxTokens: 64000,
     reasoning: {
@@ -74,7 +74,7 @@ export const BUILTIN_WORKBUDDY_FREE_MODELS = Object.freeze([
   },
   {
     id: "hy4",
-    name: "Hy4 (WorkBuddy Free)",
+    name: "Hy4",
     contextWindow: 1000000,
     maxTokens: 64000,
     reasoning: {
@@ -89,7 +89,7 @@ export const BUILTIN_WORKBUDDY_FREE_MODELS = Object.freeze([
   },
   {
     id: "deepseek-v4.1-flash",
-    name: "DeepSeek v4.1 Flash (WorkBuddy Free)",
+    name: "DeepSeek v4.1 Flash",
     contextWindow: 1000000,
     maxTokens: 128000,
     reasoning: {
@@ -104,7 +104,7 @@ export const BUILTIN_WORKBUDDY_FREE_MODELS = Object.freeze([
   },
   {
     id: "hy3",
-    name: "Hunyuan 3 (WorkBuddy Free)",
+    name: "Hunyuan 3",
     contextWindow: 192000,
     maxTokens: 64000,
     reasoning: {
@@ -193,9 +193,9 @@ export function parseWorkbuddyCatalog(data) {
     const isFree = credits === "x0.00" || credits === "x0.00 credits" || credits === "0.00x" || credits === "0" || item?.free === true || item?.isFree === true;
 
     const baseName = stringValue(item?.name) || stringValue(item?.title) || id;
-    const name = isFree && !baseName.toLowerCase().includes("free")
-      ? `${baseName} (WorkBuddy Free)`
-      : (credits && !isFree ? `${baseName} (${credits})` : baseName);
+    // A paid model keeps its credit cost; the free rotation needs no provider
+    // suffix because the picker already groups models by provider.
+    const name = credits && !isFree ? `${baseName} (${credits})` : baseName;
     const builtin = BUILTIN_WORKBUDDY_FREE_MODELS.find((m) => m.id === id);
 
     const contextWindow = resolveContextWindowFromModel(item, builtin?.contextWindow ?? 131072);

@@ -36,13 +36,13 @@ test("WorkBuddy provider module manifest and builtin models", async () => {
   assert.equal(BUILTIN_WORKBUDDY_FREE_MODELS.length, 4);
   const deepseek = BUILTIN_WORKBUDDY_FREE_MODELS.find((m) => m.id === "deepseek-v4.1-flash");
   assert.ok(deepseek);
-  assert.equal(deepseek.name, "DeepSeek v4.1 Flash (WorkBuddy Free)");
+  assert.equal(deepseek.name, "DeepSeek v4.1 Flash");
   assert.equal(deepseek.contextWindow, 1000000);
   assert.equal(deepseek.maxTokens, 128000);
 
   const hy3 = BUILTIN_WORKBUDDY_FREE_MODELS.find((m) => m.id === "hy3");
   assert.ok(hy3);
-  assert.equal(hy3.name, "Hunyuan 3 (WorkBuddy Free)");
+  assert.equal(hy3.name, "Hunyuan 3");
   assert.equal(hy3.contextWindow, 192000);
   assert.equal(hy3.maxTokens, 64000);
 
@@ -94,9 +94,9 @@ test("parseWorkbuddyCatalog handles product snapshot format and flags free tier 
   const freeModels = parsed.models.filter((m) => m.free);
   assert.equal(freeModels.length, 2);
   assert.equal(freeModels[0].id, "deepseek-v4.1-flash");
-  assert.ok(freeModels[0].name.includes("(WorkBuddy Free)"));
+  assert.equal(freeModels[0].name.includes("WorkBuddy"), false, "the picker already groups by provider");
   assert.equal(freeModels[1].id, "hy3");
-  assert.ok(freeModels[1].name.includes("(WorkBuddy Free)"));
+  assert.equal(freeModels[1].name.includes("WorkBuddy"), false, "the picker already groups by provider");
 
   const paidModel = parsed.models.find((m) => m.id === "gpt-6-astra");
   assert.ok(paidModel);

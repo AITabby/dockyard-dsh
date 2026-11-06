@@ -14287,7 +14287,7 @@ function envAccessToken() {
 var BUILTIN_WORKBUDDY_FREE_MODELS = Object.freeze([
   {
     id: "hy4free",
-    name: "Hy4 (WorkBuddy Free)",
+    name: "Hy4",
     contextWindow: 1e6,
     maxTokens: 64e3,
     reasoning: {
@@ -14302,7 +14302,7 @@ var BUILTIN_WORKBUDDY_FREE_MODELS = Object.freeze([
   },
   {
     id: "hy4",
-    name: "Hy4 (WorkBuddy Free)",
+    name: "Hy4",
     contextWindow: 1e6,
     maxTokens: 64e3,
     reasoning: {
@@ -14317,7 +14317,7 @@ var BUILTIN_WORKBUDDY_FREE_MODELS = Object.freeze([
   },
   {
     id: "deepseek-v4.1-flash",
-    name: "DeepSeek v4.1 Flash (WorkBuddy Free)",
+    name: "DeepSeek v4.1 Flash",
     contextWindow: 1e6,
     maxTokens: 128e3,
     reasoning: {
@@ -14332,7 +14332,7 @@ var BUILTIN_WORKBUDDY_FREE_MODELS = Object.freeze([
   },
   {
     id: "hy3",
-    name: "Hunyuan 3 (WorkBuddy Free)",
+    name: "Hunyuan 3",
     contextWindow: 192e3,
     maxTokens: 64e3,
     reasoning: {
@@ -14410,7 +14410,7 @@ function parseWorkbuddyCatalog(data) {
     const credits = stringValue(item?.credits) ?? "";
     const isFree = credits === "x0.00" || credits === "x0.00 credits" || credits === "0.00x" || credits === "0" || item?.free === true || item?.isFree === true;
     const baseName = stringValue(item?.name) || stringValue(item?.title) || id;
-    const name2 = isFree && !baseName.toLowerCase().includes("free") ? `${baseName} (WorkBuddy Free)` : credits && !isFree ? `${baseName} (${credits})` : baseName;
+    const name2 = credits && !isFree ? `${baseName} (${credits})` : baseName;
     const builtin = BUILTIN_WORKBUDDY_FREE_MODELS.find((m) => m.id === id);
     const contextWindow = resolveContextWindowFromModel(item, builtin?.contextWindow ?? 131072);
     const maxTokens = resolveMaxTokensFromModel(item, builtin?.maxTokens ?? 16384);
@@ -15329,7 +15329,7 @@ function capitalize(str) {
 var BUILTIN_COMMANDCODE_MODELS = Object.freeze([
   {
     id: "deepseek/deepseek-v4.1-flash",
-    name: "DeepSeek V4.1 Flash (Command Code)",
+    name: "DeepSeek V4.1 Flash",
     contextWindow: 1e6,
     maxTokens: 16384,
     reasoning: {
@@ -15351,7 +15351,7 @@ var BUILTIN_COMMANDCODE_MODELS = Object.freeze([
   },
   {
     id: "deepseek/deepseek-v4-pro",
-    name: "DeepSeek V4 Pro (Command Code)",
+    name: "DeepSeek V4 Pro",
     contextWindow: 1e6,
     maxTokens: 16384,
     reasoning: {
@@ -15365,7 +15365,7 @@ var BUILTIN_COMMANDCODE_MODELS = Object.freeze([
   },
   {
     id: "claude-sonnet-5-5",
-    name: "Claude Sonnet 5.5 (Command Code)",
+    name: "Claude Sonnet 5.5",
     contextWindow: 1e6,
     maxTokens: 16384,
     reasoning: {
@@ -15382,7 +15382,7 @@ var BUILTIN_COMMANDCODE_MODELS = Object.freeze([
   },
   {
     id: "claude-sonnet-4-6",
-    name: "Claude Sonnet 4.6 (Command Code)",
+    name: "Claude Sonnet 4.6",
     contextWindow: 1e6,
     maxTokens: 16384,
     reasoning: {
@@ -15398,7 +15398,7 @@ var BUILTIN_COMMANDCODE_MODELS = Object.freeze([
   },
   {
     id: "xai/grok-4.7",
-    name: "Grok 4.7 (Command Code)",
+    name: "Grok 4.7",
     contextWindow: 5e5,
     maxTokens: 16384,
     reasoning: {
@@ -15414,7 +15414,7 @@ var BUILTIN_COMMANDCODE_MODELS = Object.freeze([
   },
   {
     id: "meta/muse-spark-1.2",
-    name: "Muse Spark 1.2 (Command Code)",
+    name: "Muse Spark 1.2",
     contextWindow: 1048576,
     maxTokens: 16384,
     reasoning: {
@@ -15430,7 +15430,7 @@ var BUILTIN_COMMANDCODE_MODELS = Object.freeze([
   },
   {
     id: "mistral/mistral-large-4",
-    name: "Mistral Large 4 (Command Code)",
+    name: "Mistral Large 4",
     contextWindow: 524288,
     maxTokens: 16384,
     reasoning: {
@@ -15505,7 +15505,7 @@ function parseCommandCodeCatalog(data) {
       (item?.display?.badge === "free" || item?.pricing && item.pricing.inputCost === 0 && item.pricing.outputCost === 0 || id.endsWith(":free")) && !(item?.pricing && (item.pricing.inputCost > 0 || item.pricing.outputCost > 0))
     );
     const baseName = stringValue(item?.display?.label) || stringValue(item?.name) || stringValue(item?.display?.name) || id;
-    const name2 = baseName.toLowerCase().includes("command code") ? baseName : `${baseName} (Command Code)`;
+    const name2 = baseName;
     const contextWindow = Number.isInteger(item?.context_length) ? item.context_length : resolveContextWindowFromModel(item, 131072);
     const maxTokens = Number.isInteger(item?.maxOutputTokens) ? Math.min(item.maxOutputTokens, 32768) : resolveMaxTokensFromModel(item, 16384);
     let reasoning = null;

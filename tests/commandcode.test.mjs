@@ -45,7 +45,7 @@ test("Command Code module manifest and builtin models", async () => {
   assert.ok(BUILTIN_COMMANDCODE_MODELS.length >= 6);
   const deepseekFlash = BUILTIN_COMMANDCODE_MODELS.find((m) => m.id === "deepseek/deepseek-v4.1-flash");
   assert.ok(deepseekFlash);
-  assert.equal(deepseekFlash.name, "DeepSeek V4.1 Flash (Command Code)");
+  assert.equal(deepseekFlash.name, "DeepSeek V4.1 Flash");
   assert.equal(deepseekFlash.contextWindow, 1000000);
   // Regression: this model accepts images on the Command Code gateway (the live
   // catalog reports ["text","image"] and a real request carries image tokens).
@@ -94,7 +94,7 @@ test("parseCommandCodeCatalog parses live and cache structures", () => {
   const parsed = parseCommandCodeCatalog(livePayload);
   const custom = parsed.models.find((m) => m.id === "custom-test-model");
   assert.ok(custom);
-  assert.equal(custom.name, "Custom Test Model (Command Code)");
+  assert.equal(custom.name, "Custom Test Model");
   assert.equal(custom.contextWindow, 200000);
   assert.equal(custom.maxTokens, 8192);
   assert.equal(custom.reasoning.defaultEffort, "high");

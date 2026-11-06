@@ -47,7 +47,7 @@ function capitalize(str) {
 export const BUILTIN_COMMANDCODE_MODELS = Object.freeze([
   {
     id: "deepseek/deepseek-v4.1-flash",
-    name: "DeepSeek V4.1 Flash (Command Code)",
+    name: "DeepSeek V4.1 Flash",
     contextWindow: 1000000,
     maxTokens: 16384,
     reasoning: {
@@ -69,7 +69,7 @@ export const BUILTIN_COMMANDCODE_MODELS = Object.freeze([
   },
   {
     id: "deepseek/deepseek-v4-pro",
-    name: "DeepSeek V4 Pro (Command Code)",
+    name: "DeepSeek V4 Pro",
     contextWindow: 1000000,
     maxTokens: 16384,
     reasoning: {
@@ -83,7 +83,7 @@ export const BUILTIN_COMMANDCODE_MODELS = Object.freeze([
   },
   {
     id: "claude-sonnet-5-5",
-    name: "Claude Sonnet 5.5 (Command Code)",
+    name: "Claude Sonnet 5.5",
     contextWindow: 1000000,
     maxTokens: 16384,
     reasoning: {
@@ -100,7 +100,7 @@ export const BUILTIN_COMMANDCODE_MODELS = Object.freeze([
   },
   {
     id: "claude-sonnet-4-6",
-    name: "Claude Sonnet 4.6 (Command Code)",
+    name: "Claude Sonnet 4.6",
     contextWindow: 1000000,
     maxTokens: 16384,
     reasoning: {
@@ -116,7 +116,7 @@ export const BUILTIN_COMMANDCODE_MODELS = Object.freeze([
   },
   {
     id: "xai/grok-4.7",
-    name: "Grok 4.7 (Command Code)",
+    name: "Grok 4.7",
     contextWindow: 500000,
     maxTokens: 16384,
     reasoning: {
@@ -132,7 +132,7 @@ export const BUILTIN_COMMANDCODE_MODELS = Object.freeze([
   },
   {
     id: "meta/muse-spark-1.2",
-    name: "Muse Spark 1.2 (Command Code)",
+    name: "Muse Spark 1.2",
     contextWindow: 1048576,
     maxTokens: 16384,
     reasoning: {
@@ -148,7 +148,7 @@ export const BUILTIN_COMMANDCODE_MODELS = Object.freeze([
   },
   {
     id: "mistral/mistral-large-4",
-    name: "Mistral Large 4 (Command Code)",
+    name: "Mistral Large 4",
     contextWindow: 524288,
     maxTokens: 16384,
     reasoning: {
@@ -238,9 +238,9 @@ export function parseCommandCodeCatalog(data) {
       || stringValue(item?.name)
       || stringValue(item?.display?.name)
       || id;
-    const name = baseName.toLowerCase().includes("command code")
-      ? baseName
-      : `${baseName} (Command Code)`;
+    // The model picker already groups models by provider, so the name stays the
+    // label the provider serves instead of repeating the provider on every row.
+    const name = baseName;
 
     const contextWindow = Number.isInteger(item?.context_length)
       ? item.context_length
