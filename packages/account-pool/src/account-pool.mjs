@@ -128,7 +128,9 @@ export class AccountPool {
   select(context = {}) {
     const now = this.clock();
     this.#pruneSessionAssignments(now.getTime());
-    const eligible = this.#eligibleAccounts(now);
+    // A model the provider serves for free does not spend the paid quota, so an
+    // account whose quota is spent must still be selectable for it.
+    const eligible = this.#eligibleAccounts(now, { allowExhausted: context.allowExhausted === true });
     if (eligible.length === 0) {
       throw new AccountSelectionError(`No eligible accounts for provider ${this.providerId}`, {
         providerId: this.providerId,
@@ -322,11 +324,13 @@ export class AccountPool {
       .map(accountSummary);
   }
 
-  #eligibleAccounts(now = this.clock()) {
+  #eligibleAccounts(now = this.clock(), { allowExhausted = false } = {}) {
     return [...this.#accounts.values()].filter((account) => {
       if (account.health.status === ACCOUNT_HEALTH.EXPIRED) return false;
-      if (account.health.status === ACCOUNT_HEALTH.EXHAUSTED && !account.health.cooldownUntil) return false;
-      if (!account.health.cooldownUntil) return true;
+      if (!account.health.cooldownUntil) {
+        if (account.health.status === ACCOUNT_HEALTH.EXHAUSTED) return allowExhausted;
+        return true;
+      }
       return new Date(account.health.cooldownUntil).getTime() <= now.getTime();
     });
   }

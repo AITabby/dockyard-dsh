@@ -7,6 +7,24 @@ function selectionContext(context, excludedIds) {
   return { ...context, excludeAccountIds: [...excludedIds] };
 }
 
+/**
+ * A model the provider serves for free does not spend the subscription quota, so
+ * an account whose paid quota is spent can still serve it. Resolve that only
+ * after selection failed: the normal path never pays for a catalog read.
+ */
+async function requestUsesFreeModel(providerModule, request, context) {
+  const modelId = request?.model;
+  if (typeof modelId !== "string" || typeof providerModule?.getCatalog !== "function") return false;
+  try {
+    const catalog = await providerModule.getCatalog(context);
+    const entry = (Array.isArray(catalog?.models) ? catalog.models : [])
+      .find((candidate) => candidate?.id === modelId);
+    return entry?.free === true;
+  } catch {
+    return false;
+  }
+}
+
 function shouldFailover(error, accountPool, context) {
   return accountPool.policy === ACCOUNT_SELECTION_POLICY.FAILOVER
     && !context.accountId
@@ -122,7 +140,16 @@ export function createProviderRoute({ providerModule, accountPool, contextWindow
         try {
           account = accountPool.select(selectionContext(context, excludedIds));
         } catch (selectionError) {
-          throw lastError ?? selectionError;
+          // A free model does not spend the paid quota, so a spent account can
+          // still serve it instead of failing the whole provider.
+          if (!(await requestUsesFreeModel(providerModule, request, context))) {
+            throw lastError ?? selectionError;
+          }
+          try {
+            account = accountPool.select({ ...selectionContext(context, excludedIds), allowExhausted: true });
+          } catch {
+            throw lastError ?? selectionError;
+          }
         }
         excludedIds.add(account.accountId);
         const auth = accountPool.resolve(account.accountId);
@@ -167,7 +194,16 @@ export function createProviderRoute({ providerModule, accountPool, contextWindow
           try {
             account = accountPool.select(selectionContext(context, excludedIds));
           } catch (selectionError) {
-            throw lastError ?? selectionError;
+            // A free model does not spend the paid quota, so a spent account can
+            // still serve it instead of failing the whole provider.
+            if (!(await requestUsesFreeModel(providerModule, request, context))) {
+              throw lastError ?? selectionError;
+            }
+            try {
+              account = accountPool.select({ ...selectionContext(context, excludedIds), allowExhausted: true });
+            } catch {
+              throw lastError ?? selectionError;
+            }
           }
           excludedIds.add(account.accountId);
           const auth = accountPool.resolve(account.accountId);

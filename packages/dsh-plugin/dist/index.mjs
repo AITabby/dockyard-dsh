@@ -1758,6 +1758,17 @@ function selectionContext(context, excludedIds) {
   if (excludedIds.size === 0) return context;
   return { ...context, excludeAccountIds: [...excludedIds] };
 }
+async function requestUsesFreeModel(providerModule, request, context) {
+  const modelId = request?.model;
+  if (typeof modelId !== "string" || typeof providerModule?.getCatalog !== "function") return false;
+  try {
+    const catalog = await providerModule.getCatalog(context);
+    const entry = (Array.isArray(catalog?.models) ? catalog.models : []).find((candidate2) => candidate2?.id === modelId);
+    return entry?.free === true;
+  } catch {
+    return false;
+  }
+}
 function shouldFailover(error, accountPool, context) {
   return accountPool.policy === ACCOUNT_SELECTION_POLICY.FAILOVER && !context.accountId && (error?.rateLimited || error?.quotaExhausted || error?.authExpired || error?.emptyOutput);
 }
@@ -1846,7 +1857,14 @@ function createProviderRoute({ providerModule, accountPool, contextWindowOverrid
         try {
           account = accountPool.select(selectionContext(context, excludedIds));
         } catch (selectionError) {
-          throw lastError ?? selectionError;
+          if (!await requestUsesFreeModel(providerModule, request, context)) {
+            throw lastError ?? selectionError;
+          }
+          try {
+            account = accountPool.select({ ...selectionContext(context, excludedIds), allowExhausted: true });
+          } catch {
+            throw lastError ?? selectionError;
+          }
         }
         excludedIds.add(account.accountId);
         const auth = accountPool.resolve(account.accountId);
@@ -1890,7 +1908,14 @@ function createProviderRoute({ providerModule, accountPool, contextWindowOverrid
           try {
             account = accountPool.select(selectionContext(context, excludedIds));
           } catch (selectionError) {
-            throw lastError ?? selectionError;
+            if (!await requestUsesFreeModel(providerModule, request, context)) {
+              throw lastError ?? selectionError;
+            }
+            try {
+              account = accountPool.select({ ...selectionContext(context, excludedIds), allowExhausted: true });
+            } catch {
+              throw lastError ?? selectionError;
+            }
           }
           excludedIds.add(account.accountId);
           const auth = accountPool.resolve(account.accountId);
@@ -2110,7 +2135,7 @@ var AccountPool = class {
   select(context = {}) {
     const now = this.clock();
     this.#pruneSessionAssignments(now.getTime());
-    const eligible = this.#eligibleAccounts(now);
+    const eligible = this.#eligibleAccounts(now, { allowExhausted: context.allowExhausted === true });
     if (eligible.length === 0) {
       throw new AccountSelectionError(`No eligible accounts for provider ${this.providerId}`, {
         providerId: this.providerId
@@ -2271,11 +2296,13 @@ var AccountPool = class {
       return !until || new Date(until).getTime() <= now.getTime();
     }).map(accountSummary);
   }
-  #eligibleAccounts(now = this.clock()) {
+  #eligibleAccounts(now = this.clock(), { allowExhausted = false } = {}) {
     return [...this.#accounts.values()].filter((account) => {
       if (account.health.status === ACCOUNT_HEALTH.EXPIRED) return false;
-      if (account.health.status === ACCOUNT_HEALTH.EXHAUSTED && !account.health.cooldownUntil) return false;
-      if (!account.health.cooldownUntil) return true;
+      if (!account.health.cooldownUntil) {
+        if (account.health.status === ACCOUNT_HEALTH.EXHAUSTED) return allowExhausted;
+        return true;
+      }
       return new Date(account.health.cooldownUntil).getTime() <= now.getTime();
     });
   }

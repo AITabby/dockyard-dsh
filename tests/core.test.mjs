@@ -331,6 +331,58 @@ test("provider route fails over a rate-limited account before exposing a partial
   assert.equal(pool.get("account-b").health.status, "healthy");
 });
 
+test("a spent account is not used for a paid model", async () => {
+  const pool = new AccountPool({
+    providerId: "test-provider",
+    policy: ACCOUNT_SELECTION_POLICY.MANUAL,
+    clock: fixedNow,
+  });
+  addAccount(pool, "account-spent", { remaining: 0, limit: 10, unit: "credits" });
+  pool.report("account-spent", { status: "quota_exhausted", message: "额度用完" });
+  const invocations = [];
+  const providerModule = {
+    manifest: { id: "test-provider" },
+    async getCatalog() {
+      return { models: [{ id: "paid-model" }, { id: "free-model", free: true }] };
+    },
+    async invoke() {
+      invocations.push("invoke");
+      return { ok: true };
+    },
+  };
+  const route = createProviderRoute({ providerModule, accountPool: pool });
+  await assert.rejects(route.invoke({ model: "paid-model" }, {}), /No eligible accounts/);
+  assert.deepEqual(invocations, []);
+});
+
+test("a spent account still serves a model the provider gives away", async () => {
+  const pool = new AccountPool({
+    providerId: "test-provider",
+    policy: ACCOUNT_SELECTION_POLICY.MANUAL,
+    clock: fixedNow,
+  });
+  addAccount(pool, "account-spent", { remaining: 0, limit: 10, unit: "credits" });
+  pool.report("account-spent", { status: "quota_exhausted", message: "额度用完" });
+  const used = [];
+  const providerModule = {
+    manifest: { id: "test-provider" },
+    async getCatalog() {
+      return { models: [{ id: "paid-model" }, { id: "free-model", free: true }] };
+    },
+    async *stream() {
+      used.push("free");
+      yield { type: "block-start", index: 0, blockType: "text" };
+      yield { type: "text-delta", index: 0, text: "ok" };
+      yield { type: "finish", reason: { kind: "stop" } };
+    },
+  };
+  const route = createProviderRoute({ providerModule, accountPool: pool });
+  const chunks = [];
+  for await (const chunk of route.stream({ model: "free-model" }, {})) chunks.push(chunk);
+  assert.deepEqual(used, ["free"]);
+  assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "stop" } });
+});
+
 test("provider route rejects an empty successful stream instead of yielding a blank finish", async () => {
   const pool = new AccountPool({
     providerId: "test-provider",
