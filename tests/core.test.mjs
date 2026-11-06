@@ -383,6 +383,41 @@ test("a spent account still serves a model the provider gives away", async () =>
   assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "stop" } });
 });
 
+test("a spent account waiting for its quota reset still serves a free model", async () => {
+  const pool = new AccountPool({
+    providerId: "test-provider",
+    policy: ACCOUNT_SELECTION_POLICY.MANUAL,
+    clock: fixedNow,
+  });
+  addAccount(pool, "account-spent", { remaining: 0, limit: 10, unit: "credits" });
+  // This is the shape a failed request leaves behind: exhausted with a cooldown
+  // until the next quota reset. The cooldown is about the paid quota, so it must
+  // not gate a model that does not spend it.
+  pool.report("account-spent", {
+    status: "quota_exhausted",
+    cooldownUntil: "2026-08-20T00:00:00.000Z",
+    message: "quota exhausted",
+  });
+  const used = [];
+  const providerModule = {
+    manifest: { id: "test-provider" },
+    async getCatalog() {
+      return { models: [{ id: "paid-model" }, { id: "free-model", free: true }] };
+    },
+    async *stream() {
+      used.push("free");
+      yield { type: "block-start", index: 0, blockType: "text" };
+      yield { type: "text-delta", index: 0, text: "ok" };
+      yield { type: "finish", reason: { kind: "stop" } };
+    },
+  };
+  const route = createProviderRoute({ providerModule, accountPool: pool });
+  const chunks = [];
+  for await (const chunk of route.stream({ model: "free-model" }, {})) chunks.push(chunk);
+  assert.deepEqual(used, ["free"]);
+  assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "stop" } });
+});
+
 test("provider route rejects an empty successful stream instead of yielding a blank finish", async () => {
   const pool = new AccountPool({
     providerId: "test-provider",

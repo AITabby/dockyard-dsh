@@ -24,6 +24,7 @@ export const BUILTIN_OPENCODE_FREE_MODELS = Object.freeze([
   {
     id: "big-pickle",
     name: "Big Pickle (Free)",
+    free: true,
     contextWindow: 131072,
     maxTokens: 8192,
     reasoning: {
@@ -278,6 +279,8 @@ export function parseOpencodeCatalog(data, { registry = [], installedIds = null 
       name,
       contextWindow,
       maxTokens,
+      // Publish the free tier so a spent account can still serve these models.
+      ...(isFree ? { free: true } : {}),
       ...(reasoning ? { reasoning } : {}),
     });
   }

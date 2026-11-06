@@ -2299,9 +2299,9 @@ var AccountPool = class {
   #eligibleAccounts(now = this.clock(), { allowExhausted = false } = {}) {
     return [...this.#accounts.values()].filter((account) => {
       if (account.health.status === ACCOUNT_HEALTH.EXPIRED) return false;
+      if (allowExhausted && account.health.status === ACCOUNT_HEALTH.EXHAUSTED) return true;
       if (!account.health.cooldownUntil) {
-        if (account.health.status === ACCOUNT_HEALTH.EXHAUSTED) return allowExhausted;
-        return true;
+        return account.health.status !== ACCOUNT_HEALTH.EXHAUSTED;
       }
       return new Date(account.health.cooldownUntil).getTime() <= now.getTime();
     });
@@ -13707,6 +13707,7 @@ var BUILTIN_OPENCODE_FREE_MODELS = Object.freeze([
   {
     id: "big-pickle",
     name: "Big Pickle (Free)",
+    free: true,
     contextWindow: 131072,
     maxTokens: 8192,
     reasoning: {

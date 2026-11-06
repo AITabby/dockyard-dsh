@@ -327,9 +327,12 @@ export class AccountPool {
   #eligibleAccounts(now = this.clock(), { allowExhausted = false } = {}) {
     return [...this.#accounts.values()].filter((account) => {
       if (account.health.status === ACCOUNT_HEALTH.EXPIRED) return false;
+      // An exhausted account usually carries a cooldown derived from the paid
+      // quota's reset time. That cooldown says nothing about a model the
+      // provider gives away, so a caller asking for one may use the account now.
+      if (allowExhausted && account.health.status === ACCOUNT_HEALTH.EXHAUSTED) return true;
       if (!account.health.cooldownUntil) {
-        if (account.health.status === ACCOUNT_HEALTH.EXHAUSTED) return allowExhausted;
-        return true;
+        return account.health.status !== ACCOUNT_HEALTH.EXHAUSTED;
       }
       return new Date(account.health.cooldownUntil).getTime() <= now.getTime();
     });
