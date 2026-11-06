@@ -18,6 +18,28 @@ function cleanState(value) {
   return { schema: 1, providers };
 }
 
+/**
+ * Reconcile a saved selection against the catalog the provider currently
+ * serves. A saved id can disappear when the account's picker changes or a
+ * model is retired; filtering the directory by such an id would leave the
+ * provider with no selectable models at all. Survivors are kept, an explicit
+ * empty selection stays empty, and a selection whose ids are all gone falls
+ * back to "everything" so the provider keeps working.
+ */
+export function reconcileModelSelection(enabledModelIds, models) {
+  if (!Array.isArray(enabledModelIds)) return null;
+  if (enabledModelIds.length === 0) return [];
+  const available = new Set(
+    (Array.isArray(models) ? models : [])
+      .map((model) => (typeof model?.id === "string" ? model.id : null))
+      .filter(Boolean),
+  );
+  // An empty catalog means discovery failed, not that every model vanished.
+  if (available.size === 0) return enabledModelIds;
+  const kept = enabledModelIds.filter((id) => available.has(id));
+  return kept.length > 0 ? kept : null;
+}
+
 export class ModelSelectionStore {
   stateStore;
   state = { schema: 1, providers: {} };

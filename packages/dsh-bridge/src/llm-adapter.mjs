@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { ValidationError } from "../../core/src/errors.mjs";
 import { PROVIDER_BEHAVIOR_CAPABILITIES } from "../../core/src/contracts.mjs";
+import { reconcileModelSelection } from "../../runtime/src/model-selection-store.mjs";
 
 export function defaultCatalogCachePath() {
   const home = process.env.DOCKYARD_DSH_HOME || join(homedir(), ".dockyard-dsh");
@@ -562,8 +563,11 @@ export function createDockyardLlmAdapter({
       const catalog = cached ?? await providerCatalog(provider, signal);
       const allModels = providerCatalogModels(provider, catalog);
       const enabled = runtime.getModelSelection?.(provider);
-      if (Array.isArray(enabled)) {
-        const set = new Set(enabled);
+      // A saved id that this catalog no longer serves must not filter the
+      // directory down to nothing (see reconcileModelSelection).
+      const reconciled = reconcileModelSelection(enabled, allModels);
+      if (Array.isArray(reconciled)) {
+        const set = new Set(reconciled);
         return allModels.filter((entry) => set.has(entry.id));
       }
       return allModels;

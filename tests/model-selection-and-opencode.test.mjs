@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ModelSelectionStore } from "../packages/runtime/src/model-selection-store.mjs";
+import { ModelSelectionStore, reconcileModelSelection } from "../packages/runtime/src/model-selection-store.mjs";
 import { createOpencodeModule, parseOpencodeCatalog, BUILTIN_OPENCODE_FREE_MODELS } from "../modules/provider-opencode/src/index.mjs";
 
 function memoryStateStore(initial = {}) {
@@ -40,6 +40,24 @@ test("ModelSelectionStore round-trips and persists enabled models per provider",
   // Reset to null
   await store2.set("cursor", null);
   assert.equal(store2.get("cursor"), null);
+});
+
+test("a selection naming models the catalog no longer serves falls back instead of hiding everything", () => {
+  const models = [{ id: "gemini-3.8-flash-high" }, { id: "claude-sonnet-4-6" }];
+
+  // null keeps meaning "everything".
+  assert.equal(reconcileModelSelection(null, models), null);
+  // An explicit empty selection stays empty.
+  assert.deepEqual(reconcileModelSelection([], models), []);
+  // Surviving ids are kept, dead ones dropped.
+  assert.deepEqual(
+    reconcileModelSelection(["gemini-3.8-flash-high", "tab_flash_lite_preview"], models),
+    ["gemini-3.8-flash-high"],
+  );
+  // A selection made entirely of retired ids would otherwise empty the picker.
+  assert.equal(reconcileModelSelection(["gemini-3.8-flash-tiered", "gemini-4-argon-low"], models), null);
+  // A failed discovery (no models at all) must not be read as "all retired".
+  assert.deepEqual(reconcileModelSelection(["gone"], []), ["gone"]);
 });
 
 test("OpenCode provider module manifests and catalog parsing", async () => {

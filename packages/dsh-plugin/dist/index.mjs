@@ -2326,6 +2326,104 @@ var AccountPool = class {
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+
+// packages/runtime/src/model-selection-store.mjs
+function normalizedMap(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value;
+}
+function cleanState(value) {
+  const providers = {};
+  for (const [providerId, record] of Object.entries(normalizedMap(value?.providers))) {
+    const id = typeof providerId === "string" ? providerId.trim() : null;
+    if (!id) continue;
+    if (Array.isArray(record?.enabled)) {
+      const enabled = record.enabled.map((m) => typeof m === "string" ? m.trim() : "").filter(Boolean);
+      providers[id] = { enabled, updatedAt: record.updatedAt ?? (/* @__PURE__ */ new Date()).toISOString() };
+    }
+  }
+  return { schema: 1, providers };
+}
+function reconcileModelSelection(enabledModelIds, models) {
+  if (!Array.isArray(enabledModelIds)) return null;
+  if (enabledModelIds.length === 0) return [];
+  const available = new Set(
+    (Array.isArray(models) ? models : []).map((model) => typeof model?.id === "string" ? model.id : null).filter(Boolean)
+  );
+  if (available.size === 0) return enabledModelIds;
+  const kept = enabledModelIds.filter((id) => available.has(id));
+  return kept.length > 0 ? kept : null;
+}
+var ModelSelectionStore = class {
+  stateStore;
+  state = { schema: 1, providers: {} };
+  readyPromise;
+  constructor({ stateStore } = {}) {
+    if (!stateStore || typeof stateStore.load !== "function" || typeof stateStore.update !== "function" && typeof stateStore.save !== "function") {
+      throw new TypeError("ModelSelectionStore requires a state store");
+    }
+    this.stateStore = stateStore;
+    this.readyPromise = this.load();
+  }
+  async load() {
+    const snapshot = await this.stateStore.load();
+    const raw = snapshot?.modelSelection;
+    if (raw && typeof raw === "object") {
+      this.state = cleanState(raw);
+    }
+    return this.state;
+  }
+  async ready() {
+    return this.readyPromise;
+  }
+  get(providerId) {
+    if (!providerId) return null;
+    const record = this.state.providers?.[providerId];
+    if (!record || !Array.isArray(record.enabled)) return null;
+    return [...record.enabled];
+  }
+  async set(providerId, enabledModelIds) {
+    if (!providerId) throw new Error("providerId is required");
+    await this.ready();
+    const cleaned = Array.isArray(enabledModelIds) ? enabledModelIds.map((m) => typeof m === "string" ? m.trim() : "").filter(Boolean) : null;
+    if (!this.state.providers) this.state.providers = {};
+    if (cleaned === null) {
+      delete this.state.providers[providerId];
+    } else {
+      this.state.providers[providerId] = {
+        enabled: cleaned,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    const saved = structuredClone(this.state);
+    if (typeof this.stateStore.update === "function") {
+      await this.stateStore.update((latest) => ({
+        ...latest,
+        modelSelection: saved
+      }));
+    } else {
+      const latest = await this.stateStore.load();
+      await this.stateStore.save({
+        ...latest,
+        modelSelection: saved
+      });
+    }
+    return cleaned;
+  }
+  isModelEnabled(providerId, modelId) {
+    const enabled = this.get(providerId);
+    if (enabled === null) return true;
+    return enabled.includes(modelId);
+  }
+  filterModels(providerId, models = []) {
+    const enabled = this.get(providerId);
+    if (enabled === null) return models;
+    const set = new Set(enabled);
+    return models.filter((model) => set.has(model.id));
+  }
+};
+
+// packages/dsh-bridge/src/llm-adapter.mjs
 function defaultCatalogCachePath() {
   const home = process.env.DOCKYARD_DSH_HOME || join(homedir(), ".dockyard-dsh");
   return join(home, "catalog-cache.json");
@@ -2756,8 +2854,9 @@ function createDockyardLlmAdapter({
       const catalog = cached ?? await providerCatalog(provider, signal);
       const allModels = providerCatalogModels(provider, catalog);
       const enabled = runtime.getModelSelection?.(provider);
-      if (Array.isArray(enabled)) {
-        const set = new Set(enabled);
+      const reconciled = reconcileModelSelection(enabled, allModels);
+      if (Array.isArray(reconciled)) {
+        const set = new Set(reconciled);
         return allModels.filter((entry) => set.has(entry.id));
       }
       return allModels;
@@ -3239,13 +3338,13 @@ function normalizeContextWindow(value) {
   if (!Number.isSafeInteger(numeric) || numeric <= 0 || numeric > MAX_CONTEXT_WINDOW) return null;
   return numeric;
 }
-function normalizedMap(value) {
+function normalizedMap2(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value;
 }
 function cleanModelMap(value) {
   const output = {};
-  for (const [modelId, raw] of Object.entries(normalizedMap(value))) {
+  for (const [modelId, raw] of Object.entries(normalizedMap2(value))) {
     const id = text(modelId);
     const contextWindow = normalizeContextWindow(raw);
     if (id && contextWindow !== null) output[id] = contextWindow;
@@ -3254,7 +3353,7 @@ function cleanModelMap(value) {
 }
 function cleanNestedModelMap(value) {
   const output = {};
-  for (const [scopeId, models] of Object.entries(normalizedMap(value))) {
+  for (const [scopeId, models] of Object.entries(normalizedMap2(value))) {
     const id = text(scopeId);
     const cleaned = cleanModelMap(models);
     if (id && Object.keys(cleaned).length > 0) output[id] = cleaned;
@@ -3268,9 +3367,9 @@ function cleanProviderRecord(value) {
     keys: cleanNestedModelMap(value?.keys)
   };
 }
-function cleanState(value) {
+function cleanState2(value) {
   const providers = {};
-  for (const [providerId, record] of Object.entries(normalizedMap(value?.providers))) {
+  for (const [providerId, record] of Object.entries(normalizedMap2(value?.providers))) {
     const id = text(providerId);
     if (!id) continue;
     const cleaned = cleanProviderRecord(record);
@@ -3319,7 +3418,7 @@ function resolveValue(state, scope) {
   return normalizeContextWindow(provider.models?.[scope.modelId]);
 }
 function cloneState(value) {
-  return structuredClone(cleanState(value));
+  return structuredClone(cleanState2(value));
 }
 function removeEmptyScopes(provider, bucket, scopeId) {
   if (bucket === "models") return;
@@ -3343,7 +3442,7 @@ var ContextWindowOverrideStore = class {
   }
   async load() {
     const snapshot = await this.stateStore.load();
-    this.state = cleanState(snapshot?.contextWindowOverrides);
+    this.state = cleanState2(snapshot?.contextWindowOverrides);
     return this;
   }
   async ready() {
@@ -3408,97 +3507,11 @@ var ContextWindowOverrideStore = class {
       else models[scope.modelId] = contextWindow;
       removeEmptyScopes(provider, bucket, scopeId);
       removeEmptyProvider(overrides, scope.providerId);
-      return { ...next, contextWindowOverrides: cleanState(overrides) };
+      return { ...next, contextWindowOverrides: cleanState2(overrides) };
     };
     const saved = typeof this.stateStore.update === "function" ? await this.stateStore.update(mutate) : await this.stateStore.save(mutate(await this.stateStore.load()));
-    this.state = cleanState(saved?.contextWindowOverrides);
+    this.state = cleanState2(saved?.contextWindowOverrides);
     return this.describe(scope);
-  }
-};
-
-// packages/runtime/src/model-selection-store.mjs
-function normalizedMap2(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return value;
-}
-function cleanState2(value) {
-  const providers = {};
-  for (const [providerId, record] of Object.entries(normalizedMap2(value?.providers))) {
-    const id = typeof providerId === "string" ? providerId.trim() : null;
-    if (!id) continue;
-    if (Array.isArray(record?.enabled)) {
-      const enabled = record.enabled.map((m) => typeof m === "string" ? m.trim() : "").filter(Boolean);
-      providers[id] = { enabled, updatedAt: record.updatedAt ?? (/* @__PURE__ */ new Date()).toISOString() };
-    }
-  }
-  return { schema: 1, providers };
-}
-var ModelSelectionStore = class {
-  stateStore;
-  state = { schema: 1, providers: {} };
-  readyPromise;
-  constructor({ stateStore } = {}) {
-    if (!stateStore || typeof stateStore.load !== "function" || typeof stateStore.update !== "function" && typeof stateStore.save !== "function") {
-      throw new TypeError("ModelSelectionStore requires a state store");
-    }
-    this.stateStore = stateStore;
-    this.readyPromise = this.load();
-  }
-  async load() {
-    const snapshot = await this.stateStore.load();
-    const raw = snapshot?.modelSelection;
-    if (raw && typeof raw === "object") {
-      this.state = cleanState2(raw);
-    }
-    return this.state;
-  }
-  async ready() {
-    return this.readyPromise;
-  }
-  get(providerId) {
-    if (!providerId) return null;
-    const record = this.state.providers?.[providerId];
-    if (!record || !Array.isArray(record.enabled)) return null;
-    return [...record.enabled];
-  }
-  async set(providerId, enabledModelIds) {
-    if (!providerId) throw new Error("providerId is required");
-    await this.ready();
-    const cleaned = Array.isArray(enabledModelIds) ? enabledModelIds.map((m) => typeof m === "string" ? m.trim() : "").filter(Boolean) : null;
-    if (!this.state.providers) this.state.providers = {};
-    if (cleaned === null) {
-      delete this.state.providers[providerId];
-    } else {
-      this.state.providers[providerId] = {
-        enabled: cleaned,
-        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    }
-    const saved = structuredClone(this.state);
-    if (typeof this.stateStore.update === "function") {
-      await this.stateStore.update((latest) => ({
-        ...latest,
-        modelSelection: saved
-      }));
-    } else {
-      const latest = await this.stateStore.load();
-      await this.stateStore.save({
-        ...latest,
-        modelSelection: saved
-      });
-    }
-    return cleaned;
-  }
-  isModelEnabled(providerId, modelId) {
-    const enabled = this.get(providerId);
-    if (enabled === null) return true;
-    return enabled.includes(modelId);
-  }
-  filterModels(providerId, models = []) {
-    const enabled = this.get(providerId);
-    if (enabled === null) return models;
-    const set = new Set(enabled);
-    return models.filter((model) => set.has(model.id));
   }
 };
 
@@ -19585,10 +19598,11 @@ var DockyardDshService = class {
       } catch {
       }
     }
-    const enabledModelIds = this.runtime.getModelSelection(providerId);
+    const models = catalog?.models ?? [];
+    const enabledModelIds = reconcileModelSelection(this.runtime.getModelSelection(providerId), models);
     return {
       providerId,
-      models: catalog?.models ?? [],
+      models,
       enabledModelIds
     };
   }

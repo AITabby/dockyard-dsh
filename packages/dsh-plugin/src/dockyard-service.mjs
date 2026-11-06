@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 
 import { ACCOUNT_SELECTION_POLICY, PROVIDER_BEHAVIOR_CAPABILITIES } from "../../core/src/contracts.mjs";
 import { redactError } from "../../providers/src/provider-utils.mjs";
+import { reconcileModelSelection } from "../../runtime/src/model-selection-store.mjs";
 
 const DEFAULT_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const AUTH_POLL_INTERVAL_MS = 750;
@@ -374,10 +375,13 @@ export class DockyardDshService {
         this.notifyAdaptersUpdated?.();
       } catch {}
     }
-    const enabledModelIds = this.runtime.getModelSelection(providerId);
+    const models = catalog?.models ?? [];
+    // The saved selection may predate this catalog: reconcile it so a further
+    // filter cannot hide every model the account actually serves.
+    const enabledModelIds = reconcileModelSelection(this.runtime.getModelSelection(providerId), models);
     return {
       providerId,
-      models: catalog?.models ?? [],
+      models,
       enabledModelIds,
     };
   }
