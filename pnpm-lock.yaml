@@ -8,6 +8,22 @@ importers:
 
   .:
     dependencies:
+      '@earendil-works/pi-ai':
+        specifier: ^0.82.1
+        version: 0.82.1(ws@8.21.3)(zod@4.6.5)
+      immer:
+        specifier: ^10.1.1
+        version: 10.2.0
+      ipaddr.js:
+        specifier: ^2.5.0
+        version: 2.5.0
+      zod:
+        specifier: ^4.4.3
+        version: 4.6.5
+      zustand:
+        specifier: ~4.4.7
+        version: 4.4.7(immer@10.2.0)(react@18.3.1)
+    devDependencies:
       '@deepseek-ai/dsh-api-remotes':
         specifier: ^0.1.7-alpha.2
         version: 0.1.7-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-scope@0.1.7-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-invariants@0.1.7-rc.2(@deepseek-ai/cordis@4.0.4)))
@@ -29,28 +45,12 @@ importers:
       '@deepseek-ai/dsh-typert-protocol':
         specifier: ^0.1.7-alpha.2
         version: 0.1.7-alpha.2(@deepseek-ai/cordis@4.0.4)
-      '@earendil-works/pi-ai':
-        specifier: ^0.82.1
-        version: 0.82.1(ws@8.21.3)(zod@4.6.5)
-      immer:
-        specifier: ^10.1.1
-        version: 10.2.0
-      ipaddr.js:
-        specifier: ^2.5.0
-        version: 2.5.0
-      react:
-        specifier: ^18.3.1
-        version: 18.3.1
-      zod:
-        specifier: ^4.4.3
-        version: 4.6.5
-      zustand:
-        specifier: ~4.4.7
-        version: 4.4.7(immer@10.2.0)(react@18.3.1)
-    devDependencies:
       esbuild:
         specifier: ^0.25.0
         version: 0.25.12
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
 
 packages:
 

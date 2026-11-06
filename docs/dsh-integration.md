@@ -44,4 +44,4 @@ DSH_HOME=/tmp/dockyard-dsh-home dsh --profile web --dump-config
 DSH_HOME=/tmp/dockyard-dsh-home dsh web
 ```
 
-The repository root and `packages/dsh-plugin` both expose the same `@dockyard-dsh/plugin@0.1.20` bundle. `npm run build:plugin` produces the self-contained Node entry and browser client bundle; `npm pack --dry-run` should show only the release entry, client bundle, patch file, and package metadata. GitHub/npm installs use the prebuilt entry or the package `prepare` script.
+The repository root and `packages/dsh-plugin` both expose the same `@dockyard-dsh/plugin@0.1.21` bundle. `npm run build:plugin` produces the self-contained Node entry and browser client bundle; `npm pack --dry-run` should show only the release entry, client bundle, patch file, and package metadata. GitHub/npm installs use the prebuilt entry or the package `prepare` script.

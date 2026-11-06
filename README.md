@@ -4,7 +4,7 @@
 
 [中文](#中文) · [English](#english)
 
-> Developer preview · 插件版本 **0.1.20** · macOS 与 Windows 均已验证 · Provider 逻辑全部留在各 provider 模块里
+> Developer preview · 插件版本 **0.1.21** · macOS 与 Windows 均已验证 · Provider 逻辑全部留在各 provider 模块里
 
 ---
 
