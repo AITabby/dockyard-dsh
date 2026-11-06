@@ -365,11 +365,16 @@ export class DockyardDshService {
     }
   }
 
-  async getModelSelection(providerId) {
+  async getModelSelection(providerId, accountId = null) {
     await this.ready;
     await this.#autoProvisionIfNeeded(providerId);
     const forceLiveCatalog = this.#hasCapability(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.FORCE_LIVE_CATALOG);
-    const catalog = await this.runtime.getCatalog(providerId, { force: forceLiveCatalog }).catch(() => ({ models: [] }));
+    // Providers serve a different model list per account, so the panel asks for
+    // the list of the account that is currently selected, not of the provider.
+    const catalog = await this.runtime.getCatalog(providerId, {
+      force: forceLiveCatalog,
+      ...(accountId ? { accountId } : {}),
+    }).catch(() => ({ models: [] }));
     if (forceLiveCatalog) {
       try {
         this.notifyAdaptersUpdated?.();
@@ -378,7 +383,10 @@ export class DockyardDshService {
     const models = catalog?.models ?? [];
     // The saved selection may predate this catalog: reconcile it so a further
     // filter cannot hide every model the account actually serves.
-    const enabledModelIds = reconcileModelSelection(this.runtime.getModelSelection(providerId), models);
+    const enabledModelIds = reconcileModelSelection(
+      this.runtime.getModelSelection(providerId, accountId),
+      models,
+    );
     return {
       providerId,
       models,
@@ -386,9 +394,9 @@ export class DockyardDshService {
     };
   }
 
-  async setModelSelection(providerId, enabledModelIds) {
+  async setModelSelection(providerId, enabledModelIds, accountId = null) {
     await this.ready;
-    const saved = await this.runtime.setModelSelection(providerId, enabledModelIds);
+    const saved = await this.runtime.setModelSelection(providerId, enabledModelIds, accountId);
     try {
       this.notifyAdaptersUpdated?.();
     } catch {}

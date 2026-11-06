@@ -85,11 +85,14 @@ const contextWindowSetRequest = contextWindowRequest.extend({
 
 const modelSelectionRequest = z.object({
   providerId: z.string().min(1),
+  // The model list is per account: omitted means the provider's default account.
+  accountId: z.string().min(1).optional(),
 });
 
 const modelSelectionSetRequest = z.object({
   providerId: z.string().min(1),
   enabledModelIds: z.array(z.string()).nullable(),
+  accountId: z.string().min(1).optional(),
 });
 
 const testModelConnectionRequest = z.object({

@@ -139,11 +139,15 @@ export class DockyardRemoteService extends TypertRemoteService {
   }
 
   async getModelSelection(request = {}) {
-    return this.dockyard.getModelSelection(request.providerId);
+    return this.dockyard.getModelSelection(request.providerId, request.accountId ?? null);
   }
 
   async setModelSelection(request = {}) {
-    return this.dockyard.setModelSelection(request.providerId, request.enabledModelIds);
+    return this.dockyard.setModelSelection(
+      request.providerId,
+      request.enabledModelIds,
+      request.accountId ?? null,
+    );
   }
 
   async testModelConnection(request = {}) {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ModelSelectionStore, reconcileModelSelection } from "../packages/runtime/src/model-selection-store.mjs";
+import { DockyardDshService } from "../packages/dsh-plugin/src/dockyard-service.mjs";
 import { createOpencodeModule, parseOpencodeCatalog, BUILTIN_OPENCODE_FREE_MODELS } from "../modules/provider-opencode/src/index.mjs";
 
 function memoryStateStore(initial = {}) {
@@ -40,6 +41,82 @@ test("ModelSelectionStore round-trips and persists enabled models per provider",
   // Reset to null
   await store2.set("cursor", null);
   assert.equal(store2.get("cursor"), null);
+});
+
+test("a model selection can be stored per account and falls back to the provider-wide one", async () => {
+  const stateStore = memoryStateStore({});
+  const store = new ModelSelectionStore({ stateStore });
+  await store.ready();
+
+  await store.set("antigravity", ["shared-model"]);
+  assert.deepEqual(store.get("antigravity"), ["shared-model"]);
+  // An account that was never configured uses the provider-wide selection.
+  assert.deepEqual(store.get("antigravity", "account-a"), ["shared-model"]);
+
+  await store.set("antigravity", ["a-only-model"], "account-a");
+  assert.deepEqual(store.get("antigravity", "account-a"), ["a-only-model"]);
+  // Other accounts and the provider-wide entry are untouched.
+  assert.deepEqual(store.get("antigravity", "account-b"), ["shared-model"]);
+  assert.deepEqual(store.get("antigravity"), ["shared-model"]);
+
+  await store.set("antigravity", ["b-only-model"], "account-b");
+  assert.deepEqual(store.get("antigravity", "account-b"), ["b-only-model"]);
+
+  // Resetting one account drops only that account and falls back again.
+  await store.set("antigravity", null, "account-a");
+  assert.deepEqual(store.get("antigravity", "account-a"), ["shared-model"]);
+  assert.deepEqual(store.get("antigravity", "account-b"), ["b-only-model"]);
+
+  // Per-account selections survive a reload.
+  const store2 = new ModelSelectionStore({ stateStore });
+  await store2.ready();
+  assert.deepEqual(store2.get("antigravity", "account-b"), ["b-only-model"]);
+  assert.deepEqual(store2.get("antigravity"), ["shared-model"]);
+});
+
+test("the model panel reads the catalog and selection of the account it shows", async () => {
+  const catalogCalls = [];
+  const calls = [];
+  const runtime = {
+    init: async () => {},
+    snapshot: () => ({ providers: [] }),
+    hasProviderCapability: () => false,
+    getCatalog: async (providerId, context = {}) => {
+      catalogCalls.push({ providerId, context });
+      return {
+        models: context.accountId === "account-b"
+          ? [{ id: "gemini-3.8-flash-high" }, { id: "claude-sonnet-4-6" }]
+          : [{ id: "gemini-4-argon-medium" }, { id: "gemini-3.8-flash-high" }],
+      };
+    },
+    getModelSelection: (providerId, accountId) => {
+      calls.push({ method: "get", providerId, accountId });
+      return accountId === "account-b" ? ["claude-sonnet-4-6"] : ["gemini-4-argon-medium"];
+    },
+    setModelSelection: async (providerId, enabledModelIds, accountId) => {
+      calls.push({ method: "set", providerId, accountId, enabledModelIds });
+      return enabledModelIds;
+    },
+  };
+  const service = new DockyardDshService({ autoRefresh: false, runtime });
+
+  const forA = await service.getModelSelection("antigravity", "account-a");
+  assert.deepEqual(forA.models.map((model) => model.id), ["gemini-4-argon-medium", "gemini-3.8-flash-high"]);
+  assert.deepEqual(forA.enabledModelIds, ["gemini-4-argon-medium"]);
+  assert.equal(catalogCalls[0].context.accountId, "account-a");
+
+  const forB = await service.getModelSelection("antigravity", "account-b");
+  assert.deepEqual(forB.models.map((model) => model.id), ["gemini-3.8-flash-high", "claude-sonnet-4-6"]);
+  assert.deepEqual(forB.enabledModelIds, ["claude-sonnet-4-6"]);
+  assert.equal(catalogCalls[1].context.accountId, "account-b");
+
+  await service.setModelSelection("antigravity", ["claude-sonnet-4-6"], "account-b");
+  assert.deepEqual(calls.at(-1), {
+    method: "set",
+    providerId: "antigravity",
+    accountId: "account-b",
+    enabledModelIds: ["claude-sonnet-4-6"],
+  });
 });
 
 test("a selection naming models the catalog no longer serves falls back instead of hiding everything", () => {

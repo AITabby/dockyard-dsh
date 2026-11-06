@@ -1189,7 +1189,7 @@ function ContextWindowSection({ providerId, current, model, accountId = null, ke
     message ? h("div", { className: "dockyard-dsh-context-window-message", "data-error": message.error }, message.text) : null);
 }
 
-function ModelSelectionSection({ providerId, remote, directory, modelDirectories, refreshToken = 0, t }) {
+function ModelSelectionSection({ providerId, accountId = null, remote, directory, modelDirectories, refreshToken = 0, t }) {
   // The list is collapsed until asked for. Reloading it on every periodic
   // status refresh made the panel look like it was refreshing under the cursor
   // while the user was picking models.
@@ -1221,7 +1221,9 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
       return undefined;
     }
 
-    Promise.resolve(remote.getModelSelection({ providerId }))
+    // The list follows the selected account: switching the active account and
+    // then expanding the list reads that account's own catalog.
+    Promise.resolve(remote.getModelSelection({ providerId, ...(accountId ? { accountId } : {}) }))
       .then((response) => unwrapRemote(response, t))
       .then((data) => {
         if (cancelled) return;
@@ -1248,7 +1250,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
     return () => {
       cancelled = true;
     };
-  }, [providerId, remote, open, t]);
+  }, [providerId, accountId, remote, open, t]);
 
   const models = state.models;
 
@@ -1333,6 +1335,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
       unwrapRemote(await remote.setModelSelection({
         providerId,
         enabledModelIds: enabledList,
+        ...(accountId ? { accountId } : {}),
       }), t);
       setState((prev) => ({ ...prev, enabledModelIds: enabledList }));
       setMessage({ error: false, text: text(t, "modelSelection.saved") });
@@ -2238,6 +2241,7 @@ function DockyardPopup({ providerId, provider, directory, modelDirectories, dire
       }),
       h(ModelSelectionSection, {
         providerId,
+        accountId: contextAccountId,
         remote,
         directory,
         modelDirectories,

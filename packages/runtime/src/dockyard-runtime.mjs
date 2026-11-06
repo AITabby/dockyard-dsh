@@ -975,13 +975,13 @@ export class DockyardRuntime {
     return this.contextWindowOverrides.set(input, value);
   }
 
-  getModelSelection(providerId) {
-    return this.modelSelection.get(providerId);
+  getModelSelection(providerId, accountId = null) {
+    return this.modelSelection.get(providerId, accountId);
   }
 
-  async setModelSelection(providerId, enabledModelIds) {
+  async setModelSelection(providerId, enabledModelIds, accountId = null) {
     await this.init();
-    return this.modelSelection.set(providerId, enabledModelIds);
+    return this.modelSelection.set(providerId, enabledModelIds, accountId);
   }
 
   async getCatalog(providerId, context = {}) {

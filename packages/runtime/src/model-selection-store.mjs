@@ -3,17 +3,33 @@ function normalizedMap(value) {
   return value;
 }
 
+function cleanIds(value) {
+  return value
+    .map((m) => (typeof m === "string" ? m.trim() : ""))
+    .filter(Boolean);
+}
+
 function cleanState(value) {
   const providers = {};
   for (const [providerId, record] of Object.entries(normalizedMap(value?.providers))) {
     const id = typeof providerId === "string" ? providerId.trim() : null;
     if (!id) continue;
-    if (Array.isArray(record?.enabled)) {
-      const enabled = record.enabled
-        .map((m) => (typeof m === "string" ? m.trim() : ""))
-        .filter(Boolean);
-      providers[id] = { enabled, updatedAt: record.updatedAt ?? new Date().toISOString() };
+    const accounts = {};
+    for (const [accountId, accountRecord] of Object.entries(normalizedMap(record?.accounts))) {
+      const scoped = typeof accountId === "string" ? accountId.trim() : "";
+      if (!scoped || !Array.isArray(accountRecord?.enabled)) continue;
+      accounts[scoped] = {
+        enabled: cleanIds(accountRecord.enabled),
+        updatedAt: accountRecord.updatedAt ?? new Date().toISOString(),
+      };
     }
+    const hasAccounts = Object.keys(accounts).length > 0;
+    if (!Array.isArray(record?.enabled) && !hasAccounts) continue;
+    providers[id] = {
+      ...(Array.isArray(record?.enabled) ? { enabled: cleanIds(record.enabled) } : {}),
+      ...(hasAccounts ? { accounts } : {}),
+      updatedAt: record.updatedAt ?? new Date().toISOString(),
+    };
   }
   return { schema: 1, providers };
 }
@@ -67,27 +83,59 @@ export class ModelSelectionStore {
     return this.readyPromise;
   }
 
-  get(providerId) {
+  /**
+   * A provider can serve a different model list per account, so a selection can
+   * be stored per account. Without an account (or before one was ever saved for
+   * that account) the provider-wide selection is the fallback, which keeps the
+   * pre-existing single-list behaviour working.
+   */
+  get(providerId, accountId = null) {
     if (!providerId) return null;
     const record = this.state.providers?.[providerId];
-    if (!record || !Array.isArray(record.enabled)) return null;
+    if (!record) return null;
+    if (accountId && Array.isArray(record.accounts?.[accountId]?.enabled)) {
+      return [...record.accounts[accountId].enabled];
+    }
+    if (!Array.isArray(record.enabled)) return null;
     return [...record.enabled];
   }
 
-  async set(providerId, enabledModelIds) {
+  async set(providerId, enabledModelIds, accountId = null) {
     if (!providerId) throw new Error("providerId is required");
     await this.ready();
 
-    const cleaned = Array.isArray(enabledModelIds)
-      ? enabledModelIds.map((m) => (typeof m === "string" ? m.trim() : "")).filter(Boolean)
-      : null;
+    const cleaned = Array.isArray(enabledModelIds) ? cleanIds(enabledModelIds) : null;
 
     if (!this.state.providers) this.state.providers = {};
 
-    if (cleaned === null) {
-      delete this.state.providers[providerId];
+    if (accountId) {
+      const record = this.state.providers[providerId] ?? {};
+      const accounts = { ...(record.accounts ?? {}) };
+      if (cleaned === null) {
+        delete accounts[accountId];
+      } else {
+        accounts[accountId] = { enabled: cleaned, updatedAt: new Date().toISOString() };
+      }
+      const next = {
+        ...record,
+        ...(Object.keys(accounts).length > 0 ? { accounts } : {}),
+        updatedAt: new Date().toISOString(),
+      };
+      if (!Array.isArray(next.enabled) && !next.accounts) delete this.state.providers[providerId];
+      else this.state.providers[providerId] = next;
+    } else if (cleaned === null) {
+      const record = this.state.providers[providerId];
+      if (record?.accounts) {
+        // Keep per-account selections; only the provider-wide default is reset.
+        delete record.enabled;
+        record.updatedAt = new Date().toISOString();
+      } else {
+        delete this.state.providers[providerId];
+      }
     } else {
+      const record = this.state.providers[providerId] ?? {};
       this.state.providers[providerId] = {
+        ...record,
         enabled: cleaned,
         updatedAt: new Date().toISOString(),
       };

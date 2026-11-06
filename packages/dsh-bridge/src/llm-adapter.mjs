@@ -562,7 +562,13 @@ export function createDockyardLlmAdapter({
       const cached = cachedProviderCatalog(provider);
       const catalog = cached ?? await providerCatalog(provider, signal);
       const allModels = providerCatalogModels(provider, catalog);
-      const enabled = runtime.getModelSelection?.(provider);
+      // The directory lists the account that would serve a request, so its
+      // own selection applies (per-account selections fall back to the
+      // provider-wide one when an account was never configured).
+      const servingAccountId = typeof runtime.getDefaultAccountId === "function"
+        ? runtime.getDefaultAccountId(provider)
+        : null;
+      const enabled = runtime.getModelSelection?.(provider, servingAccountId);
       // A saved id that this catalog no longer serves must not filter the
       // directory down to nothing (see reconcileModelSelection).
       const reconciled = reconcileModelSelection(enabled, allModels);

@@ -15488,11 +15488,14 @@ var contextWindowSetRequest = contextWindowRequest.extend({
   value: external_exports.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable()
 });
 var modelSelectionRequest = external_exports.object({
-  providerId: external_exports.string().min(1)
+  providerId: external_exports.string().min(1),
+  // The model list is per account: omitted means the provider's default account.
+  accountId: external_exports.string().min(1).optional()
 });
 var modelSelectionSetRequest = external_exports.object({
   providerId: external_exports.string().min(1),
-  enabledModelIds: external_exports.array(external_exports.string()).nullable()
+  enabledModelIds: external_exports.array(external_exports.string()).nullable(),
+  accountId: external_exports.string().min(1).optional()
 });
 var testModelConnectionRequest = external_exports.object({
   providerId: external_exports.string().min(1),
@@ -17555,7 +17558,7 @@ function ContextWindowSection({ providerId, current: current2, model, accountId 
     message ? h("div", { className: "dockyard-dsh-context-window-message", "data-error": message.error }, message.text) : null
   );
 }
-function ModelSelectionSection({ providerId, remote, directory, modelDirectories, refreshToken = 0, t }) {
+function ModelSelectionSection({ providerId, accountId = null, remote, directory, modelDirectories, refreshToken = 0, t }) {
   const [open, setOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [state, setState] = useState({
@@ -17579,7 +17582,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
       setState({ status: "ready", models: [], enabledModelIds: null });
       return void 0;
     }
-    Promise.resolve(remote.getModelSelection({ providerId })).then((response) => unwrapRemote(response, t)).then((data) => {
+    Promise.resolve(remote.getModelSelection({ providerId, ...accountId ? { accountId } : {} })).then((response) => unwrapRemote(response, t)).then((data) => {
       if (cancelled) return;
       const models2 = Array.isArray(data?.models) ? data.models : [];
       const enabled = Array.isArray(data?.enabledModelIds) ? data.enabledModelIds : null;
@@ -17602,7 +17605,7 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
     return () => {
       cancelled = true;
     };
-  }, [providerId, remote, open, t]);
+  }, [providerId, accountId, remote, open, t]);
   const models = state.models;
   const sectionShell = (body) => h(
     "div",
@@ -17676,7 +17679,8 @@ function ModelSelectionSection({ providerId, remote, directory, modelDirectories
       const enabledList = models.length > 0 && selectedIds.size === models.length ? null : Array.from(selectedIds);
       unwrapRemote(await remote.setModelSelection({
         providerId,
-        enabledModelIds: enabledList
+        enabledModelIds: enabledList,
+        ...accountId ? { accountId } : {}
       }), t);
       setState((prev) => ({ ...prev, enabledModelIds: enabledList }));
       setMessage({ error: false, text: text(t, "modelSelection.saved") });
@@ -18711,6 +18715,7 @@ function DockyardPopup({ providerId, provider, directory, modelDirectories, dire
       }),
       h(ModelSelectionSection, {
         providerId,
+        accountId: contextAccountId,
         remote,
         directory,
         modelDirectories,

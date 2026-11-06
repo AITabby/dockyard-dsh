@@ -998,10 +998,14 @@ var init_dockyard_remote_host = __esm({
         return this.dockyard.setContextWindowOverride(request, request.value);
       }
       async getModelSelection(request = {}) {
-        return this.dockyard.getModelSelection(request.providerId);
+        return this.dockyard.getModelSelection(request.providerId, request.accountId ?? null);
       }
       async setModelSelection(request = {}) {
-        return this.dockyard.setModelSelection(request.providerId, request.enabledModelIds);
+        return this.dockyard.setModelSelection(
+          request.providerId,
+          request.enabledModelIds,
+          request.accountId ?? null
+        );
       }
       async testModelConnection(request = {}) {
         return this.dockyard.testModelConnection(request.providerId, request.modelId, {
@@ -2332,15 +2336,30 @@ function normalizedMap(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value;
 }
+function cleanIds(value) {
+  return value.map((m) => typeof m === "string" ? m.trim() : "").filter(Boolean);
+}
 function cleanState(value) {
   const providers = {};
   for (const [providerId, record] of Object.entries(normalizedMap(value?.providers))) {
     const id = typeof providerId === "string" ? providerId.trim() : null;
     if (!id) continue;
-    if (Array.isArray(record?.enabled)) {
-      const enabled = record.enabled.map((m) => typeof m === "string" ? m.trim() : "").filter(Boolean);
-      providers[id] = { enabled, updatedAt: record.updatedAt ?? (/* @__PURE__ */ new Date()).toISOString() };
+    const accounts = {};
+    for (const [accountId, accountRecord] of Object.entries(normalizedMap(record?.accounts))) {
+      const scoped = typeof accountId === "string" ? accountId.trim() : "";
+      if (!scoped || !Array.isArray(accountRecord?.enabled)) continue;
+      accounts[scoped] = {
+        enabled: cleanIds(accountRecord.enabled),
+        updatedAt: accountRecord.updatedAt ?? (/* @__PURE__ */ new Date()).toISOString()
+      };
     }
+    const hasAccounts = Object.keys(accounts).length > 0;
+    if (!Array.isArray(record?.enabled) && !hasAccounts) continue;
+    providers[id] = {
+      ...Array.isArray(record?.enabled) ? { enabled: cleanIds(record.enabled) } : {},
+      ...hasAccounts ? { accounts } : {},
+      updatedAt: record.updatedAt ?? (/* @__PURE__ */ new Date()).toISOString()
+    };
   }
   return { schema: 1, providers };
 }
@@ -2376,21 +2395,54 @@ var ModelSelectionStore = class {
   async ready() {
     return this.readyPromise;
   }
-  get(providerId) {
+  /**
+   * A provider can serve a different model list per account, so a selection can
+   * be stored per account. Without an account (or before one was ever saved for
+   * that account) the provider-wide selection is the fallback, which keeps the
+   * pre-existing single-list behaviour working.
+   */
+  get(providerId, accountId = null) {
     if (!providerId) return null;
     const record = this.state.providers?.[providerId];
-    if (!record || !Array.isArray(record.enabled)) return null;
+    if (!record) return null;
+    if (accountId && Array.isArray(record.accounts?.[accountId]?.enabled)) {
+      return [...record.accounts[accountId].enabled];
+    }
+    if (!Array.isArray(record.enabled)) return null;
     return [...record.enabled];
   }
-  async set(providerId, enabledModelIds) {
+  async set(providerId, enabledModelIds, accountId = null) {
     if (!providerId) throw new Error("providerId is required");
     await this.ready();
-    const cleaned = Array.isArray(enabledModelIds) ? enabledModelIds.map((m) => typeof m === "string" ? m.trim() : "").filter(Boolean) : null;
+    const cleaned = Array.isArray(enabledModelIds) ? cleanIds(enabledModelIds) : null;
     if (!this.state.providers) this.state.providers = {};
-    if (cleaned === null) {
-      delete this.state.providers[providerId];
+    if (accountId) {
+      const record = this.state.providers[providerId] ?? {};
+      const accounts = { ...record.accounts ?? {} };
+      if (cleaned === null) {
+        delete accounts[accountId];
+      } else {
+        accounts[accountId] = { enabled: cleaned, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+      }
+      const next = {
+        ...record,
+        ...Object.keys(accounts).length > 0 ? { accounts } : {},
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      if (!Array.isArray(next.enabled) && !next.accounts) delete this.state.providers[providerId];
+      else this.state.providers[providerId] = next;
+    } else if (cleaned === null) {
+      const record = this.state.providers[providerId];
+      if (record?.accounts) {
+        delete record.enabled;
+        record.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      } else {
+        delete this.state.providers[providerId];
+      }
     } else {
+      const record = this.state.providers[providerId] ?? {};
       this.state.providers[providerId] = {
+        ...record,
         enabled: cleaned,
         updatedAt: (/* @__PURE__ */ new Date()).toISOString()
       };
@@ -2853,7 +2905,8 @@ function createDockyardLlmAdapter({
       const cached = cachedProviderCatalog(provider);
       const catalog = cached ?? await providerCatalog(provider, signal);
       const allModels = providerCatalogModels(provider, catalog);
-      const enabled = runtime.getModelSelection?.(provider);
+      const servingAccountId = typeof runtime.getDefaultAccountId === "function" ? runtime.getDefaultAccountId(provider) : null;
+      const enabled = runtime.getModelSelection?.(provider, servingAccountId);
       const reconciled = reconcileModelSelection(enabled, allModels);
       if (Array.isArray(reconciled)) {
         const set = new Set(reconciled);
@@ -19033,12 +19086,12 @@ var DockyardRuntime = class {
     await this.init();
     return this.contextWindowOverrides.set(input, value);
   }
-  getModelSelection(providerId) {
-    return this.modelSelection.get(providerId);
+  getModelSelection(providerId, accountId = null) {
+    return this.modelSelection.get(providerId, accountId);
   }
-  async setModelSelection(providerId, enabledModelIds) {
+  async setModelSelection(providerId, enabledModelIds, accountId = null) {
     await this.init();
-    return this.modelSelection.set(providerId, enabledModelIds);
+    return this.modelSelection.set(providerId, enabledModelIds, accountId);
   }
   async getCatalog(providerId, context = {}) {
     await this.init();
@@ -19659,11 +19712,14 @@ var DockyardDshService = class {
       });
     }
   }
-  async getModelSelection(providerId) {
+  async getModelSelection(providerId, accountId = null) {
     await this.ready;
     await this.#autoProvisionIfNeeded(providerId);
     const forceLiveCatalog = this.#hasCapability(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.FORCE_LIVE_CATALOG);
-    const catalog = await this.runtime.getCatalog(providerId, { force: forceLiveCatalog }).catch(() => ({ models: [] }));
+    const catalog = await this.runtime.getCatalog(providerId, {
+      force: forceLiveCatalog,
+      ...accountId ? { accountId } : {}
+    }).catch(() => ({ models: [] }));
     if (forceLiveCatalog) {
       try {
         this.notifyAdaptersUpdated?.();
@@ -19671,16 +19727,19 @@ var DockyardDshService = class {
       }
     }
     const models = catalog?.models ?? [];
-    const enabledModelIds = reconcileModelSelection(this.runtime.getModelSelection(providerId), models);
+    const enabledModelIds = reconcileModelSelection(
+      this.runtime.getModelSelection(providerId, accountId),
+      models
+    );
     return {
       providerId,
       models,
       enabledModelIds
     };
   }
-  async setModelSelection(providerId, enabledModelIds) {
+  async setModelSelection(providerId, enabledModelIds, accountId = null) {
     await this.ready;
-    const saved = await this.runtime.setModelSelection(providerId, enabledModelIds);
+    const saved = await this.runtime.setModelSelection(providerId, enabledModelIds, accountId);
     try {
       this.notifyAdaptersUpdated?.();
     } catch {
