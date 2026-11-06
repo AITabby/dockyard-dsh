@@ -16988,6 +16988,34 @@ function formatBalance(window2, t, value = window2?.remaining) {
     return null;
   }
 }
+function quotaSummary(account, t) {
+  const health = account?.health?.status;
+  if (health === "expired") return text(t, "health.expired");
+  if (health === "exhausted") return text(t, "health.exhausted");
+  if (health === "degraded" && account?.health?.lastError) return text(t, "health.degraded");
+  const rows = quotaRowsForAccount(account, t);
+  const indicator = selectQuotaIndicator(rows);
+  if (indicator?.type === "balance") return formatBalance(indicator.window, t) ?? text(t, "value.unknown");
+  if (indicator?.type === "quota") return `${indicator.percent}%`;
+  const first = selectPrimaryQuotaWindow(rows);
+  if (first?.remaining !== null && first?.remaining !== void 0) return formatNumber(first.remaining, t);
+  if (first?.resetAt) return text(t, "health.healthy");
+  if (account?.resources?.quotaDiagnostic) return text(t, "health.healthy");
+  return account ? text(t, "summary.connected") : text(t, "summary.notConnected");
+}
+function providerAccount(provider) {
+  if (provider?.defaultAccountId) {
+    return provider.accounts?.find((account) => account.accountId === provider.defaultAccountId) ?? null;
+  }
+  return provider?.accounts?.length === 1 ? provider.accounts[0] : null;
+}
+function providerOverviewSummary(provider, t) {
+  const accounts = provider?.accounts ?? [];
+  if (accounts.length === 0) return text(t, "summary.notConnected");
+  const selected = providerAccount(provider);
+  const summary = selected ? quotaSummary(selected, t) : text(t, "summary.connected");
+  return text(t, "summary.accounts", { count: accounts.length, summary });
+}
 function isUuidString(value) {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
@@ -18395,19 +18423,30 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
         title: text(t, "ui.close")
       }, "\xD7") : null
     ),
+    // No success banner here: the overview has no account selected, so a
+    // "refreshed N accounts" line is noise. Errors still surface.
     h(
       "div",
       {
         className: "dockyard-dsh-status",
         "data-error": Boolean(controlState.error),
-        "data-success": Boolean(controlState.message && !controlState.error),
         role: controlState.error ? "alert" : "status"
       },
-      h("span", { className: "dockyard-dsh-status-copy" }, controlState.error ?? controlState.message ?? (controlState.status === "loading" ? text(t, "status.readingSubscriptions") : text(t, "status.subscriptionReady")))
+      h("span", { className: "dockyard-dsh-status-copy" }, controlState.error ?? (controlState.status === "loading" ? text(t, "status.readingSubscriptions") : text(t, "status.subscriptionReady")))
     ),
     h(
       "div",
       { className: "dockyard-dsh-popup-scroll" },
+      h(
+        "div",
+        { className: "dockyard-dsh-toolbar" },
+        h("button", {
+          type: "button",
+          className: "dockyard-dsh-action",
+          disabled: busy,
+          onClick: () => controller.refreshAll()
+        }, controlState.action === "refresh" ? text(t, "status.refreshing") : text(t, "subscription.refreshAll"))
+      ),
       h(
         "div",
         { className: "dockyard-dsh-section" },
@@ -18440,7 +18479,8 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
                 { className: "dockyard-dsh-provider-card-title-row" },
                 h("span", { className: "dockyard-dsh-provider-row-name" }, displayName),
                 h("span", { className: "dockyard-dsh-provider-row-arrow", "aria-hidden": true }, "\u203A")
-              )
+              ),
+              h("div", { className: "dockyard-dsh-provider-row-meta" }, `${providerOverviewSummary(provider, t)}${modelCount ? ` \xB7 ${modelCount}` : ""}`)
             ),
             h(
               "div",
