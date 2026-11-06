@@ -133,6 +133,46 @@ test("only the rows the account's own picker offers become agent models", () => 
   assert.deepEqual(models.map((model) => model.id), ["gemini-3.8-flash-high", "claude-sonnet-4-6"]);
 });
 
+test("tiered families fold into one model with the tiers as efforts", () => {
+  const models = modelsFromFetchAvailableModels({
+    defaultAgentModelId: "gemini-3.8-flash-high",
+    models: {
+      "gemini-3.8-flash-high": { displayName: "Gemini 3.8 Flash (High)", maxTokens: 1_048_576, maxOutputTokens: 65_536, supportsImages: true },
+      "gemini-3.8-flash-medium": { displayName: "Gemini 3.8 Flash (Medium)" },
+      "gemini-3.8-flash-low": { displayName: "Gemini 3.8 Flash (Low)" },
+      "claude-sonnet-4-6": { displayName: "Claude Sonnet 4.6 (Thinking)" },
+      "gpt-oss-120b-medium": { displayName: "GPT-OSS 120B (Medium)" },
+    },
+    agentModelSorts: [{
+      groups: [{
+        modelIds: [
+          "gemini-3.8-flash-high",
+          "gemini-3.8-flash-medium",
+          "gemini-3.8-flash-low",
+          "claude-sonnet-4-6",
+          "gpt-oss-120b-medium",
+        ],
+      }],
+    }],
+  });
+  // One row for the tiered family, keyed by the provider's default tier; a
+  // family that serves a single tier keeps its own row and name.
+  assert.deepEqual(models.map((model) => model.id), [
+    "gemini-3.8-flash-high",
+    "claude-sonnet-4-6",
+    "gpt-oss-120b-medium",
+  ]);
+  const gemini = models[0];
+  assert.equal(gemini.name, "Gemini 3.8 Flash");
+  assert.deepEqual(gemini.reasoning, {
+    efforts: [{ id: "high", name: "High" }, { id: "medium", name: "Medium" }, { id: "low", name: "Low" }],
+    defaultEffort: "high",
+  });
+  assert.equal(gemini.contextWindow, 1_048_576);
+  assert.equal(models[1].reasoning, undefined);
+  assert.equal(models[2].name, "GPT-OSS 120B (Medium)");
+});
+
 test("without a picker the internal editor rows are still left out", () => {
   const models = modelsFromFetchAvailableModels({
     models: {

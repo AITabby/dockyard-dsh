@@ -32,6 +32,7 @@ import {
   officialSessionResources,
 } from "../../../packages/providers/src/session-source.mjs";
 import {
+  collapseAntigravityTierFamilies,
   createAntigravityNativeQuotaReader,
   fetchAntigravityAvailableModels,
   readAntigravityTokenFile,
@@ -546,16 +547,6 @@ function normalizeToken(value) {
   return String(value).trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
-function modelTier(model) {
-  const labelMatch = /\(([^()]+)\)\s*$/.exec(model.name ?? "");
-  if (!labelMatch) return null;
-  const idParts = model.id.split("-");
-  const id = idParts.at(-1);
-  const label = labelMatch[1].trim();
-  if (!id || !label || normalizeToken(id) !== normalizeToken(label)) return null;
-  return { id, name: label };
-}
-
 /**
  * Convert the provider's exact model rows into DSH model metadata. A reasoning
  * selector is added only when the provider actually returned multiple rows in
@@ -573,31 +564,10 @@ export function parseAntigravityModelCatalog(output) {
     })
     .filter((model) => model.id);
 
-  const families = new Map();
-  for (const model of rows) {
-    const tier = modelTier(model);
-    if (!tier) continue;
-    const familyId = model.id.slice(0, -(tier.id.length + 1));
-    const family = families.get(familyId) ?? new Map();
-    family.set(tier.id, tier);
-    families.set(familyId, family);
-  }
-
-  return rows.map((model) => {
-    const tier = modelTier(model);
-    if (!tier) return model;
-    const familyId = model.id.slice(0, -(tier.id.length + 1));
-    const family = families.get(familyId);
-    if (!family || family.size < 2) return model;
-    const efforts = [...family.values()];
-    return {
-      ...model,
-      reasoning: {
-        efforts: efforts.map((effort) => ({ id: effort.id, name: effort.name })),
-        defaultEffort: tier.id,
-      },
-    };
-  });
+  // The CLI returns one row per tier; fold them into one model per family so
+  // the picker shows "Gemini 3.8 Flash" with a tier selector, like the official
+  // client, instead of three near-identical entries.
+  return collapseAntigravityTierFamilies(rows);
 }
 
 function registryModels(value) {
@@ -954,9 +924,12 @@ function familyPrefixForModel(model) {
 }
 
 /**
- * Antigravity exposes tiered Gemini rows as exact model IDs. Resolve a DSH
- * model+effort pair to the exact returned row and omit --effort; the CLI
- * rejects passing an encoded tier together with a different effort flag.
+ * Antigravity serves a tiered model as one row per tier, and the catalog folds
+ * those rows into a single entry whose id is the provider's default tier. A
+ * request therefore carries the family row plus the tier the user picked, which
+ * has to be turned back into the exact tier id. Passing the tier id and no
+ * separate effort also keeps the CLI happy: it rejects an encoded tier together
+ * with a different effort flag.
  */
 export async function resolveAntigravityInvocationModel({ catalogLoader, model, reasoningEffort } = {}) {
   if (typeof model !== "string" || typeof reasoningEffort !== "string" || !catalogLoader) {
@@ -964,10 +937,23 @@ export async function resolveAntigravityInvocationModel({ catalogLoader, model, 
   }
   try {
     const catalog = await catalogLoader();
-    const selected = catalog?.models?.find((candidate) => candidate?.id === model);
+    const models = Array.isArray(catalog?.models) ? catalog.models : [];
+    const selected = models.find((candidate) => candidate?.id === model);
     const prefix = familyPrefixForModel(selected);
     if (!selected || !prefix) return { model, reasoningEffort };
-    const target = catalog.models.find((candidate) => {
+
+    // A collapsed family lists its tiers as efforts; the tier id is the family
+    // prefix plus the tier unless the provider still returns an explicit row.
+    const declaredTier = (selected.reasoning?.efforts ?? []).some(
+      (effort) => effort?.id === reasoningEffort,
+    );
+    if (declaredTier) {
+      const explicit = models.find((candidate) => candidate?.id === `${prefix}-${reasoningEffort}`);
+      return { model: explicit?.id ?? `${prefix}-${reasoningEffort}`, reasoningEffort: undefined };
+    }
+
+    // Catalogs that still list one row per tier resolve through the row itself.
+    const target = models.find((candidate) => {
       return candidate?.id?.startsWith(`${prefix}-`)
         && candidate.reasoning?.defaultEffort === reasoningEffort;
     });
@@ -981,15 +967,12 @@ export async function resolveAntigravityInvocationModel({ catalogLoader, model, 
 }
 
 /**
- * Keep the native invocation model exactly as discovered. CodexSplit sends
- * Antigravity's tier-suffixed model id unchanged to streamGenerateContent;
- * the transport must not invent a family-id/thinkingLevel translation.
- *
- * The helper remains exported for compatibility with callers that used the
- * earlier experimental mapping, but it is intentionally a no-op now.
+ * The native streamGenerateContent transport takes the same tier id: the tier
+ * is encoded in the model id and the transport derives the thinking budget from
+ * that id, so no family-id/thinkingLevel translation is invented here.
  */
-export async function resolveAntigravityNativeInvocationModel({ catalogLoader, model, reasoningEffort } = {}) {
-  return { model, reasoningEffort };
+export async function resolveAntigravityNativeInvocationModel(options = {}) {
+  return resolveAntigravityInvocationModel(options);
 }
 
 function contentText(value) {
@@ -2690,7 +2673,21 @@ export class AntigravityOfficialSessionDriver {
     if (typeof executor !== "function") {
       throw new Error("Antigravity native invocation transport is not mounted");
     }
-    return executor({ request, invocation, context });
+    // The catalog folds tiered rows into one model per family, so the picked
+    // tier has to become the exact tier id before the body is built.
+    const resolved = await resolveAntigravityNativeInvocationModel({
+      catalogLoader: this.catalogLoader,
+      model: request?.model,
+      reasoningEffort: request?.reasoningEffort ?? request?.reasoning_effort,
+    });
+    const resolvedRequest = resolved.model === request?.model && resolved.reasoningEffort === (request?.reasoningEffort ?? request?.reasoning_effort)
+      ? request
+      : {
+          ...request,
+          model: resolved.model,
+          ...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: resolved.reasoningEffort }),
+        };
+    return executor({ request: resolvedRequest, invocation, context });
   }
 
   async stream(request, invocation, context = {}) {

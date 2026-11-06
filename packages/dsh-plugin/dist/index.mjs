@@ -6457,6 +6457,63 @@ async function fetchAntigravityAvailableModels({
   }
   return modelsFromFetchAvailableModels(raw);
 }
+function antigravityModelTier(model) {
+  const id = typeof model?.id === "string" ? model.id : "";
+  const match = /^(.*)-(minimal|low|medium|high|xhigh|max)$/u.exec(id);
+  if (!match || !match[1]) return null;
+  return { familyId: match[1], tierId: match[2] };
+}
+function tierLabel(id) {
+  return id.charAt(0).toUpperCase() + id.slice(1);
+}
+function stripTierLabel(name2) {
+  if (typeof name2 !== "string") return null;
+  const stripped = name2.replace(/\s*\((minimal|low|medium|high|xhigh|max)\)\s*$/iu, "").trim();
+  return stripped && stripped !== name2 ? stripped : null;
+}
+function collapseAntigravityTierFamilies(models, { defaultModelId = null } = {}) {
+  const rows = (Array.isArray(models) ? models : []).filter(
+    (model) => model && typeof model.id === "string" && model.id.length > 0
+  );
+  const families = /* @__PURE__ */ new Map();
+  for (const model of rows) {
+    const tier = antigravityModelTier(model);
+    if (!tier) continue;
+    const members = families.get(tier.familyId) ?? [];
+    members.push({ model, tierId: tier.tierId });
+    families.set(tier.familyId, members);
+  }
+  const collapsed = /* @__PURE__ */ new Map();
+  for (const [familyId, members] of families) {
+    const tiers = [...new Set(members.map((member) => member.tierId))];
+    if (tiers.length < 2) continue;
+    const preferred = members.find((member) => member.model.id === defaultModelId) ?? members.find((member) => member.tierId === "medium") ?? members[0];
+    const name2 = stripTierLabel(preferred.model.name) ?? stripTierLabel(members[0].model.name) ?? familyId;
+    collapsed.set(familyId, {
+      ...preferred.model,
+      id: preferred.model.id,
+      name: name2,
+      reasoning: {
+        efforts: tiers.map((tierId) => ({ id: tierId, name: tierLabel(tierId) })),
+        defaultEffort: preferred.tierId
+      }
+    });
+  }
+  if (collapsed.size === 0) return rows;
+  const result = [];
+  const emitted = /* @__PURE__ */ new Set();
+  for (const model of rows) {
+    const tier = antigravityModelTier(model);
+    if (!tier || !collapsed.has(tier.familyId)) {
+      result.push(model);
+      continue;
+    }
+    if (emitted.has(tier.familyId)) continue;
+    emitted.add(tier.familyId);
+    result.push(collapsed.get(tier.familyId));
+  }
+  return result;
+}
 function modelsFromFetchAvailableModels(raw) {
   const table = raw?.models;
   if (!table || typeof table !== "object") return null;
@@ -6484,7 +6541,9 @@ function modelsFromFetchAvailableModels(raw) {
     return index === -1 ? Number.MAX_SAFE_INTEGER : index;
   };
   models.sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
-  return models;
+  return collapseAntigravityTierFamilies(models, {
+    defaultModelId: typeof raw?.defaultAgentModelId === "string" ? raw.defaultAgentModelId : null
+  });
 }
 function createAntigravityProjectResolver({
   endpoint: endpoint2 = process.env.DOCKYARD_ANTIGRAVITY_PROJECT_ENDPOINT || DEFAULT_PROJECT_ENDPOINT,
@@ -7615,44 +7674,12 @@ function parseJsonOutput2(output) {
 function normalizeToken(value) {
   return String(value).trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
-function modelTier(model) {
-  const labelMatch = /\(([^()]+)\)\s*$/.exec(model.name ?? "");
-  if (!labelMatch) return null;
-  const idParts = model.id.split("-");
-  const id = idParts.at(-1);
-  const label = labelMatch[1].trim();
-  if (!id || !label || normalizeToken(id) !== normalizeToken(label)) return null;
-  return { id, name: label };
-}
 function parseAntigravityModelCatalog(output) {
   const rows = String(output).split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !/^fetching available models/i.test(line)).map((line) => {
     const [id, ...nameParts] = line.split("	");
     return { id, name: nameParts.join("	") || id };
   }).filter((model) => model.id);
-  const families = /* @__PURE__ */ new Map();
-  for (const model of rows) {
-    const tier = modelTier(model);
-    if (!tier) continue;
-    const familyId = model.id.slice(0, -(tier.id.length + 1));
-    const family = families.get(familyId) ?? /* @__PURE__ */ new Map();
-    family.set(tier.id, tier);
-    families.set(familyId, family);
-  }
-  return rows.map((model) => {
-    const tier = modelTier(model);
-    if (!tier) return model;
-    const familyId = model.id.slice(0, -(tier.id.length + 1));
-    const family = families.get(familyId);
-    if (!family || family.size < 2) return model;
-    const efforts = [...family.values()];
-    return {
-      ...model,
-      reasoning: {
-        efforts: efforts.map((effort) => ({ id: effort.id, name: effort.name })),
-        defaultEffort: tier.id
-      }
-    };
-  });
+  return collapseAntigravityTierFamilies(rows);
 }
 function registryModels(value) {
   if (Array.isArray(value)) return value;
@@ -7930,6 +7957,41 @@ function createAntigravityCatalogLoader({
     });
   };
   return loadCatalog;
+}
+function familyPrefixForModel(model) {
+  const defaultEffort = model?.reasoning?.defaultEffort;
+  if (typeof defaultEffort !== "string" || defaultEffort.length === 0) return null;
+  const suffix = `-${defaultEffort}`;
+  return model.id.endsWith(suffix) ? model.id.slice(0, -suffix.length) : null;
+}
+async function resolveAntigravityInvocationModel({ catalogLoader, model, reasoningEffort } = {}) {
+  if (typeof model !== "string" || typeof reasoningEffort !== "string" || !catalogLoader) {
+    return { model, reasoningEffort };
+  }
+  try {
+    const catalog = await catalogLoader();
+    const models = Array.isArray(catalog?.models) ? catalog.models : [];
+    const selected = models.find((candidate2) => candidate2?.id === model);
+    const prefix = familyPrefixForModel(selected);
+    if (!selected || !prefix) return { model, reasoningEffort };
+    const declaredTier = (selected.reasoning?.efforts ?? []).some(
+      (effort) => effort?.id === reasoningEffort
+    );
+    if (declaredTier) {
+      const explicit = models.find((candidate2) => candidate2?.id === `${prefix}-${reasoningEffort}`);
+      return { model: explicit?.id ?? `${prefix}-${reasoningEffort}`, reasoningEffort: void 0 };
+    }
+    const target = models.find((candidate2) => {
+      return candidate2?.id?.startsWith(`${prefix}-`) && candidate2.reasoning?.defaultEffort === reasoningEffort;
+    });
+    if (!target) return { model, reasoningEffort };
+    return { model: target.id, reasoningEffort: void 0 };
+  } catch {
+    return { model, reasoningEffort };
+  }
+}
+async function resolveAntigravityNativeInvocationModel(options = {}) {
+  return resolveAntigravityInvocationModel(options);
 }
 function quotaGroups(data) {
   if (!data || typeof data !== "object") return [];
@@ -9124,7 +9186,17 @@ var AntigravityOfficialSessionDriver = class {
     if (typeof executor !== "function") {
       throw new Error("Antigravity native invocation transport is not mounted");
     }
-    return executor({ request, invocation, context });
+    const resolved = await resolveAntigravityNativeInvocationModel({
+      catalogLoader: this.catalogLoader,
+      model: request?.model,
+      reasoningEffort: request?.reasoningEffort ?? request?.reasoning_effort
+    });
+    const resolvedRequest = resolved.model === request?.model && resolved.reasoningEffort === (request?.reasoningEffort ?? request?.reasoning_effort) ? request : {
+      ...request,
+      model: resolved.model,
+      ...resolved.reasoningEffort === void 0 ? {} : { reasoningEffort: resolved.reasoningEffort }
+    };
+    return executor({ request: resolvedRequest, invocation, context });
   }
   async stream(request, invocation, context = {}) {
     return this.invoke(request, invocation, context);

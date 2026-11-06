@@ -666,6 +666,84 @@ export async function fetchAntigravityAvailableModels({
 }
 
 /**
+ * Antigravity serves a tiered model as one row per reasoning tier
+ * (`<family>-low`, `<family>-high`, ...), while the official picker shows a
+ * single "Gemini 3.8 Flash" entry and lets the caller choose the tier. Collapse
+ * each family back into one row that carries the tiers as reasoning efforts, so
+ * the model list matches the official client and the tier is chosen in the UI.
+ * A family that only serves one tier keeps its own id (the tier is part of that
+ * model's name, e.g. "GPT-OSS 120B (Medium)").
+ */
+function antigravityModelTier(model) {
+  const id = typeof model?.id === "string" ? model.id : "";
+  const match = /^(.*)-(minimal|low|medium|high|xhigh|max)$/u.exec(id);
+  if (!match || !match[1]) return null;
+  return { familyId: match[1], tierId: match[2] };
+}
+
+function tierLabel(id) {
+  return id.charAt(0).toUpperCase() + id.slice(1);
+}
+
+/** "Gemini 3.8 Flash (High)" -> "Gemini 3.8 Flash"; ids without the suffix -> null. */
+function stripTierLabel(name) {
+  if (typeof name !== "string") return null;
+  const stripped = name.replace(/\s*\((minimal|low|medium|high|xhigh|max)\)\s*$/iu, "").trim();
+  return stripped && stripped !== name ? stripped : null;
+}
+
+export function collapseAntigravityTierFamilies(models, { defaultModelId = null } = {}) {
+  const rows = (Array.isArray(models) ? models : []).filter(
+    (model) => model && typeof model.id === "string" && model.id.length > 0,
+  );
+  const families = new Map();
+  for (const model of rows) {
+    const tier = antigravityModelTier(model);
+    if (!tier) continue;
+    const members = families.get(tier.familyId) ?? [];
+    members.push({ model, tierId: tier.tierId });
+    families.set(tier.familyId, members);
+  }
+
+  const collapsed = new Map();
+  for (const [familyId, members] of families) {
+    const tiers = [...new Set(members.map((member) => member.tierId))];
+    // One tier only: the id itself is the model, keep the provider's row.
+    if (tiers.length < 2) continue;
+    const preferred = members.find((member) => member.model.id === defaultModelId)
+      ?? members.find((member) => member.tierId === "medium")
+      ?? members[0];
+    const name = stripTierLabel(preferred.model.name)
+      ?? stripTierLabel(members[0].model.name)
+      ?? familyId;
+    collapsed.set(familyId, {
+      ...preferred.model,
+      id: preferred.model.id,
+      name,
+      reasoning: {
+        efforts: tiers.map((tierId) => ({ id: tierId, name: tierLabel(tierId) })),
+        defaultEffort: preferred.tierId,
+      },
+    });
+  }
+  if (collapsed.size === 0) return rows;
+
+  const result = [];
+  const emitted = new Set();
+  for (const model of rows) {
+    const tier = antigravityModelTier(model);
+    if (!tier || !collapsed.has(tier.familyId)) {
+      result.push(model);
+      continue;
+    }
+    if (emitted.has(tier.familyId)) continue;
+    emitted.add(tier.familyId);
+    result.push(collapsed.get(tier.familyId));
+  }
+  return result;
+}
+
+/**
  * Flatten fetchAvailableModels' map into catalog rows.
  *
  * The reply's `models` table is a superset of what the official client offers:
@@ -708,7 +786,9 @@ export function modelsFromFetchAvailableModels(raw) {
     return index === -1 ? Number.MAX_SAFE_INTEGER : index;
   };
   models.sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
-  return models;
+  return collapseAntigravityTierFamilies(models, {
+    defaultModelId: typeof raw?.defaultAgentModelId === "string" ? raw.defaultAgentModelId : null,
+  });
 }
 
 /** Resolve the Code Assist project for the selected OAuth session. */

@@ -924,7 +924,7 @@ test("Antigravity catalog stays mounted when the optional CLI is unavailable", a
   assert.equal(calls, 1);
 });
 
-test("provider model metadata exposes only returned reasoning tiers", () => {
+test("provider model metadata folds the returned reasoning tiers into one model", () => {
   assert.deepEqual(parseAntigravityModelCatalog([
     "Fetching available models...",
     "gemini-live-low\tGemini Live (Low)",
@@ -932,21 +932,11 @@ test("provider model metadata exposes only returned reasoning tiers", () => {
     "gemini-live-high\tGemini Live (High)",
     "claude-live\tClaude Live (Thinking)",
   ].join("\n")), [
-    {
-      id: "gemini-live-low",
-      name: "Gemini Live (Low)",
-      reasoning: {
-        efforts: [
-          { id: "low", name: "Low" },
-          { id: "medium", name: "Medium" },
-          { id: "high", name: "High" },
-        ],
-        defaultEffort: "low",
-      },
-    },
+    // The three tiered rows fold into one model whose tiers are the efforts,
+    // the way the official picker shows a single "Gemini Live" entry.
     {
       id: "gemini-live-medium",
-      name: "Gemini Live (Medium)",
+      name: "Gemini Live",
       reasoning: {
         efforts: [
           { id: "low", name: "Low" },
@@ -954,18 +944,6 @@ test("provider model metadata exposes only returned reasoning tiers", () => {
           { id: "high", name: "High" },
         ],
         defaultEffort: "medium",
-      },
-    },
-    {
-      id: "gemini-live-high",
-      name: "Gemini Live (High)",
-      reasoning: {
-        efforts: [
-          { id: "low", name: "Low" },
-          { id: "medium", name: "Medium" },
-          { id: "high", name: "High" },
-        ],
-        defaultEffort: "high",
       },
     },
     { id: "claude-live", name: "Claude Live (Thinking)" },
@@ -1089,22 +1067,8 @@ test("Antigravity capacity metadata is enriched only from a live-compatible regi
     input: ["text", "image"],
   }]), [
     {
-      id: "gemini-3.6-flash-high",
-      name: "Gemini 3.6 Flash (High)",
-      reasoning: {
-        efforts: [
-          { id: "high", name: "High" },
-          { id: "medium", name: "Medium" },
-        ],
-        defaultEffort: "high",
-      },
-      contextWindow: 1048576,
-      maxTokens: 65536,
-      inputModalities: ["text", "image"],
-    },
-    {
       id: "gemini-3.6-flash-medium",
-      name: "Gemini 3.6 Flash (Medium)",
+      name: "Gemini 3.6 Flash",
       reasoning: {
         efforts: [
           { id: "high", name: "High" },
@@ -1137,7 +1101,6 @@ test("Antigravity catalog supplies the published Gemini 3.7 capacity fallback", 
     contextWindow: model.contextWindow,
     maxTokens: model.maxTokens,
   })), [
-    { id: "gemini-3.7-flash-high", contextWindow: 1_048_576, maxTokens: 65_536 },
     { id: "gemini-3.7-flash-medium", contextWindow: 1_048_576, maxTokens: 65_536 },
   ]);
   assert.equal(catalog.source, "official_antigravity_cli+model_registry");
@@ -1241,8 +1204,39 @@ test("Antigravity maps a native run_command event into DSH bash", async () => {
   ]);
 });
 
-test("Antigravity maps a selected effort to the exact returned model row", async () => {
-  const catalogLoader = async () => ({
+test("Antigravity maps a selected effort to the exact tier id", async () => {
+  // Folded catalog: one row per family, the tiers are the reasoning efforts.
+  const collapsed = async () => ({
+    models: [{
+      id: "gemini-live-medium",
+      name: "Gemini Live",
+      reasoning: {
+        efforts: [{ id: "high", name: "High" }, { id: "medium", name: "Medium" }],
+        defaultEffort: "medium",
+      },
+    }],
+  });
+  assert.deepEqual(await resolveAntigravityInvocationModel({
+    catalogLoader: collapsed,
+    model: "gemini-live-medium",
+    reasoningEffort: "high",
+  }), { model: "gemini-live-high", reasoningEffort: undefined });
+  // The chosen tier is encoded in the id, so the transport derives the
+  // thinking budget from it and no separate effort is sent.
+  assert.deepEqual(await resolveAntigravityNativeInvocationModel({
+    catalogLoader: collapsed,
+    model: "gemini-live-medium",
+    reasoningEffort: "medium",
+  }), { model: "gemini-live-medium", reasoningEffort: undefined });
+  // A tier the family does not declare is left untouched.
+  assert.deepEqual(await resolveAntigravityInvocationModel({
+    catalogLoader: collapsed,
+    model: "gemini-live-medium",
+    reasoningEffort: "xhigh",
+  }), { model: "gemini-live-medium", reasoningEffort: "xhigh" });
+
+  // Catalogs that still list one row per tier keep resolving through the row.
+  const perTier = async () => ({
     models: [
       {
         id: "gemini-live-high",
@@ -1257,15 +1251,10 @@ test("Antigravity maps a selected effort to the exact returned model row", async
     ],
   });
   assert.deepEqual(await resolveAntigravityInvocationModel({
-    catalogLoader,
+    catalogLoader: perTier,
     model: "gemini-live-medium",
     reasoningEffort: "high",
   }), { model: "gemini-live-high", reasoningEffort: undefined });
-  assert.deepEqual(await resolveAntigravityNativeInvocationModel({
-    catalogLoader,
-    model: "gemini-live-medium",
-    reasoningEffort: "medium",
-  }), { model: "gemini-live-medium", reasoningEffort: "medium" });
 
   let calls = 0;
   const cachedLoader = createAntigravityCatalogLoader({
@@ -1308,7 +1297,6 @@ test("Antigravity catalog persists an account-scoped last-known result", async (
     });
     const restored = await restoredLoader({ accounts });
     assert.deepEqual(restored.models.map((model) => model.id), [
-      "gemini-3.7-flash-high",
       "gemini-3.7-flash-medium",
     ]);
     assert.match(restored.source, /persistent_cache/);
