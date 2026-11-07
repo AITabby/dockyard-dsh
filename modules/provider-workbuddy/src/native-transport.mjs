@@ -378,10 +378,15 @@ export function createWorkbuddyNativeExecutor({
 
     const streamEvents = [];
     let nextIndex = 1;
-    let reasoning = null;
     let rawUsage = null;
     let stop = "stop";
     const activeTools = new Map();
+
+    const reasoningFilter = new DsmlStreamFilter({
+      onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "reasoning" }),
+      onTextDelta: (index, text) => streamEvents.push({ type: "reasoning-delta", index, text }),
+      onTextBlockEnd: (index, text) => streamEvents.push({ type: "block-end", index, block: { type: "reasoning", text } }),
+    });
 
     const textFilter = new DsmlStreamFilter({
       onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "text" }),
@@ -403,21 +408,14 @@ export function createWorkbuddyNativeExecutor({
       if (reasoningDelta) {
         textFilter.closeText();
         while (streamEvents.length > 0) yield streamEvents.shift();
-        if (!reasoning) {
-          reasoning = { index: nextIndex++, text: "" };
-          yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
-        }
-        reasoning.text += reasoningDelta;
-        yield { type: "reasoning-delta", index: reasoning.index, text: reasoningDelta };
+        reasoningFilter.push(reasoningDelta, () => nextIndex++);
+        while (streamEvents.length > 0) yield streamEvents.shift();
       }
 
       for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
         const key = Number(call.index ?? activeTools.size);
         if (!activeTools.has(key)) {
-          if (reasoning) {
-            yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-            reasoning = null;
-          }
+          reasoningFilter.closeText();
           textFilter.closeText();
           while (streamEvents.length > 0) yield streamEvents.shift();
           const state = {
@@ -441,10 +439,8 @@ export function createWorkbuddyNativeExecutor({
 
       const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
       if (content) {
-        if (reasoning) {
-          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-          reasoning = null;
-        }
+        reasoningFilter.closeText();
+        while (streamEvents.length > 0) yield streamEvents.shift();
         textFilter.push(content, () => nextIndex++);
         while (streamEvents.length > 0) yield streamEvents.shift();
       }
@@ -454,13 +450,16 @@ export function createWorkbuddyNativeExecutor({
       }
     }
 
-    if (reasoning) {
-      yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-      reasoning = null;
-    }
-
-    const dsmlResult = textFilter.flush(() => nextIndex++);
+    reasoningFilter.closeText();
+    textFilter.closeText();
+    const reasoningDsml = reasoningFilter.flush(() => nextIndex++);
+    const textDsml = textFilter.flush(() => nextIndex++);
     while (streamEvents.length > 0) yield streamEvents.shift();
+
+    const allDsmlCalls = [
+      ...(reasoningDsml?.toolCalls || []),
+      ...(textDsml?.toolCalls || []),
+    ];
 
     if (activeTools.size > 0) {
       for (const state of activeTools.values()) {
@@ -471,8 +470,8 @@ export function createWorkbuddyNativeExecutor({
         };
       }
       stop = "tool_calls";
-    } else if (dsmlResult?.toolCalls?.length > 0) {
-      for (const dsml of dsmlResult.toolCalls) {
+    } else if (allDsmlCalls.length > 0) {
+      for (const dsml of allDsmlCalls) {
         const toolIndex = nextIndex++;
         const toolId = `call_${randomUUID().slice(0, 8)}`;
         yield { type: "block-start", index: toolIndex, blockType: "tool-call" };

@@ -7,9 +7,11 @@ import {
   DsmlStreamFilter,
   finishReason,
   normalizeUsage,
+  parseDsmlCalls,
   readSseEvents,
   resolveImageData,
   sanitizeToolCallId,
+  stripDsmlCalls,
   textFromContent,
 } from "../../../packages/providers/src/native-transport.mjs";
 import { stripVendorPrefix } from "../../../packages/providers/src/provider-utils.mjs";
@@ -1025,8 +1027,16 @@ export function createOpenRouterFreeNativeExecutor({
       streamEvents.push({ type: "reasoning-delta", index: reasoning.index, text });
     };
 
+    const reasoningDsmlCalls = [];
     const closeReasoningBlock = () => {
       if (!reasoning) return;
+      if (typeof reasoning.text === "string" && reasoning.text.includes("DSML")) {
+        const calls = parseDsmlCalls(reasoning.text);
+        if (calls?.length > 0) {
+          reasoningDsmlCalls.push(...calls);
+          reasoning.text = stripDsmlCalls(reasoning.text);
+        }
+      }
       streamEvents.push({ type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } });
       reasoning = null;
     };
@@ -1175,6 +1185,11 @@ export function createOpenRouterFreeNativeExecutor({
     const dsmlResult = textFilter.flush(() => nextIndex++);
     while (streamEvents.length > 0) yield streamEvents.shift();
 
+    const allDsmlCalls = [
+      ...reasoningDsmlCalls,
+      ...(dsmlResult?.toolCalls || []),
+    ];
+
     if (activeTools.size > 0) {
       for (const state of activeTools.values()) {
         yield {
@@ -1184,8 +1199,8 @@ export function createOpenRouterFreeNativeExecutor({
         };
       }
       stop = "tool_calls";
-    } else if (dsmlResult?.toolCalls?.length > 0) {
-      for (const dsml of dsmlResult.toolCalls) {
+    } else if (allDsmlCalls.length > 0) {
+      for (const dsml of allDsmlCalls) {
         substantiveYielded = true;
         const toolIndex = nextIndex++;
         const toolId = `call_${randomUUID().slice(0, 8)}`;

@@ -414,3 +414,104 @@ test("HermesDriver never invents a balance the auth file does not carry", async 
     try { unlinkSync(tempAuthPath); } catch {}
   }
 });
+
+test("createHermesNativeExecutor parses DSML tool calls emitted inside reasoning delta and triggers tool-calls", async () => {
+  const dsmlInReasoning = `Thinking about inspection...\n<｜DSML｜ calls>\n<｜DSML｜ invoke name="bash">\n<｜DSML｜ parameter name="command" string="true">pwd</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>`;
+  const ssePayload = [
+    `data: ${JSON.stringify({
+      id: "hermes-dsml-1",
+      choices: [{ delta: { reasoning_content: dsmlInReasoning } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      id: "hermes-dsml-2",
+      choices: [{ delta: {}, finish_reason: "stop" }],
+      usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+    })}\n\n`,
+    "data: [DONE]\n\n",
+  ].join("");
+
+  const mockFetch = async () => new Response(ssePayload, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+
+  const executor = createHermesNativeExecutor({
+    fetchImpl: mockFetch,
+    apiKey: "sk-test-key",
+  });
+
+  const events = [];
+  for await (const event of executor({
+    request: {
+      model: "deepseek/deepseek-v4.1-flash",
+      messages: [{ role: "user", content: "Run pwd" }],
+    },
+  })) {
+    events.push(event);
+  }
+
+  // DSML tags must never leak into reasoning-delta or block-end reasoning text
+  const reasoningDeltas = events.filter((e) => e.type === "reasoning-delta");
+  for (const rd of reasoningDeltas) {
+    assert.equal(rd.text.includes("DSML"), false, "DSML tags should never leak into reasoning-delta");
+  }
+  const reasoningEnds = events.filter((e) => e.type === "block-end" && e.block?.type === "reasoning");
+  assert.equal(reasoningEnds.length, 1);
+  assert.equal(reasoningEnds[0].block.text.includes("DSML"), false, "DSML tags should be stripped from reasoning text");
+  assert.equal(reasoningEnds[0].block.text.trim(), "Thinking about inspection...");
+
+  // Tool calls should be extracted
+  const toolEnds = events.filter((e) => e.type === "block-end" && e.block?.type === "tool-call");
+  assert.equal(toolEnds.length, 1);
+  assert.equal(toolEnds[0].block.name, "bash");
+  assert.equal(toolEnds[0].block.arguments, JSON.stringify({ command: "pwd" }));
+
+  // Finish reason should be tool-calls, not stop
+  const finish = events.find((e) => e.type === "finish");
+  assert.ok(finish);
+  assert.equal(finish.reason.kind, "tool-calls");
+});
+
+test("createHermesNativeExecutor parses DSML tool calls emitted inside content delta and triggers tool-calls", async () => {
+  const dsmlInContent = `<｜DSML｜ calls>\n<｜DSML｜ invoke name="web_fetch">\n<｜DSML｜ parameter name="url" string="true">https://example.com</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>`;
+  const ssePayload = [
+    `data: ${JSON.stringify({
+      id: "hermes-dsml-c1",
+      choices: [{ delta: { content: dsmlInContent } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      id: "hermes-dsml-c2",
+      choices: [{ delta: {}, finish_reason: "stop" }],
+    })}\n\n`,
+    "data: [DONE]\n\n",
+  ].join("");
+
+  const mockFetch = async () => new Response(ssePayload, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+
+  const executor = createHermesNativeExecutor({
+    fetchImpl: mockFetch,
+    apiKey: "sk-test-key",
+  });
+
+  const events = [];
+  for await (const event of executor({
+    request: {
+      model: "deepseek/deepseek-v4.1-flash",
+      messages: [{ role: "user", content: "Fetch url" }],
+    },
+  })) {
+    events.push(event);
+  }
+
+  const toolEnds = events.filter((e) => e.type === "block-end" && e.block?.type === "tool-call");
+  assert.equal(toolEnds.length, 1);
+  assert.equal(toolEnds[0].block.name, "web_fetch");
+  assert.equal(toolEnds[0].block.arguments, JSON.stringify({ url: "https://example.com" }));
+
+  const finish = events.find((e) => e.type === "finish");
+  assert.ok(finish);
+  assert.equal(finish.reason.kind, "tool-calls");
+});

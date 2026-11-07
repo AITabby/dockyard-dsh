@@ -5923,6 +5923,10 @@ function parseDsmlCalls(text3) {
   }
   return toolCalls.length > 0 ? toolCalls : null;
 }
+function stripDsmlCalls(text3) {
+  if (typeof text3 !== "string") return "";
+  return text3.replace(/[<＜][ |｜]*DSML[ |｜]*calls[>＞][\s\S]*?(?:[<＜][\/／][ |｜]*DSML[ |｜]*calls[>＞]|$)/gi, "").trim();
+}
 function sanitizeToolCallId(rawId, maxLength = 64) {
   if (!rawId || typeof rawId !== "string") return "call_tool";
   if (rawId.includes("|")) {
@@ -14194,10 +14198,14 @@ function createWorkbuddyNativeExecutor({
     );
     const streamEvents = [];
     let nextIndex = 1;
-    let reasoning = null;
     let rawUsage = null;
     let stop = "stop";
     const activeTools = /* @__PURE__ */ new Map();
+    const reasoningFilter = new DsmlStreamFilter({
+      onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "reasoning" }),
+      onTextDelta: (index, text3) => streamEvents.push({ type: "reasoning-delta", index, text: text3 }),
+      onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "reasoning", text: text3 } })
+    });
     const textFilter = new DsmlStreamFilter({
       onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "text" }),
       onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
@@ -14215,20 +14223,13 @@ function createWorkbuddyNativeExecutor({
       if (reasoningDelta) {
         textFilter.closeText();
         while (streamEvents.length > 0) yield streamEvents.shift();
-        if (!reasoning) {
-          reasoning = { index: nextIndex++, text: "" };
-          yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
-        }
-        reasoning.text += reasoningDelta;
-        yield { type: "reasoning-delta", index: reasoning.index, text: reasoningDelta };
+        reasoningFilter.push(reasoningDelta, () => nextIndex++);
+        while (streamEvents.length > 0) yield streamEvents.shift();
       }
       for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
         const key = Number(call.index ?? activeTools.size);
         if (!activeTools.has(key)) {
-          if (reasoning) {
-            yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-            reasoning = null;
-          }
+          reasoningFilter.closeText();
           textFilter.closeText();
           while (streamEvents.length > 0) yield streamEvents.shift();
           const state2 = {
@@ -14251,10 +14252,8 @@ function createWorkbuddyNativeExecutor({
       }
       const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
       if (content) {
-        if (reasoning) {
-          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-          reasoning = null;
-        }
+        reasoningFilter.closeText();
+        while (streamEvents.length > 0) yield streamEvents.shift();
         textFilter.push(content, () => nextIndex++);
         while (streamEvents.length > 0) yield streamEvents.shift();
       }
@@ -14262,12 +14261,15 @@ function createWorkbuddyNativeExecutor({
         stop = choice.finish_reason;
       }
     }
-    if (reasoning) {
-      yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-      reasoning = null;
-    }
-    const dsmlResult = textFilter.flush(() => nextIndex++);
+    reasoningFilter.closeText();
+    textFilter.closeText();
+    const reasoningDsml = reasoningFilter.flush(() => nextIndex++);
+    const textDsml = textFilter.flush(() => nextIndex++);
     while (streamEvents.length > 0) yield streamEvents.shift();
+    const allDsmlCalls = [
+      ...reasoningDsml?.toolCalls || [],
+      ...textDsml?.toolCalls || []
+    ];
     if (activeTools.size > 0) {
       for (const state of activeTools.values()) {
         yield {
@@ -14277,8 +14279,8 @@ function createWorkbuddyNativeExecutor({
         };
       }
       stop = "tool_calls";
-    } else if (dsmlResult?.toolCalls?.length > 0) {
-      for (const dsml of dsmlResult.toolCalls) {
+    } else if (allDsmlCalls.length > 0) {
+      for (const dsml of allDsmlCalls) {
         const toolIndex = nextIndex++;
         const toolId = `call_${randomUUID10().slice(0, 8)}`;
         yield { type: "block-start", index: toolIndex, blockType: "tool-call" };
@@ -16269,11 +16271,15 @@ function createHermesNativeExecutor({
     }
     const streamEvents = [];
     let nextIndex = 1;
-    let reasoning = null;
     let rawUsage = null;
     let stop = "stop";
     let probeYielded = false;
     const activeTools = /* @__PURE__ */ new Map();
+    const reasoningFilter = new DsmlStreamFilter({
+      onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "reasoning" }),
+      onTextDelta: (index, text3) => streamEvents.push({ type: "reasoning-delta", index, text: text3 }),
+      onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "reasoning", text: text3 } })
+    });
     const textFilter = new DsmlStreamFilter({
       onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "text" }),
       onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
@@ -16295,20 +16301,13 @@ function createHermesNativeExecutor({
       if (reasoningDelta) {
         textFilter.closeText();
         while (streamEvents.length > 0) yield streamEvents.shift();
-        if (!reasoning) {
-          reasoning = { index: nextIndex++, text: "" };
-          yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
-        }
-        reasoning.text += reasoningDelta;
-        yield { type: "reasoning-delta", index: reasoning.index, text: reasoningDelta };
+        reasoningFilter.push(reasoningDelta, () => nextIndex++);
+        while (streamEvents.length > 0) yield streamEvents.shift();
       }
       for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
         const key = Number(call.index ?? activeTools.size);
         if (!activeTools.has(key)) {
-          if (reasoning) {
-            yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-            reasoning = null;
-          }
+          reasoningFilter.closeText();
           textFilter.closeText();
           while (streamEvents.length > 0) yield streamEvents.shift();
           const state2 = {
@@ -16331,10 +16330,8 @@ function createHermesNativeExecutor({
       }
       const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
       if (content) {
-        if (reasoning) {
-          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-          reasoning = null;
-        }
+        reasoningFilter.closeText();
+        while (streamEvents.length > 0) yield streamEvents.shift();
         textFilter.push(content, () => nextIndex++);
         while (streamEvents.length > 0) yield streamEvents.shift();
       }
@@ -16342,12 +16339,15 @@ function createHermesNativeExecutor({
         stop = choice.finish_reason;
       }
     }
-    if (reasoning) {
-      yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-      reasoning = null;
-    }
-    const dsmlResult = textFilter.flush(() => nextIndex++);
+    reasoningFilter.closeText();
+    textFilter.closeText();
+    const reasoningDsml = reasoningFilter.flush(() => nextIndex++);
+    const textDsml = textFilter.flush(() => nextIndex++);
     while (streamEvents.length > 0) yield streamEvents.shift();
+    const allDsmlCalls = [
+      ...reasoningDsml?.toolCalls || [],
+      ...textDsml?.toolCalls || []
+    ];
     if (activeTools.size > 0) {
       for (const state of activeTools.values()) {
         yield {
@@ -16357,8 +16357,8 @@ function createHermesNativeExecutor({
         };
       }
       stop = "tool_calls";
-    } else if (dsmlResult?.toolCalls?.length > 0) {
-      for (const dsml of dsmlResult.toolCalls) {
+    } else if (allDsmlCalls.length > 0) {
+      for (const dsml of allDsmlCalls) {
         const toolIndex = nextIndex++;
         const toolId = `call_${randomUUID12().slice(0, 8)}`;
         yield { type: "block-start", index: toolIndex, blockType: "tool-call" };
@@ -17681,8 +17681,16 @@ function createOpenRouterFreeNativeExecutor({
       reasoning.text += text3;
       streamEvents.push({ type: "reasoning-delta", index: reasoning.index, text: text3 });
     };
+    const reasoningDsmlCalls = [];
     const closeReasoningBlock = () => {
       if (!reasoning) return;
+      if (typeof reasoning.text === "string" && reasoning.text.includes("DSML")) {
+        const calls = parseDsmlCalls(reasoning.text);
+        if (calls?.length > 0) {
+          reasoningDsmlCalls.push(...calls);
+          reasoning.text = stripDsmlCalls(reasoning.text);
+        }
+      }
       streamEvents.push({ type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } });
       reasoning = null;
     };
@@ -17817,6 +17825,10 @@ function createOpenRouterFreeNativeExecutor({
     closeReasoningBlock();
     const dsmlResult = textFilter.flush(() => nextIndex++);
     while (streamEvents.length > 0) yield streamEvents.shift();
+    const allDsmlCalls = [
+      ...reasoningDsmlCalls,
+      ...dsmlResult?.toolCalls || []
+    ];
     if (activeTools.size > 0) {
       for (const state of activeTools.values()) {
         yield {
@@ -17826,8 +17838,8 @@ function createOpenRouterFreeNativeExecutor({
         };
       }
       stop = "tool_calls";
-    } else if (dsmlResult?.toolCalls?.length > 0) {
-      for (const dsml of dsmlResult.toolCalls) {
+    } else if (allDsmlCalls.length > 0) {
+      for (const dsml of allDsmlCalls) {
         substantiveYielded = true;
         const toolIndex = nextIndex++;
         const toolId = `call_${randomUUID13().slice(0, 8)}`;
