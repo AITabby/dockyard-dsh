@@ -976,3 +976,32 @@ function parseTraeFeatures(value) {
     return {};
   }
 }
+
+/**
+ * Trae CN hands out 100 credits a day for checking in. It is a plain HTTP call
+ * on the account's own token, so the IDE is not needed to claim it — the check
+ * runs on every account refresh and only claims when today is still unclaimed.
+ */
+export async function claimTraeDailyCredits({ credential, site = TRAE_CN_SITE, fetchImpl = fetch, timeoutMs = 15_000 } = {}) {
+  const call = async (path) => {
+    const response = await fetchImpl(`${site.authHost}${path}`, {
+      method: "POST",
+      headers: traeHeaders(credential, { site, extra: { Accept: "application/json" } }),
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) {
+      const error = new Error(`Trae CN 签到失败（HTTP ${response.status}）`);
+      error.status = response.status;
+      throw error;
+    }
+    return response.json().catch(() => ({}));
+  };
+  const status = await call("/trae/api/v2/ug/checkin_credits/status");
+  const enabled = status?.enable === true;
+  const already = status?.checked_in === true;
+  const credits = Number(status?.credits) + Number(status?.extra_credits ?? 0) || Number(status?.credits) || 0;
+  if (!enabled || already) return { enabled, claimed: false, credits };
+  await call("/trae/api/v2/ug/checkin_credits/claim");
+  return { enabled, claimed: true, credits };
+}

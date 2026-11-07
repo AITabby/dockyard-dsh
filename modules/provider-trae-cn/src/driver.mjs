@@ -7,6 +7,7 @@ import {
   TRAE_CN_MODELS,
   TRAE_CN_SITE,
   createTraeNativeExecutor,
+  claimTraeDailyCredits,
   readTraeCredits,
   readTraeModelRoster,
   startTraeSignIn,
@@ -294,6 +295,16 @@ export class TraeCnSubscriptionDriver {
   }
 
   async refreshAccount(account, context = {}) {
+    const credential = await this.#credentialOf(account, context);
+    // The daily 100 credits are worth claiming on every refresh, but a failed
+    // check-in must never make the account look broken.
+    if (credential) {
+      await claimTraeDailyCredits({
+        credential,
+        site: this.site,
+        fetchImpl: this.fetchImpl,
+      }).catch(() => {});
+    }
     // Trae renews a JWT through a device-signed ExchangeToken, which this
     // provider does not implement yet: the account keeps working until its
     // token expires, then the user signs in again.

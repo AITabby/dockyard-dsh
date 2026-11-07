@@ -8,6 +8,7 @@ import {
   createTraeCnDriver,
   TraeCnSubscriptionDriver,
   createTraeCnModule,
+  claimTraeDailyCredits,
   createTraeNativeExecutor,
   newTraeDevice,
   parseTraeCnCatalog,
@@ -398,4 +399,39 @@ test("a streamed tool call becomes a tool-call block, not prose", async () => {
   assert.equal(blocks[0].name, "read_file");
   assert.equal(blocks[0].arguments, '{"path":"/tmp/a"}');
   assert.equal(finish.kind, "tool-calls");
+});
+
+test("the daily 100 credits are claimed without the IDE", async () => {
+  const calls = [];
+  const respond = (body) => async (url) => {
+    calls.push(url);
+    return { ok: true, json: async () => body };
+  };
+  // Still unclaimed today: status says so, and the claim is made once.
+  const first = await claimTraeDailyCredits({
+    credential: { token: "t", device: {} },
+    fetchImpl: respond({ code: 0, enable: true, checked_in: false, credits: 100, extra_credits: 20 }),
+  });
+  assert.equal(first.claimed, true);
+  assert.equal(first.credits, 120);
+  assert.equal(calls.length, 2);
+  assert.match(calls[1], /checkin_credits\/claim/u);
+
+  // Already claimed: no second claim goes out.
+  calls.length = 0;
+  const second = await claimTraeDailyCredits({
+    credential: { token: "t", device: {} },
+    fetchImpl: respond({ code: 0, enable: true, checked_in: true, credits: 100 }),
+  });
+  assert.equal(second.claimed, false);
+  assert.equal(calls.length, 1);
+
+  // The programme turned off: nothing is claimed either.
+  calls.length = 0;
+  const third = await claimTraeDailyCredits({
+    credential: { token: "t", device: {} },
+    fetchImpl: respond({ code: 0, enable: false, checked_in: false }),
+  });
+  assert.equal(third.claimed, false);
+  assert.equal(calls.length, 1);
 });

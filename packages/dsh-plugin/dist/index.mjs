@@ -19201,6 +19201,29 @@ function parseTraeFeatures(value) {
     return {};
   }
 }
+async function claimTraeDailyCredits({ credential, site = TRAE_CN_SITE, fetchImpl = fetch, timeoutMs = 15e3 } = {}) {
+  const call = async (path2) => {
+    const response = await fetchImpl(`${site.authHost}${path2}`, {
+      method: "POST",
+      headers: traeHeaders(credential, { site, extra: { Accept: "application/json" } }),
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!response.ok) {
+      const error = new Error(`Trae CN \u7B7E\u5230\u5931\u8D25\uFF08HTTP ${response.status}\uFF09`);
+      error.status = response.status;
+      throw error;
+    }
+    return response.json().catch(() => ({}));
+  };
+  const status = await call("/trae/api/v2/ug/checkin_credits/status");
+  const enabled = status?.enable === true;
+  const already = status?.checked_in === true;
+  const credits = Number(status?.credits) + Number(status?.extra_credits ?? 0) || Number(status?.credits) || 0;
+  if (!enabled || already) return { enabled, claimed: false, credits };
+  await call("/trae/api/v2/ug/checkin_credits/claim");
+  return { enabled, claimed: true, credits };
+}
 
 // modules/provider-trae-cn/src/driver.mjs
 var CREDENTIAL_SLOT6 = Symbol("dockyard-trae-cn-credential");
@@ -19447,6 +19470,15 @@ var TraeCnSubscriptionDriver = class {
     }
   }
   async refreshAccount(account, context = {}) {
+    const credential = await this.#credentialOf(account, context);
+    if (credential) {
+      await claimTraeDailyCredits({
+        credential,
+        site: this.site,
+        fetchImpl: this.fetchImpl
+      }).catch(() => {
+      });
+    }
     return {
       health: {
         status: "healthy",

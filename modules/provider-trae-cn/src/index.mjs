@@ -33,6 +33,7 @@ export {
   TRAE_CN_CONTEXT_FALLBACK,
   TRAE_CN_MODELS,
   TRAE_CN_SITE,
+  claimTraeDailyCredits,
   createTraeNativeExecutor,
   newTraeDevice,
   readTraeCallback,
