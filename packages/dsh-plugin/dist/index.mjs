@@ -18342,6 +18342,1174 @@ function createOpenRouterFreeModule(options = {}) {
   });
 }
 
+// modules/provider-trae-cn/src/driver.mjs
+import { randomUUID as randomUUID15 } from "node:crypto";
+
+// modules/provider-trae-cn/src/native-transport.mjs
+import { createServer as createServer2 } from "node:http";
+import { randomBytes as randomBytes6, randomInt, randomUUID as randomUUID14 } from "node:crypto";
+var PROVIDER_ID18 = "trae-cn";
+var TRAE_CN_SITE = Object.freeze({
+  id: PROVIDER_ID18,
+  name: "Trae CN",
+  webHost: "https://www.trae.cn",
+  authHost: "https://api.trae.cn",
+  apiHost: "https://trae-api-cn.mchost.guru",
+  clientId: "ono9krqynydwx5",
+  appId: "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8",
+  pluginVersion: "2.3.24254",
+  // The IDE version named to the authorization page, and the client version
+  // the model host is told it serves.
+  ideVersion: "3.3.65",
+  clientVersion: "0.1.69",
+  clientVersionCode: "20260917",
+  brand: "ASUS TUF Gaming A15 FA507RM_FA507RM",
+  deviceType: "windows",
+  osVersion: "Windows 10",
+  systemType: "Windows",
+  deviceCpu: "AMD"
+});
+var TRAE_CN_REASONING = Object.freeze({
+  efforts: [
+    { id: "ultra", name: "Ultra", description: "Maximum reasoning depth." },
+    { id: "high", name: "High", description: "Thorough reasoning for hard tasks.", default: true },
+    { id: "light", name: "Light", description: "Fast, light reasoning for simple tasks." }
+  ],
+  defaultEffort: "high"
+});
+var TRAE_CN_MODELS = Object.freeze([
+  {
+    id: "deepseek-v4.1-flash",
+    name: "DeepSeek-V4.1-Flash",
+    contextWindow: 1e6,
+    inputModalities: ["text", "image"],
+    reasoning: {
+      efforts: [
+        { id: "light", name: "Light" },
+        { id: "high", name: "High", default: true },
+        { id: "extra_high", name: "Extra High" }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "DeepSeek-V4-Pro-Official",
+    name: "DeepSeek-V4-Pro",
+    contextWindow: 1e6,
+    reasoning: {
+      efforts: [
+        { id: "light", name: "Light" },
+        { id: "high", name: "High", default: true },
+        { id: "extra_high", name: "Extra High" }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "glm-5.3",
+    name: "GLM-5.3",
+    contextWindow: 1e6,
+    reasoning: {
+      efforts: [
+        { id: "light", name: "Light" },
+        { id: "high", name: "High", default: true },
+        { id: "extra_high", name: "Extra High" }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "glm-5.3-flash",
+    name: "GLM-5.3-Flash",
+    contextWindow: 1e6,
+    inputModalities: ["text", "image"],
+    reasoning: {
+      efforts: [
+        { id: "light", name: "Light" },
+        { id: "high", name: "High", default: true },
+        { id: "extra_high", name: "Extra High" }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "glm-5.3-flashx",
+    name: "GLM-5.3-FlashX",
+    contextWindow: 1e6,
+    inputModalities: ["text", "image"],
+    reasoning: {
+      efforts: [
+        { id: "light", name: "Light" },
+        { id: "high", name: "High", default: true },
+        { id: "extra_high", name: "Extra High" }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "kimi-k3",
+    name: "Kimi-K3",
+    contextWindow: 1e6,
+    inputModalities: ["text", "image"],
+    reasoning: {
+      efforts: [
+        { id: "light", name: "Light" },
+        { id: "high", name: "High", default: true },
+        { id: "extra_high", name: "Extra High" }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "kimi-k2.7-code",
+    name: "kimi-k2.7-code",
+    contextWindow: 2e5
+  },
+  {
+    id: "mimo-v2.6-flash",
+    name: "MiMo-V2.6-Flash",
+    contextWindow: 981504,
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "mimo-v2.6-pro",
+    name: "MiMo-V2.6-Pro",
+    contextWindow: 981504,
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "minimax-m3",
+    name: "MiniMax-M3",
+    contextWindow: 1e6,
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "minimax-m3.1-flash",
+    name: "MiniMax-M3.1-Flash",
+    contextWindow: 1e6,
+    inputModalities: ["text", "image"],
+    reasoning: {
+      efforts: [
+        { id: "light", name: "Light" },
+        { id: "high", name: "High", default: true },
+        { id: "extra_high", name: "Extra High" }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "step-5-preview",
+    name: "Step-5-Preview",
+    contextWindow: 1e6,
+    inputModalities: ["text", "image"],
+    reasoning: {
+      efforts: [
+        { id: "light", name: "Light" },
+        { id: "high", name: "High", default: true }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "qwen3.8-flash",
+    name: "Qwen3.8-Flash",
+    contextWindow: 1e6,
+    inputModalities: ["text", "image"],
+    reasoning: {
+      efforts: [
+        { id: "light", name: "Light" },
+        { id: "high", name: "High", default: true },
+        { id: "extra_high", name: "Extra High" }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "qwen3.8-max",
+    name: "Qwen3.8-Max",
+    contextWindow: 1e6,
+    inputModalities: ["text", "image"],
+    reasoning: {
+      efforts: [
+        { id: "light", name: "Light" },
+        { id: "high", name: "High", default: true },
+        { id: "extra_high", name: "Extra High" }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "qwen-3.7-plus",
+    name: "Qwen3.7-Plus",
+    contextWindow: 2e5,
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "Doubao-Seed-Evolving",
+    name: "Seed-Evolving",
+    contextWindow: 1e6,
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "Doubao-Seed-2.1-Pro",
+    name: "Seed-2.1-Pro-0915",
+    contextWindow: 1e6,
+    inputModalities: ["text", "image"],
+    reasoning: {
+      efforts: [
+        { id: "light", name: "Light" },
+        { id: "high", name: "High", default: true }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "Doubao-Seed-2.1-Turbo",
+    name: "Seed-2.1-Turbo",
+    contextWindow: 256e3,
+    inputModalities: ["text", "image"],
+    reasoning: {
+      efforts: [
+        { id: "light", name: "Light" },
+        { id: "high", name: "High", default: true }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "DeepSeek-V4-Flash",
+    name: "DeepSeek-V4-Flash",
+    contextWindow: 2e5
+  },
+  {
+    id: "glm-5.2",
+    name: "glm-5.2",
+    contextWindow: 2e5
+  },
+  {
+    id: "glm-5.1",
+    name: "GLM-5.1",
+    contextWindow: 2e5
+  },
+  {
+    id: "glm-5",
+    name: "GLM-5",
+    contextWindow: 2e5
+  },
+  {
+    id: "glm-5v-turbo",
+    name: "GLM-5V-Turbo",
+    contextWindow: 2e5,
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "kimi-k2.6",
+    name: "Kimi-K2.6",
+    contextWindow: 2e5,
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "kimi-k2.5",
+    name: "Kimi-K2.5",
+    contextWindow: 2e5,
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "minimax-m2.7",
+    name: "MiniMax-M2.7",
+    contextWindow: 2e5
+  },
+  {
+    id: "minimax-m2.5",
+    name: "minimax-m2.5",
+    contextWindow: 2e5
+  },
+  {
+    id: "qwen-3.6-plus",
+    name: "Qwen3.6-Plus",
+    contextWindow: 2e5,
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "qwen-3.5",
+    name: "Qwen3.5-Plus",
+    contextWindow: 2e5,
+    inputModalities: ["text", "image"]
+  },
+  {
+    id: "Doubao-Seed-Code",
+    name: "Seed-Code",
+    contextWindow: 256e3,
+    inputModalities: ["text", "image"],
+    reasoning: {
+      efforts: [
+        { id: "light", name: "Light" },
+        { id: "high", name: "High", default: true }
+      ],
+      defaultEffort: "high"
+    }
+  },
+  {
+    id: "Doubao-Seed-2.0-Code",
+    name: "Doubao-Seed-2.0-Code",
+    contextWindow: 184e3,
+    inputModalities: ["text", "image"]
+  }
+]);
+var TRAE_CN_CHAT_FUNCTION = "chat_v3";
+var digits = (count) => Array.from(
+  { length: count },
+  (_, index) => index === 0 ? randomInt(1, 10) : randomInt(0, 10)
+).join("");
+function newTraeDevice() {
+  return {
+    deviceId: digits(16),
+    machineId: randomBytes6(16).toString("hex")
+  };
+}
+function traeWhen(value) {
+  if (value === void 0 || value === null || value === "") return 0;
+  if (typeof value === "string" && !/^\d+$/u.test(value.trim())) {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return number < 1e11 ? number * 1e3 : number;
+}
+function parseJsonish(value) {
+  if (value && typeof value === "object") return value;
+  try {
+    const parsed = JSON.parse(String(value ?? ""));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+function readTraeCallback(params, { site = TRAE_CN_SITE, device } = {}) {
+  const jwt = parseJsonish(params.get("userJwt"));
+  const info = parseJsonish(params.get("userInfo"));
+  const token = jwt.Token ?? jwt.token ?? "";
+  const refreshToken = jwt.RefreshToken ?? jwt.refreshToken ?? params.get("refreshToken") ?? "";
+  if (!token && !refreshToken) {
+    throw new Error(`${site.name} \u6CA1\u6709\u8FD4\u56DE\u767B\u5F55\u51ED\u636E\uFF08userJwt / refreshToken \u90FD\u662F\u7A7A\u7684\uFF09`);
+  }
+  return {
+    token,
+    refreshToken,
+    // `TokenExpireAt` is what the page sends; a bare JWT's exp is the fallback.
+    expiresAt: traeWhen(jwt.TokenExpireAt ?? jwt.tokenExpireAt) || traeWhen(jwt.exp * 1e3),
+    refreshExpiresAt: traeWhen(params.get("refreshExpireAt") ?? jwt.RefreshExpireAt),
+    clientId: jwt.ClientID ?? jwt.clientId ?? params.get("clientId") ?? site.clientId,
+    uid: String(info.UserID ?? info.userId ?? params.get("userId") ?? jwt.UserID ?? jwt.userId ?? ""),
+    name: String(info.ScreenName ?? info.screenName ?? info.UserName ?? ""),
+    email: String(info.Email ?? info.email ?? ""),
+    device: device ?? newTraeDevice(),
+    region: String(params.get("userRegion") ?? ""),
+    host: String(params.get("host") ?? "")
+  };
+}
+function traeAuthorizationUrl({ callback, device, site = TRAE_CN_SITE, traceId = randomUUID14() }) {
+  const query = new URLSearchParams({
+    login_version: "1",
+    auth_from: "solo",
+    login_channel: "native_ide",
+    plugin_version: site.pluginVersion,
+    auth_type: "local",
+    client_id: site.clientId,
+    redirect: "0",
+    login_trace_id: traceId,
+    auth_callback_url: callback,
+    machine_id: device.machineId,
+    device_id: device.deviceId,
+    x_device_id: device.deviceId,
+    x_machine_id: device.machineId,
+    x_device_brand: site.brand,
+    x_device_type: site.deviceType,
+    x_os_version: `${site.osVersion} Pro`,
+    x_env: "",
+    x_app_version: site.ideVersion,
+    x_app_type: "stable",
+    hide_saas_login: "false"
+  });
+  return `${site.webHost}/authorization?${query}`;
+}
+var SIGN_IN_PAGE = (ok, title, message) => `<!doctype html><html><head><meta charset="utf-8">
+<title>${title}</title></head><body style="font-family:-apple-system,BlinkMacSystemFont,sans-serif;padding:40px;max-width:640px;line-height:1.6">
+<h2>${ok ? "\u2705" : "\u274C"} ${title}</h2><p>${message}</p></body></html>`;
+async function startTraeSignIn({ site = TRAE_CN_SITE, timeoutMs = 6e5, device = newTraeDevice() } = {}) {
+  let settle;
+  const done = new Promise((resolve2) => {
+    settle = resolve2;
+  });
+  let finished = false;
+  const finish = (value) => {
+    if (finished) return;
+    finished = true;
+    settle(value);
+  };
+  const server = createServer2((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const cors = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type"
+    };
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, cors).end();
+      return;
+    }
+    const html = (body) => {
+      res.writeHead(200, { ...cors, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(body);
+    };
+    if (url.pathname !== "/authorize") {
+      res.writeHead(404, cors).end();
+      return;
+    }
+    if (finished) {
+      html(SIGN_IN_PAGE(false, "\u8FD9\u6B21\u767B\u5F55\u5DF2\u7ECF\u7ED3\u675F", "\u8BF7\u91CD\u65B0\u4ECE Dockyard \u53D1\u8D77\u767B\u5F55\u3002"));
+      return;
+    }
+    const params = url.searchParams;
+    if (params.get("error")) {
+      const message = params.get("error_description") || params.get("error");
+      finish({ ok: false, error: message });
+      html(SIGN_IN_PAGE(false, "\u767B\u5F55\u6CA1\u6709\u5B8C\u6210", message));
+      return;
+    }
+    try {
+      const credential = readTraeCallback(params, { site, device });
+      finish({ ok: true, credential });
+      html(SIGN_IN_PAGE(true, "\u767B\u5F55\u6210\u529F", `${credential.name || credential.uid || "\u8D26\u53F7"} \u5DF2\u63A5\u5165 Dockyard DSH\uFF0C\u53EF\u4EE5\u5173\u95ED\u6B64\u9875\u9762\u3002`));
+    } catch (error) {
+      finish({ ok: false, error: error.message });
+      html(SIGN_IN_PAGE(false, "\u767B\u5F55\u6CA1\u6709\u5B8C\u6210", error.message));
+    }
+  });
+  await new Promise((resolve2, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve2);
+  });
+  const callback = `http://127.0.0.1:${server.address().port}/authorize`;
+  const authorizationUrl = traeAuthorizationUrl({ callback, device, site });
+  const timer = setTimeout(() => finish({ ok: false, error: "\u767B\u5F55\u8D85\u65F6" }), timeoutMs);
+  const close = () => {
+    clearTimeout(timer);
+    try {
+      server.close();
+    } catch {
+    }
+  };
+  done.then(() => setTimeout(close, 5e3).unref?.());
+  return {
+    authorizationUrl,
+    instructions: `\u5728\u6D4F\u89C8\u5668\u4E2D\u767B\u5F55 ${site.name} \u5E76\u540C\u610F\u6388\u6743\uFF1B\u6388\u6743\u5B8C\u6210\u540E\u672C\u9875\u4F1A\u81EA\u52A8\u56DE\u5230 Dockyard\uFF0C\u4E0D\u9700\u8981\u590D\u5236\u4EFB\u4F55\u4EE3\u7801\u3002`,
+    device,
+    result: done,
+    cancel: () => {
+      finish({ ok: false, error: "\u5DF2\u53D6\u6D88" });
+      close();
+    }
+  };
+}
+function traeHeaders(account, { site = TRAE_CN_SITE, extra = {} } = {}) {
+  const token = String(account?.token ?? "");
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Cloud-IDE-JWT ${token}`,
+    "X-Cloudide-Token": token,
+    "x-ide-token": token,
+    "x-uid": String(account?.uid ?? ""),
+    "x-app-id": site.appId,
+    "x-device-id": String(account?.device?.deviceId ?? ""),
+    "x-machine-id": String(account?.device?.machineId ?? ""),
+    "x-request-id": randomUUID14(),
+    "x-app-version": site.clientVersion,
+    "x-app-version-code": site.clientVersionCode,
+    "x-ide-version": site.clientVersion,
+    "x-ide-version-code": site.clientVersionCode,
+    "x-ide-version-type": "stable",
+    "x-device-cpu": site.deviceCpu,
+    "x-device-brand": site.brand,
+    "x-device-type": site.deviceType,
+    "x-os-version": site.osVersion,
+    "x-system-type": site.systemType,
+    ...extra
+  };
+}
+function messageText(message) {
+  if (!message) return "";
+  const content = message.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.filter((part) => part && (part.type === "text" || typeof part.text === "string")).map((part) => part.text ?? "").filter(Boolean).join("\n");
+}
+function traeMessages(request = {}) {
+  const messages = [];
+  if (typeof request.system === "string" && request.system.trim().length > 0) {
+    messages.push({ role: "system", content: [{ type: "text", text: request.system }] });
+  }
+  for (const message of Array.isArray(request.messages) ? request.messages : []) {
+    const role = message?.role === "developer" ? "system" : message?.role ?? "user";
+    const calls = role === "assistant" ? assistantCalls(message) : [];
+    if (role === "tool") {
+      const text4 = messageText(message);
+      const toolCallId = toolResultId(message);
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCallId,
+        content: [{ type: "text", text: text4 || "(no output)" }]
+      });
+      continue;
+    }
+    const text3 = messageText(message);
+    if (!text3 && calls.length === 0) continue;
+    const entry = { role, content: [{ type: "text", text: text3 ?? "" }] };
+    if (calls.length > 0) entry.tool_calls = calls;
+    messages.push(entry);
+  }
+  return messages;
+}
+function assistantCalls(message) {
+  const calls = [];
+  const push = (id, name2, args) => {
+    const trimmed = String(name2 ?? "").trim();
+    if (!trimmed) return;
+    calls.push({
+      id: String(id ?? `call_${calls.length + 1}`),
+      type: "function",
+      // Trae's own name for this: `function_call` (a `function` key is read as
+      // a ToolCall without a name and the whole stream fails).
+      function_call: { name: trimmed, arguments: typeof args === "string" ? args : JSON.stringify(args ?? {}) }
+    });
+  };
+  for (const block of Array.isArray(message?.content) ? message.content : []) {
+    if (block?.type !== "tool-call" && block?.type !== "tool_call") continue;
+    push(block.id ?? block.toolCallId, block.name ?? block.toolName, block.arguments ?? block.input ?? "{}");
+  }
+  for (const call of Array.isArray(message?.tool_calls) ? message.tool_calls : []) {
+    push(call.id, call.function?.name ?? call.name, call.function?.arguments ?? call.arguments ?? "{}");
+  }
+  return calls;
+}
+function toolResultId(message) {
+  const direct = message?.tool_call_id ?? message?.toolCallId ?? message?.id;
+  if (typeof direct === "string" && direct) return direct;
+  for (const block of Array.isArray(message?.content) ? message.content : []) {
+    const id = block?.toolCallId ?? block?.tool_call_id ?? block?.id;
+    if (typeof id === "string" && id) return id;
+  }
+  return "call_1";
+}
+function traeTools(tools) {
+  if (!Array.isArray(tools) || tools.length === 0) return void 0;
+  const mapped = [];
+  for (const tool of tools) {
+    const fn = tool?.function ?? tool;
+    const name2 = String(fn?.name ?? "").trim();
+    if (!name2) continue;
+    const parameters = typeof fn.parameters === "string" ? fn.parameters : JSON.stringify(fn.parameters ?? fn.input_schema ?? { type: "object", properties: {} });
+    mapped.push({
+      type: "function",
+      function: { name: name2, description: String(fn.description ?? ""), parameters }
+    });
+  }
+  return mapped.length > 0 ? mapped : void 0;
+}
+function traeChatBody(request = {}, { site = TRAE_CN_SITE, model } = {}) {
+  const chosen = model ?? request.model ?? TRAE_CN_MODELS[0].id;
+  const body = {
+    messages: traeMessages(request),
+    function: TRAE_CN_CHAT_FUNCTION,
+    // A real model id is required: `"auto"` is answered with
+    // `4001 param is invalid`.
+    config_name: chosen,
+    model: chosen,
+    stream: true,
+    request_id: randomUUID14(),
+    session_id: String(request.sessionId ?? randomUUID14())
+  };
+  if (typeof request.reasoningEffort === "string" && request.reasoningEffort.trim()) {
+    body.reasoning_effort = request.reasoningEffort.trim();
+  }
+  const toolChoice = request.toolChoice ?? request.tool_choice;
+  const tools = traeTools(request.tools);
+  if (tools && toolChoice !== "none") {
+    body.tools = tools;
+    const choice = typeof toolChoice === "object" ? toolChoice.function?.name ?? toolChoice.name : toolChoice;
+    if (typeof choice === "string" && choice && choice !== "none") body.tool_choice = choice;
+    else body.tool_choice = "auto";
+    if (typeof request.parallelToolCalls === "boolean") body.parallel_tool_calls = request.parallelToolCalls;
+  }
+  return body;
+}
+async function* traeSseEvents(stream) {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let event = "";
+  const pending = [];
+  try {
+    for (; ; ) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let index;
+      while ((index = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, index).replace(/\r$/u, "");
+        buffer = buffer.slice(index + 1);
+        if (line === "") {
+          if (pending.length > 0) {
+            const raw = pending.join("\n");
+            pending.length = 0;
+            let data = raw;
+            try {
+              data = JSON.parse(raw);
+            } catch {
+            }
+            yield { event, data };
+            event = "";
+          }
+          continue;
+        }
+        if (line.startsWith("event:")) {
+          event = line.slice(6).trim();
+          continue;
+        }
+        if (line.startsWith("data:")) {
+          pending.push(line.slice(5).replace(/^ /u, ""));
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+}
+function traeRequestError(status, detail = "") {
+  const parsed = (() => {
+    try {
+      return JSON.parse(detail);
+    } catch {
+      return null;
+    }
+  })();
+  const code = Number(parsed?.code) || 0;
+  const message = String(parsed?.message ?? "");
+  if (code === 4026 || /context length has exceeded/u.test(message)) {
+    const error2 = new Error("\u4E0A\u4E0B\u6587\u8D85\u957F\uFF1A\u8FD9\u4E2A\u6A21\u578B\u88C5\u4E0D\u4E0B\u5F53\u524D\u5BF9\u8BDD\uFF0C\u8BF7\u538B\u7F29\u6216\u6362\u4E2A\u4E0A\u4E0B\u6587\u66F4\u5927\u7684\u6A21\u578B");
+    error2.code = "CONTEXT_TOO_LONG";
+    error2.detail = detail.slice(0, 500);
+    return error2;
+  }
+  if (code === 1001) {
+    const error2 = new Error("Trae CN \u767B\u5F55\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55");
+    error2.code = "AUTH_EXPIRED";
+    error2.detail = detail.slice(0, 500);
+    return error2;
+  }
+  const error = new Error(`Trae CN \u8BF7\u6C42\u5931\u8D25\uFF08HTTP ${status}\uFF09${code ? ` code=${code}` : ""}`);
+  error.detail = detail.slice(0, 500);
+  return error;
+}
+function createTraeNativeExecutor({
+  site = TRAE_CN_SITE,
+  fetchImpl = fetch,
+  timeoutMs = 3e5
+} = {}) {
+  return async function executeTrae({ request = {}, credential, signal } = {}) {
+    const account = credential ?? {};
+    const body = traeChatBody(request, { site, model: request.model });
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener?.("abort", abort, { once: true });
+    const timer = setTimeout(abort, timeoutMs);
+    return (async function* responseStream() {
+      let text3 = "";
+      let reasoning = "";
+      let responseIndex = 0;
+      let reasoningIndex = null;
+      let started = false;
+      const calls = /* @__PURE__ */ new Map();
+      let callIndex = null;
+      try {
+        const response = await fetchImpl(`${site.apiHost}/api/agent/v3/llm_utils_chat`, {
+          method: "POST",
+          headers: traeHeaders(account, {
+            site,
+            extra: { Accept: "text/event-stream", ...request.headers ?? {} }
+          }),
+          body: JSON.stringify(body),
+          signal: controller.signal
+        });
+        if (!response.ok) {
+          const detail = await response.text().catch(() => "");
+          throw traeRequestError(response.status, detail);
+        }
+        if (!started) {
+          started = true;
+          yield { type: "block-start", index: responseIndex, blockType: "text" };
+        }
+        for await (const { event, data } of traeSseEvents(response.body)) {
+          if (event === "error") {
+            const message = data?.message ?? "Trae CN \u8FD4\u56DE\u4E86\u9519\u8BEF";
+            const error = new Error(message);
+            error.detail = data;
+            throw error;
+          }
+          if (event !== "output" || !data || typeof data !== "object") continue;
+          for (const piece of Array.isArray(data.tool_calls) ? data.tool_calls : []) {
+            const key = piece?.index ?? piece?.id ?? 0;
+            const existing = calls.get(key);
+            const fn = piece?.function_call ?? piece?.function ?? piece;
+            const name2 = fn?.name;
+            const args = fn?.arguments;
+            if (!existing) {
+              if (reasoningIndex !== null) {
+                yield { type: "block-end", index: reasoningIndex, block: { type: "reasoning", text: reasoning } };
+                reasoningIndex = null;
+                responseIndex += 1;
+              }
+              if (started) {
+                yield { type: "block-end", index: responseIndex, block: { type: "text", text: text3 } };
+                responseIndex += 1;
+              }
+              callIndex = { index: responseIndex, id: String(piece?.id ?? `call_${key}`), name: "", arguments: "" };
+              responseIndex += 1;
+              calls.set(key, callIndex);
+              yield { type: "block-start", index: callIndex.index, blockType: "tool-call" };
+            }
+            const state = calls.get(key);
+            if (typeof piece?.id === "string" && piece.id) state.id = piece.id;
+            if (typeof name2 === "string" && name2) state.name = name2;
+            const delta = typeof args === "string" ? args : args ? JSON.stringify(args) : "";
+            if (delta) {
+              state.arguments += delta;
+              yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: delta };
+            }
+          }
+          const thought = typeof data.reasoning_content === "string" ? data.reasoning_content : "";
+          if (thought) {
+            if (reasoningIndex === null) {
+              yield { type: "block-end", index: responseIndex, block: { type: "text", text: text3 } };
+              reasoningIndex = responseIndex + 1;
+              yield { type: "block-start", index: reasoningIndex, blockType: "reasoning" };
+            }
+            reasoning += thought;
+            yield { type: "reasoning-delta", index: reasoningIndex, text: thought };
+          }
+          const answer = typeof data.response === "string" ? data.response : "";
+          if (answer) {
+            if (reasoningIndex !== null) {
+              yield { type: "block-end", index: reasoningIndex, block: { type: "reasoning", text: reasoning } };
+              reasoningIndex = null;
+              responseIndex += 2;
+              yield { type: "block-start", index: responseIndex, blockType: "text" };
+            }
+            text3 += answer;
+            yield { type: "text-delta", index: responseIndex, text: answer };
+          }
+        }
+        if (reasoningIndex !== null) {
+          yield { type: "block-end", index: reasoningIndex, block: { type: "reasoning", text: reasoning } };
+        }
+        for (const state of calls.values()) {
+          yield {
+            type: "block-end",
+            index: state.index,
+            block: { type: "tool-call", id: state.id, name: state.name || "tool", arguments: state.arguments || "{}" }
+          };
+        }
+        if (calls.size === 0) {
+          yield { type: "block-end", index: responseIndex, block: { type: "text", text: text3 } };
+          yield { type: "finish", reason: { kind: "stop" } };
+        } else {
+          yield { type: "finish", reason: { kind: "tool-calls" } };
+        }
+      } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener?.("abort", abort);
+      }
+    })();
+  };
+}
+async function readTraeCredits({ credential, site = TRAE_CN_SITE, fetchImpl = fetch, timeoutMs = 2e4 } = {}) {
+  const response = await fetchImpl(`${site.authHost}/trae/api/v2/pay/ide_user_ent_usage`, {
+    method: "POST",
+    headers: traeHeaders(credential, { site, extra: { Accept: "application/json" } }),
+    body: JSON.stringify({ require_usage: true, req_source: 0 }),
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+  if (!response.ok) {
+    const error = new Error(`Trae CN \u989D\u5EA6\u67E5\u8BE2\u5931\u8D25\uFF08HTTP ${response.status}\uFF09`);
+    error.status = response.status;
+    error.detail = await response.text().catch(() => "");
+    throw error;
+  }
+  const data = await response.json().catch(() => ({}));
+  const payload = data?.data ?? data;
+  const summary = payload?.usage_summary ?? payload?.usageSummary ?? {};
+  const used = Number(summary.consumed_amount ?? summary.consumedAmount ?? payload?.used_credits ?? 0);
+  const limit = Number(summary.total_amount ?? summary.totalAmount ?? payload?.total_credits ?? 0);
+  const resetsAt = payload?.expire_time ?? payload?.expireTime ?? summary?.expire_time ?? null;
+  return {
+    used: Number.isFinite(used) ? used : 0,
+    limit: Number.isFinite(limit) ? limit : 0,
+    ...resetsAt ? { resetsAt: new Date(traeWhen(resetsAt)).toISOString() } : {},
+    raw: payload
+  };
+}
+async function readTraeModelRoster({ credential, site = TRAE_CN_SITE, fetchImpl = fetch, timeoutMs = 2e4 } = {}) {
+  const response = await fetchImpl(`${site.apiHost}/api/remote/v1/models`, {
+    method: "GET",
+    headers: traeHeaders(credential, { site, extra: { Accept: "application/json" } }),
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+  if (!response.ok) {
+    const error = new Error(`Trae CN \u6A21\u578B\u76EE\u5F55\u8BFB\u53D6\u5931\u8D25\uFF08HTTP ${response.status}\uFF09`);
+    error.status = response.status;
+    throw error;
+  }
+  const data = await response.json().catch(() => ({}));
+  const groups = data?.data?.list ?? [];
+  const roster = /* @__PURE__ */ new Map();
+  for (const group of groups) {
+    for (const model of group?.models ?? []) {
+      if (!model?.name) continue;
+      const features = parseTraeFeatures(model.features);
+      const dev = Number(model.context_window_tokens?.dev) || 0;
+      const max = Number(model.context_window_tokens?.max) || 0;
+      const contextWindow = Math.max(dev, max);
+      roster.set(String(model.name).toLowerCase(), {
+        id: String(model.name),
+        name: model.display_name ?? String(model.name),
+        ...contextWindow > 0 ? { contextWindow } : {},
+        multimodal: model.multimodal === true,
+        reasoning: features.reasoning?.enable !== false,
+        ...Number(features.consumption_rate?.data?.rate) > 0 ? { creditRate: Number(features.consumption_rate.data.rate) } : {}
+      });
+    }
+  }
+  return roster;
+}
+function parseTraeFeatures(value) {
+  if (!value) return {};
+  if (typeof value === "object") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
+}
+
+// modules/provider-trae-cn/src/driver.mjs
+var CREDENTIAL_SLOT6 = Symbol("dockyard-trae-cn-credential");
+function accountIdFor(credential) {
+  const uid = stringValue(credential?.uid);
+  if (!uid) return "trae-cn";
+  return `trae-cn-${uid}`;
+}
+function summarizeTraeCnCandidate(candidate2) {
+  return {
+    providerId: PROVIDER_ID18,
+    candidateId: candidate2?.candidateId ?? "trae-cn",
+    accountId: candidate2?.accountId ?? "trae-cn",
+    displayName: candidate2?.displayName ?? "Trae CN",
+    email: candidate2?.email ?? null,
+    source: candidate2?.source ?? "trae_cn_browser_oauth"
+  };
+}
+function parseTraeCnCatalog(models = TRAE_CN_MODELS) {
+  return {
+    models: models.map((model) => ({
+      id: model.id,
+      name: model.name ?? model.id,
+      ...model.contextWindow ? { contextWindow: model.contextWindow } : {},
+      ...model.maxTokens ? { maxTokens: model.maxTokens } : {},
+      ...model.reasoning ? { reasoning: model.reasoning } : {},
+      inputModalities: model.inputModalities ?? ["text"]
+    }))
+  };
+}
+function mergeTraeCnRoster(models, roster) {
+  if (!roster || roster.size === 0) return models;
+  return models.map((model) => {
+    const live = roster.get(String(model.id).toLowerCase());
+    if (!live) return model;
+    const creditRate = live.creditRate && live.creditRate !== 1 ? ` (x${live.creditRate})` : "";
+    const merged = {
+      ...model,
+      name: `${live.name ?? model.name}${creditRate}`,
+      contextWindow: live.contextWindow ?? model.contextWindow,
+      inputModalities: live.multimodal ? ["text", "image"] : ["text"]
+    };
+    if (live.reasoning === false) delete merged.reasoning;
+    return merged;
+  });
+}
+var TraeCnSubscriptionDriver = class {
+  #sessions = /* @__PURE__ */ new Map();
+  #requestExecutor;
+  constructor({
+    site = TRAE_CN_SITE,
+    fetchImpl = fetch,
+    timeoutMs = 3e5,
+    signInTimeoutMs = 6e5,
+    catalogLoader = null,
+    requestExecutor = null
+  } = {}) {
+    this.site = site;
+    this.fetchImpl = fetchImpl;
+    this.timeoutMs = timeoutMs;
+    this.signInTimeoutMs = signInTimeoutMs;
+    this.#requestExecutor = requestExecutor ?? createTraeNativeExecutor({ site, fetchImpl, timeoutMs });
+    this.catalogLoader = catalogLoader ?? (async () => parseTraeCnCatalog());
+  }
+  /**
+   * Trae CN signs in through its own authorization page, which calls back to a
+   * loopback server this plugin runs. There is no API key to paste, so the
+   * panel's "log in" button is the only entry point.
+   */
+  async authorizationInstructions() {
+    return "Trae CN \u4F7F\u7528\u5B98\u65B9\u6388\u6743\u9875\u767B\u5F55\uFF0C\u6CA1\u6709\u53EF\u586B\u5199\u7684 API Key\u3002\u70B9\u300C\u767B\u5F55\u300D\u4F1A\u5728\u6D4F\u89C8\u5668\u6253\u5F00 Trae CN \u7684\u6388\u6743\u9875\u9762\uFF1B\u5728\u9875\u9762\u4E0A\u540C\u610F\u6388\u6743\u540E\uFF0C\u56DE\u8C03\u4F1A\u81EA\u52A8\u56DE\u5230\u672C\u673A\u5E76\u5B8C\u6210\u63A5\u5165\uFF0C\u4E0D\u9700\u8981\u590D\u5236\u4EFB\u4F55\u4EE3\u7801\u3002";
+  }
+  async startAuthorization(context = {}) {
+    const session = await startTraeSignIn({
+      site: this.site,
+      timeoutMs: this.signInTimeoutMs
+    });
+    const sessionId = `${PROVIDER_ID18}:${randomUUID15()}`;
+    const state = { status: "pending", credential: null, error: null };
+    session.result.then((result) => {
+      if (result?.ok) {
+        state.credential = result.credential;
+        return;
+      }
+      state.status = "failed";
+      state.error = result?.error ?? "\u767B\u5F55\u5931\u8D25";
+    }).catch((error) => {
+      state.status = "failed";
+      state.error = redactError(error);
+    });
+    this.#sessions.set(sessionId, { session, state, startedAt: (/* @__PURE__ */ new Date()).toISOString() });
+    return {
+      status: "pending",
+      providerId: PROVIDER_ID18,
+      sessionId,
+      authorizationUrl: session.authorizationUrl,
+      instructions: session.instructions,
+      startedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+  async pollAuthorization(sessionId, context = {}) {
+    const entry = this.#sessions.get(sessionId);
+    if (!entry) {
+      return {
+        status: "failed",
+        providerId: PROVIDER_ID18,
+        sessionId,
+        diagnostic: "\u8FD9\u6B21\u767B\u5F55\u4F1A\u8BDD\u5DF2\u7ECF\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u53D1\u8D77\u767B\u5F55\u3002"
+      };
+    }
+    if (entry.state.status === "failed") {
+      this.#sessions.delete(sessionId);
+      return {
+        status: "failed",
+        providerId: PROVIDER_ID18,
+        sessionId,
+        diagnostic: entry.state.error
+      };
+    }
+    if (entry.state.result) return entry.state.result;
+    const credential = entry.state.credential;
+    if (!credential) {
+      return { status: "pending", providerId: PROVIDER_ID18, sessionId };
+    }
+    const accountId = accountIdFor(credential);
+    const candidate2 = {
+      candidateId: accountId,
+      accountId,
+      displayName: credential.name || credential.uid || "Trae CN",
+      email: credential.email || null,
+      source: "trae_cn_browser_oauth"
+    };
+    Object.defineProperty(candidate2, CREDENTIAL_SLOT6, { value: credential, enumerable: false });
+    const completed = {
+      status: "completed",
+      providerId: PROVIDER_ID18,
+      sessionId,
+      diagnostic: null,
+      accounts: [candidate2]
+    };
+    entry.state.result = completed;
+    setTimeout(() => this.#sessions.delete(sessionId), 12e4).unref?.();
+    return completed;
+  }
+  async cancelAuthorization(sessionId, context = {}) {
+    const entry = this.#sessions.get(sessionId);
+    if (entry) {
+      entry.session.cancel();
+      this.#sessions.delete(sessionId);
+    }
+    return { status: "cancelled", providerId: PROVIDER_ID18, sessionId };
+  }
+  async importAccount(candidate2, context = {}) {
+    const credential = candidate2?.[CREDENTIAL_SLOT6];
+    if (!credential) throw new Error("Trae CN \u7684\u767B\u5F55\u4FE1\u606F\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55");
+    const accountId = candidate2?.accountId ?? accountIdFor(credential);
+    const ref = createCredentialRef(PROVIDER_ID18, accountId);
+    if (!context.secretStore) {
+      throw new Error("Trae CN \u9700\u8981\u5B89\u5168\u51ED\u636E\u5B58\u50A8\uFF0C\u4F46\u5F53\u524D\u73AF\u5883\u6CA1\u6709\u63D0\u4F9B secretStore");
+    }
+    {
+      await context.secretStore.write(ref, {
+        token: credential.token,
+        refreshToken: credential.refreshToken,
+        expiresAt: credential.expiresAt ?? null,
+        refreshExpiresAt: credential.refreshExpiresAt ?? null,
+        clientId: credential.clientId ?? this.site.clientId,
+        uid: credential.uid,
+        name: credential.name ?? null,
+        email: credential.email ?? null,
+        device: credential.device
+      });
+      const stored = await context.secretStore.read(ref).catch(() => null);
+      if (!stored?.token) {
+        throw new Error("Trae CN \u767B\u5F55\u51ED\u636E\u6CA1\u6709\u5199\u5165\u5B89\u5168\u5B58\u50A8\uFF08\u56DE\u8BFB\u4E3A\u7A7A\uFF09");
+      }
+    }
+    return createAccountRecord({
+      providerId: PROVIDER_ID18,
+      accountId,
+      credentialRef: ref,
+      displayName: candidate2?.displayName ?? credential.name ?? "Trae CN",
+      email: candidate2?.email ?? credential.email ?? null,
+      auth: { kind: "oauth", scopes: [] },
+      subscription: { plan: null, status: "active" },
+      refresh: {
+        accessTokenExpiresAt: credential.expiresAt ? new Date(credential.expiresAt).toISOString() : null,
+        refreshable: Boolean(credential.refreshToken)
+      },
+      resources: {
+        transport: "trae_cn_llm_utils_chat",
+        quotaSource: "trae_cn_credits",
+        uid: credential.uid ?? null
+      }
+    });
+  }
+  getActiveSession() {
+    return Promise.resolve(null);
+  }
+  async getCatalog(context = {}) {
+    const accounts = context?.accounts ?? [];
+    const account = accounts.find((candidate2) => candidate2?.accountId === context?.accountId) ?? accounts[0];
+    if (account) {
+      const credential = await this.#credentialOf(account, context);
+      if (credential) {
+        try {
+          const roster = await readTraeModelRoster({
+            credential,
+            site: this.site,
+            fetchImpl: this.fetchImpl
+          });
+          return parseTraeCnCatalog(mergeTraeCnRoster(TRAE_CN_MODELS, roster));
+        } catch {
+        }
+      }
+    }
+    return this.catalogLoader({ force: Boolean(context?.force) });
+  }
+  async getQuota(account, context = {}) {
+    const credential = await this.#credentialOf(account, context);
+    if (!credential) {
+      return createQuotaSnapshot({ unit: "credits", source: "trae_cn_credits" });
+    }
+    try {
+      const credits = await readTraeCredits({
+        credential,
+        site: this.site,
+        fetchImpl: this.fetchImpl
+      });
+      return createQuotaSnapshot({
+        unit: "credits",
+        source: "trae_cn_credits",
+        ...credits.limit > 0 ? { limit: credits.limit, remaining: Math.max(0, credits.limit - credits.used) } : {},
+        ...credits.resetsAt ? { resetAt: credits.resetsAt } : {},
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    } catch (error) {
+      if (error?.status === 401 || error?.status === 403) {
+        const expired = new Error("Trae CN \u767B\u5F55\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55");
+        expired.code = "AUTH_EXPIRED";
+        throw expired;
+      }
+      return createQuotaSnapshot({ unit: "credits", source: "trae_cn_credits", updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
+    }
+  }
+  async refreshAccount(account, context = {}) {
+    return {
+      health: {
+        status: "healthy",
+        lastCheckedAt: (/* @__PURE__ */ new Date()).toISOString()
+      },
+      quota: await this.getQuota(account, context)
+    };
+  }
+  async #credentialOf(account, context = {}) {
+    const ref = account?.auth?.credentialRef ?? account?.credentialRef;
+    if (ref && context.secretStore) {
+      const stored = await context.secretStore.read(ref).catch(() => null);
+      if (stored?.token) return stored;
+    }
+    return null;
+  }
+  async invoke(requestOrEnvelope, invocation, context = {}) {
+    const isEnvelope = requestOrEnvelope && typeof requestOrEnvelope === "object" && "request" in requestOrEnvelope;
+    const request = isEnvelope ? requestOrEnvelope.request : requestOrEnvelope;
+    const inv = isEnvelope ? requestOrEnvelope.invocation : invocation;
+    const ctx = isEnvelope ? requestOrEnvelope.context ?? {} : context;
+    const executor = ctx?.requestExecutor ?? this.#requestExecutor;
+    const credential = (isEnvelope ? requestOrEnvelope.credential : null) ?? await this.#credentialOf(inv?.auth ?? inv ?? {}, ctx);
+    if (!credential) {
+      throw new Error("Trae CN \u8D26\u53F7\u7F3A\u5C11\u767B\u5F55\u51ED\u636E\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55");
+    }
+    return executor({
+      request: {
+        ...request,
+        signal: request?.signal ?? ctx?.signal ?? inv?.signal
+      },
+      credential,
+      signal: request?.signal ?? ctx?.signal ?? inv?.signal
+    });
+  }
+  async stream(request, invocation, context = {}) {
+    return this.invoke(request, invocation, context);
+  }
+};
+function createTraeCnDriver(options = {}) {
+  return new TraeCnSubscriptionDriver(options);
+}
+
+// modules/provider-trae-cn/src/index.mjs
+function createTraeCnModule({ driver = {} } = {}) {
+  return defineProviderModule({
+    id: "trae-cn",
+    displayName: "Trae CN",
+    // Trae CN has its own authorization page, so the panel offers a real
+    // "log in" button: the plugin runs the loopback callback and takes the
+    // credential from the page, exactly as the IDE itself does.
+    capabilities: [
+      "oauth_authorization",
+      "oauth_import",
+      "quota",
+      "catalog",
+      "invoke",
+      "stream"
+    ],
+    driver
+  });
+}
+
 // packages/runtime/src/dockyard-runtime.mjs
 var candidateSummarizers = /* @__PURE__ */ new Map([
   ["openai-codex", summarizeCodexCandidate],
@@ -18354,7 +19522,8 @@ var candidateSummarizers = /* @__PURE__ */ new Map([
   ["kilo", summarizeKiloCandidate],
   ["commandcode", summarizeCommandCodeCandidate],
   ["hermes", summarizeHermesCandidate],
-  ["openrouter-free", summarizeOpenRouterFreeCandidate]
+  ["openrouter-free", summarizeOpenRouterFreeCandidate],
+  ["trae-cn", summarizeTraeCnCandidate]
 ]);
 var DEFAULT_REFRESH_TIMEOUT_MS = 3e4;
 function numericOption(value, fallback) {
@@ -18547,6 +19716,15 @@ function createDefaultProviderEntries(options = {}) {
         })
       }),
       driver: options.openrouterFreeDriver
+    },
+    {
+      module: createTraeCnModule({
+        driver: options.traeCnDriver ?? createTraeCnDriver({
+          ...withRequestExecutor("trae-cn", options.traeCn, requestExecutors),
+          ...catalogLoaders["trae-cn"] ? { catalogLoader: catalogLoaders["trae-cn"] } : {}
+        })
+      }),
+      driver: options.traeCnDriver
     }
   ];
 }
