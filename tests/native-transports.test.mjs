@@ -1270,43 +1270,95 @@ test("the guard can wrap an async function that resolves to a stream", async () 
   assert.deepEqual(events.filter((event) => event.type === "text-delta").map((event) => event.text), ["answer"]);
 });
 
-test("Antigravity gives every tool call an id so Claude's tool_use translation validates", async () => {
-  // Regression: history replayed without call ids made the Anthropic
-  // translation behind Code Assist reject the whole request with
-  // `messages.N.content.M.tool_use.id: Field required`.
+test("Antigravity renders Claude tool history as text so Anthropic cannot reject it", async () => {
+  // Two upstream rules broke long Claude histories: a tool_use needs its
+  // tool_result in the very next message, and echoed thought signatures must
+  // still be valid. Signatures are not kept in the host's blocks, so a result
+  // that could not be paired left an orphan tool_use ("tool_use ids were found
+  // without tool_result blocks") and stale signatures failed with "Corrupted
+  // thought signature". Text history sidesteps both.
   const built = await buildAntigravityRequest({
     model: "claude-sonnet-5-5-medium",
     messages: [
       { role: "user", content: [{ type: "text", text: "read the file" }] },
-      // Claude history keeps signed calls as functionCall parts, and that is
-      // exactly the shape that must carry an id.
-      { role: "assistant", content: [{ type: "tool-call", name: "read_file", arguments: "{\"path\":\"/tmp/a\"}", thought_signature: "sig-read-1" }] },
-      { role: "tool", content: [{ type: "tool-result", name: "read_file", content: "hello" }] },
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", id: "toolu_vrtx_1", name: "read_file", arguments: "{\"path\":\"/tmp/a\"}", thought_signature: "sig-1" }],
+      },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "toolu_vrtx_1", name: "read_file", content: "hello" }] },
     ],
   });
 
-  const callPart = built.contents[1].parts.find((part) => part.functionCall);
-  assert.ok(callPart, "the assistant turn should carry a functionCall");
-  assert.equal(typeof callPart.functionCall.id, "string");
-  assert.ok(callPart.functionCall.id.length > 0, "the call must have a non-empty id");
-
-  const resultPart = built.contents[2].parts.find((part) => part.functionResponse);
-  assert.ok(resultPart, "the tool turn should carry a functionResponse");
-  assert.equal(resultPart.functionResponse.id, callPart.functionCall.id, "the result must point back at its call");
+  const allParts = built.contents.flatMap((content) => content.parts);
+  assert.equal(allParts.some((part) => part.functionCall || part.function_call), false, "no functionCall parts for Claude");
+  assert.equal(allParts.some((part) => part.functionResponse || part.function_response), false, "no functionResponse parts for Claude");
+  assert.equal(allParts.some((part) => part.thoughtSignature || part.thought_signature), false, "no signatures are echoed");
+  // The information is still there, just as text.
+  assert.ok(allParts.some((part) => String(part.text ?? "").includes("read_file")));
+  assert.ok(allParts.some((part) => String(part.text ?? "").includes("hello")));
 });
 
-test("Antigravity keeps the host's own tool call ids", async () => {
+test("Antigravity lets a Claude turn call tools natively even though history is text", async () => {
   const built = await buildAntigravityRequest({
     model: "claude-sonnet-5-5-medium",
-    messages: [
-      { role: "user", content: [{ type: "text", text: "read the file" }] },
-      { role: "assistant", content: [{ type: "tool-call", id: "call_abc123", name: "read_file", arguments: "{}", thought_signature: "sig-read-2" }] },
-      { role: "tool", content: [{ type: "tool-result", toolCallId: "call_abc123", name: "read_file", content: "hello" }] },
-    ],
+    messages: [{ role: "user", content: "go" }],
+    tools: [{ name: "read_file", description: "read", parameters: { type: "object", properties: { path: { type: "string" } } } }],
   });
+  assert.ok(Array.isArray(built.tools) && built.tools.length > 0, "the current turn still offers native tools");
+});
 
-  const callPart = built.contents[1].parts.find((part) => part.functionCall);
-  assert.equal(callPart.functionCall.id, "call_abc123");
-  const resultPart = built.contents[2].parts.find((part) => part.functionResponse);
-  assert.equal(resultPart.functionResponse.id, "call_abc123");
+test("the guard retries a thinking-only completion instead of ending the turn", async () => {
+  const fixture = guardedFixture([thinkingOnly, realAnswer]);
+  const events = [];
+  for await (const event of fixture.guarded({ request: { messages: [{ role: "user", content: "hi" }] } })) {
+    events.push(event);
+  }
+  assert.equal(fixture.calls, 2);
+  // The abandoned attempt must not leak into the host stream: the answer
+  // attempt carries no reasoning at all, so nothing should arrive.
+  assert.equal(events.filter((event) => event.type === "reasoning-delta").length, 0);
+  assert.deepEqual(events.filter((event) => event.type === "text-delta").map((event) => event.text), ["answer"]);
+  // The retry explains what went wrong.
+  assert.ok(fixture.seen[1].some((message) => String(message.content).includes("只写了思考过程")));
+});
+
+test("the guard fails loudly when every attempt only thinks", async () => {
+  const fixture = guardedFixture([thinkingOnly]);
+  await assert.rejects(
+    async () => {
+      for await (const event of fixture.guarded({ request: { messages: [{ role: "user", content: "hi" }] } })) void event;
+    },
+    (error) => {
+      assert.equal(error.code, "EMPTY_COMPLETION");
+      return true;
+    },
+  );
+  assert.equal(fixture.calls, 3, "the first attempt plus two retries");
+});
+
+test("the guard leaves a real answer untouched", async () => {
+  const fixture = guardedFixture([realAnswer]);
+  const events = [];
+  for await (const event of fixture.guarded({ request: { messages: [{ role: "user", content: "hi" }] } })) {
+    events.push(event);
+  }
+  assert.equal(fixture.calls, 1);
+  assert.equal(events.at(-1).type, "finish");
+});
+
+test("the guard can wrap an async function that resolves to a stream", async () => {
+  let calls = 0;
+  const guarded = guardEmptyCompletion(async (envelope = {}) => {
+    calls += 1;
+    return (async function* () {
+      yield* calls === 1 ? thinkingOnly : realAnswer;
+    })();
+  }, { providerId: "fixture" });
+
+  const events = [];
+  for await (const event of guarded({ request: { messages: [{ role: "user", content: "hi" }] } })) {
+    events.push(event);
+  }
+  assert.equal(calls, 2);
+  assert.deepEqual(events.filter((event) => event.type === "text-delta").map((event) => event.text), ["answer"]);
 });

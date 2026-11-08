@@ -884,6 +884,7 @@ async function geminiParts(content, attachments, {
   requireThoughtSignatures = false,
   toolIds = null,
   requireToolIds = false,
+  textToolHistory = false,
 } = {}) {
   const values = Array.isArray(content) ? content : [content];
   const parts = [];
@@ -900,6 +901,10 @@ async function geminiParts(content, attachments, {
       continue;
     }
     if (isToolResultPart(part)) {
+      if (textToolHistory) {
+        parts.push({ text: toolResultText(part) });
+        continue;
+      }
       const callName = toolCallNameOf(part);
       const callId = toolCallIdOf(part);
       // Claude models are served through an Anthropic translation, which
@@ -926,6 +931,10 @@ async function geminiParts(content, attachments, {
       continue;
     }
     if (isToolCallPart(part)) {
+      if (textToolHistory) {
+        parts.push({ text: toolCallText(toolCallNameOf(part), toolCallArgsOf(part)) });
+        continue;
+      }
       const name = toolCallNameOf(part);
       const args = toolCallArgsOf(part);
       const signature = thoughtSignatureForToolPart(part);
@@ -977,6 +986,19 @@ async function geminiParts(content, attachments, {
  * so they keep the historical shape without ids.
  */
 function modelNeedsToolCallIds(model) {
+  return /claude/iu.test(String(model ?? ""));
+}
+
+/**
+ * Claude models reach us through an Anthropic translation that enforces two
+ * extra rules: every tool_use needs a tool_result in the very next message,
+ * and echoed thought signatures must still be valid. Neither survives a long
+ * local history — signatures are not kept in the host's tool-call blocks, and
+ * a result we cannot pair becomes text — which leaves orphan tool_use blocks
+ * and corrupt signatures. Rendering tool history as text sidesteps both, while
+ * the current turn still offers native tools.
+ */
+function modelUsesTextToolHistory(model) {
   return /claude/iu.test(String(model ?? ""));
 }
 
@@ -1148,10 +1170,13 @@ async function buildGeminiContents(request, attachments) {
   const maxMessages = resolveMaxMessages(request);
   const messages = compactMessagesForContext(rawMessages, { maxMessages });
   const signedToolCallIds = collectSignedToolCallIds(messages);
-  const requireThoughtSignatures = modelRequiresThoughtSignatures(request.model);
   // Call ids are invented here only for history that lost them; explicit ids
   // from the host always win, and responses are paired with calls in order.
   const requireToolIds = modelNeedsToolCallIds(request.model);
+  // Claude goes fully textual for tool history (see modelUsesTextToolHistory),
+  // which also makes thought signatures irrelevant for it.
+  const textToolHistory = modelUsesTextToolHistory(request.model);
+  const requireThoughtSignatures = !textToolHistory && modelRequiresThoughtSignatures(request.model);
   const toolIds = createToolIdAllocator();
   const contents = [];
   for (const message of messages) {
@@ -1160,6 +1185,7 @@ async function buildGeminiContents(request, attachments) {
       requireThoughtSignatures,
       toolIds,
       requireToolIds,
+      textToolHistory,
     });
     if (parts.length === 0) continue;
     contents.push({

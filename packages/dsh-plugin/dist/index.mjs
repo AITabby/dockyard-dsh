@@ -6783,7 +6783,8 @@ async function geminiParts(content, attachments, {
   signedToolCallIds = /* @__PURE__ */ new Set(),
   requireThoughtSignatures = false,
   toolIds = null,
-  requireToolIds = false
+  requireToolIds = false,
+  textToolHistory = false
 } = {}) {
   const values = Array.isArray(content) ? content : [content];
   const parts = [];
@@ -6800,6 +6801,10 @@ async function geminiParts(content, attachments, {
       continue;
     }
     if (isToolResultPart(part)) {
+      if (textToolHistory) {
+        parts.push({ text: toolResultText(part) });
+        continue;
+      }
       const callName = toolCallNameOf(part);
       const callId = toolCallIdOf(part);
       const pairedId = requireToolIds ? callId ?? toolIds?.take(callName) ?? null : null;
@@ -6822,6 +6827,10 @@ async function geminiParts(content, attachments, {
       continue;
     }
     if (isToolCallPart(part)) {
+      if (textToolHistory) {
+        parts.push({ text: toolCallText(toolCallNameOf(part), toolCallArgsOf(part)) });
+        continue;
+      }
       const name2 = toolCallNameOf(part);
       const args = toolCallArgsOf(part);
       const signature = thoughtSignatureForToolPart(part);
@@ -6861,6 +6870,9 @@ async function geminiParts(content, attachments, {
   return parts;
 }
 function modelNeedsToolCallIds(model) {
+  return /claude/iu.test(String(model ?? ""));
+}
+function modelUsesTextToolHistory(model) {
   return /claude/iu.test(String(model ?? ""));
 }
 function createToolIdAllocator() {
@@ -7006,8 +7018,9 @@ async function buildGeminiContents(request, attachments) {
   const maxMessages = resolveMaxMessages(request);
   const messages = compactMessagesForContext(rawMessages, { maxMessages });
   const signedToolCallIds = collectSignedToolCallIds(messages);
-  const requireThoughtSignatures = modelRequiresThoughtSignatures(request.model);
   const requireToolIds = modelNeedsToolCallIds(request.model);
+  const textToolHistory = modelUsesTextToolHistory(request.model);
+  const requireThoughtSignatures = !textToolHistory && modelRequiresThoughtSignatures(request.model);
   const toolIds = createToolIdAllocator();
   const contents = [];
   for (const message of messages) {
@@ -7015,7 +7028,8 @@ async function buildGeminiContents(request, attachments) {
       signedToolCallIds,
       requireThoughtSignatures,
       toolIds,
-      requireToolIds
+      requireToolIds,
+      textToolHistory
     });
     if (parts.length === 0) continue;
     contents.push({
