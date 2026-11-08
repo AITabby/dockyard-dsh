@@ -1,6 +1,6 @@
 {
   "name": "@dockyard-dsh/install",
-  "version": "0.1.31",
+  "version": "0.1.32",
   "description": "One-command installer for the Dockyard DSH plugin.",
   "license": "MIT",
   "type": "module",
