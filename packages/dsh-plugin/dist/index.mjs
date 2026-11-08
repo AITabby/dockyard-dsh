@@ -6872,8 +6872,8 @@ async function geminiParts(content, attachments, {
 function modelNeedsToolCallIds(model) {
   return /claude/iu.test(String(model ?? ""));
 }
-function modelUsesTextToolHistory(model) {
-  return /claude/iu.test(String(model ?? ""));
+function modelUsesTextToolHistory() {
+  return true;
 }
 function createToolIdAllocator() {
   let counter = 0;
@@ -7019,7 +7019,7 @@ async function buildGeminiContents(request, attachments) {
   const messages = compactMessagesForContext(rawMessages, { maxMessages });
   const signedToolCallIds = collectSignedToolCallIds(messages);
   const requireToolIds = modelNeedsToolCallIds(request.model);
-  const textToolHistory = modelUsesTextToolHistory(request.model);
+  const textToolHistory = modelUsesTextToolHistory();
   const requireThoughtSignatures = !textToolHistory && modelRequiresThoughtSignatures(request.model);
   const toolIds = createToolIdAllocator();
   const contents = [];

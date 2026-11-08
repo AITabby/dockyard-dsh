@@ -309,102 +309,54 @@ test("Antigravity Gemini 3 history sanitizes native unsigned functionCall parts"
   ]);
 });
 
-test("Antigravity Gemini 3 history echoes thought signatures on functionCall parts", async () => {
+test("Antigravity renders signed tool calls as text instead of echoing a signature", async () => {
+  // Signatures cannot survive the host's tool-call blocks, so replaying one is
+  // eventually rejected as "Corrupted thought signature". Tool history is text.
   const native = await buildAntigravityRequest({
-    model: "gemini-3-flash",
+    model: "gemini-3.7-flash",
     messages: [
-      { role: "user", content: "check status" },
+      { role: "user", content: "read lints" },
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", id: "call-1", name: "read_lints", arguments: { paths: ["app.js"] }, thought_signature: "sig-1" }],
+      },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "call-1", name: "read_lints", content: "[]" }] },
+    ],
+  });
+  const serialized = JSON.stringify(native.contents);
+  assert.equal(serialized.includes("functionCall"), false);
+  assert.equal(serialized.includes("thoughtSignature"), false);
+  assert.equal(serialized.includes("thought_signature"), false);
+  assert.ok(serialized.includes("read_lints"), "the call is still described, as text");
+});
+
+
+test("Antigravity never puts a signature inside a functionCall", async () => {
+  const native = await buildAntigravityRequest({
+    model: "gemini-3.7-flash",
+    messages: [
       {
         role: "assistant",
         content: [
           {
             type: "tool-call",
-            id: "call-signed-1",
-            name: "read_lints",
-            arguments: { paths: ["app.js"] },
-            thoughtSignature: "sig-abc",
+            id: "call-2",
+            name: "bash",
+            arguments: '{"command":"ls"}',
+            thought_signature: "sig-2",
+            functionCall: { name: "bash", args: { command: "ls" }, thoughtSignature: "sig-2" },
           },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          { type: "tool-result", toolCallId: "call-signed-1", name: "read_lints", content: "[]" },
         ],
       },
     ],
   });
-  assert.deepEqual(native.contents, [
-    { role: "user", parts: [{ text: "check status" }] },
-    {
-      role: "model",
-      parts: [{
-        functionCall: {
-          name: "read_lints",
-          args: { paths: ["app.js"] },
-        },
-        thoughtSignature: "sig-abc",
-        thought_signature: "sig-abc",
-      }],
-    },
-    {
-      role: "user",
-      parts: [{ functionResponse: { name: "read_lints", response: { name: "read_lints", content: "[]" } } }],
-    },
-  ]);
+  const serialized = JSON.stringify(native.contents);
+  assert.equal(serialized.includes("thoughtSignature"), false);
+  assert.equal(serialized.includes("thought_signature"), false);
 });
 
-test("Antigravity Gemini 3 history strips thought signatures from inside functionCall", async () => {
-  const native = await buildAntigravityRequest({
-    model: "gemini-3.8-flash",
-    messages: [
-      { role: "user", content: "check status" },
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            id: "call-nested-1",
-            name: "read_lints",
-            arguments: { paths: ["app.js"] },
-            functionCall: {
-              name: "read_lints",
-              args: { paths: ["app.js"] },
-              thoughtSignature: "sig-nested",
-              thought_signature: "sig-nested",
-            },
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          { type: "tool-result", toolCallId: "call-nested-1", name: "read_lints", content: "[]" },
-        ],
-      },
-    ],
-  });
-  assert.deepEqual(native.contents, [
-    { role: "user", parts: [{ text: "check status" }] },
-    {
-      role: "model",
-      parts: [{
-        functionCall: {
-          name: "read_lints",
-          args: { paths: ["app.js"] },
-        },
-        thoughtSignature: "sig-nested",
-        thought_signature: "sig-nested",
-      }],
-    },
-    {
-      role: "user",
-      parts: [{ functionResponse: { name: "read_lints", response: { name: "read_lints", content: "[]" } } }],
-    },
-  ]);
-});
 
-test("Antigravity non-Gemini-3 history keeps unsigned functionCall parts", async () => {
+test("Antigravity renders unsigned tool calls as text on every model", async () => {
   const native = await buildAntigravityRequest({
     model: "gemini-2.5-flash",
     messages: [
@@ -417,11 +369,12 @@ test("Antigravity non-Gemini-3 history keeps unsigned functionCall parts", async
     ],
   });
   assert.deepEqual(native.contents, [
-    { role: "model", parts: [{ functionCall: { name: "read_lints", args: { paths: ["app.js"] } } }] },
+    { role: "model", parts: [{ text: '[tool call: read_lints] {"paths":["app.js"]}' }] },
   ]);
 });
 
-test("Antigravity Gemini 3 history supports mixed assistant content and tool_calls preserving signatures", async () => {
+
+test("Antigravity keeps mixed assistant text and renders its tool calls as text", async () => {
   const native = await buildAntigravityRequest({
     model: "gemini-3.7-flash",
     messages: [
@@ -439,24 +392,14 @@ test("Antigravity Gemini 3 history supports mixed assistant content and tool_cal
       },
     ],
   });
-  assert.deepEqual(native.contents, [
-    { role: "user", parts: [{ text: "run command" }] },
-    {
-      role: "model",
-      parts: [
-        { text: "Checking git status" },
-        {
-          functionCall: {
-            name: "default_api:bash",
-            args: { command: "git status" },
-          },
-          thoughtSignature: "sig-bash-1",
-          thought_signature: "sig-bash-1",
-        },
-      ],
-    },
-  ]);
+  const parts = native.contents[1].parts;
+  assert.equal(parts.length, 2);
+  assert.deepEqual(parts[0], { text: "Checking git status" });
+  assert.equal(typeof parts[1].text, "string", "the call is rendered as text");
+  assert.ok(parts[1].text.includes("default_api:bash"));
+  assert.equal(JSON.stringify(native.contents).includes("thoughtSignature"), false);
 });
+
 
 test("Antigravity sliding window auto-compacts long history beyond safe threshold", async () => {
   const longMessages = [
@@ -494,44 +437,27 @@ test("Antigravity sliding window preserves static prefix and milestone across tu
   assert.equal(turn50.contents[2].parts[0].text, turn51.contents[2].parts[0].text);
 });
 
-test("Antigravity Gemini 3 surgical sanitization preserves signed call prefix when an unsigned call appears", async () => {
+test("Antigravity keeps the sliding window and never re-signs a call", async () => {
+  // The old behaviour tried to keep a signed prefix structural while flattening
+  // later unsigned calls, which is what produced "Corrupted thought signature"
+  // once the signature no longer matched. Nothing is signed any more.
   const native = await buildAntigravityRequest({
-    model: "gemini-3.8-flash",
+    model: "gemini-3.7-flash",
+    maxMessages: 40,
     messages: [
-      { role: "user", content: "first step" },
-      {
-        role: "assistant",
-        content: [
-          { type: "tool-call", id: "call-signed", name: "read_file", arguments: { path: "a.js" }, thought_signature: "sig-valid" },
-        ],
-      },
-      {
-        role: "tool",
-        content: [{ type: "tool-result", toolCallId: "call-signed", name: "read_file", content: "ok" }],
-      },
-      { role: "user", content: "second step" },
-      {
-        role: "assistant",
-        parts: [
-          { functionCall: { name: "unsigned_tool", args: {} } },
-        ],
-      },
-      {
-        role: "user",
-        parts: [
-          { functionResponse: { name: "unsigned_tool", response: { content: "res" } } },
-        ],
-      },
+      { role: "user", content: "start" },
+      { role: "assistant", content: [{ type: "tool-call", id: "call-signed", name: "bash", arguments: '{"command":"ls"}', thought_signature: "sig-good" }] },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "call-signed", name: "bash", content: "a.js" }] },
+      { role: "assistant", content: [{ type: "tool-call", id: "call-unsigned", name: "bash", arguments: '{"command":"pwd"}' }] },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "call-unsigned", name: "bash", content: "/tmp" }] },
     ],
   });
-  // The first signed tool call MUST remain a native functionCall with thoughtSignature intact
-  assert.equal(native.contents[1].parts[0].thoughtSignature, "sig-valid");
-  assert.equal(native.contents[1].parts[0].functionCall.name, "read_file");
-  assert.equal(native.contents[2].parts[0].functionResponse.name, "read_file");
-  // Only the second unsigned tool call is converted to text
-  assert.match(native.contents[4].parts[0].text, /\[tool call: unsigned_tool\]/);
-  assert.match(native.contents[5].parts[0].text, /\[tool result: unsigned_tool\]/);
+  const serialized = JSON.stringify(native.contents);
+  assert.equal(serialized.includes("functionCall"), false);
+  assert.equal(serialized.includes("thoughtSignature"), false);
+  assert.ok(serialized.includes("a.js") && serialized.includes("/tmp"), "both results survive as text");
 });
+
 
 test("Antigravity native transport attaches thought signatures to streamed tool calls", async () => {
   const executor = createAntigravityNativeExecutor({

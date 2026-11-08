@@ -998,8 +998,12 @@ function modelNeedsToolCallIds(model) {
  * and corrupt signatures. Rendering tool history as text sidesteps both, while
  * the current turn still offers native tools.
  */
-function modelUsesTextToolHistory(model) {
-  return /claude/iu.test(String(model ?? ""));
+function modelUsesTextToolHistory() {
+  // Applies to every model on this channel, not just Claude. Gemini 3 also
+  // validates the thought signatures we echo back, and the host's tool-call
+  // blocks do not keep them, so a replayed history eventually fails with
+  // "Corrupted thought signature" — the same dead end Claude had.
+  return true;
 }
 
 function createToolIdAllocator() {
@@ -1175,7 +1179,7 @@ async function buildGeminiContents(request, attachments) {
   const requireToolIds = modelNeedsToolCallIds(request.model);
   // Claude goes fully textual for tool history (see modelUsesTextToolHistory),
   // which also makes thought signatures irrelevant for it.
-  const textToolHistory = modelUsesTextToolHistory(request.model);
+  const textToolHistory = modelUsesTextToolHistory();
   const requireThoughtSignatures = !textToolHistory && modelRequiresThoughtSignatures(request.model);
   const toolIds = createToolIdAllocator();
   const contents = [];
