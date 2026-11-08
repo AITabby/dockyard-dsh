@@ -1362,3 +1362,46 @@ test("the guard can wrap an async function that resolves to a stream", async () 
   assert.equal(calls, 2);
   assert.deepEqual(events.filter((event) => event.type === "text-delta").map((event) => event.text), ["answer"]);
 });
+
+test("Antigravity sends a long Claude tool history with nothing Anthropic can reject", async () => {
+  // The bodies the upstream validator rejected: orphan tool_use blocks and
+  // stale thought signatures. Capture the real outgoing JSON to prove neither
+  // can appear any more.
+  let sentBody = null;
+  const executor = createAntigravityNativeExecutor({
+    endpoint: "https://gemini.test/v1internal:streamGenerateContent?alt=sse",
+    project: "fixture-project",
+    tokenResolver: () => ({ token: "google-token", kind: "oauth" }),
+    fetchImpl: async (_url, init) => {
+      sentBody = JSON.parse(init.body);
+      const sse = `data: ${JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] } })}\n\n`;
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(sse));
+          controller.close();
+        },
+      }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    },
+  });
+
+  const messages = [{ role: "user", content: "start" }];
+  for (let i = 0; i < 12; i += 1) {
+    messages.push({
+      role: "assistant",
+      content: [{ type: "tool-call", id: `toolu_vrtx_${i}`, name: "bash", arguments: `{"command":"echo ${i}"}`, thought_signature: `sig-${i}` }],
+    });
+    messages.push({ role: "tool", content: [{ type: "tool-result", toolCallId: `toolu_vrtx_${i}`, name: "bash", content: String(i) }] });
+  }
+  messages.push({ role: "user", content: "answer" });
+
+  for await (const _ of executor({
+    request: { model: "claude-sonnet-5-5-medium", messages, maxTokens: 64 },
+    credential: { access: "token" },
+  })) void _;
+
+  assert.ok(sentBody, "the request body should have been sent");
+  const serialized = JSON.stringify(sentBody);
+  assert.equal(serialized.includes("functionCall"), false, "no tool_use-equivalent parts");
+  assert.equal(serialized.includes("functionResponse"), false, "no tool_result-equivalent parts");
+  assert.equal(serialized.includes("thoughtSignature"), false, "no signatures are echoed");
+});
