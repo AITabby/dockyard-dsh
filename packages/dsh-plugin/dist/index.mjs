@@ -6779,7 +6779,12 @@ function defaultCodeAssistTier(load) {
 function antigravityIdeVersion() {
   return process.env.DOCKYARD_ANTIGRAVITY_IDE_VERSION || "2.9.1";
 }
-async function geminiParts(content, attachments, { signedToolCallIds = /* @__PURE__ */ new Set(), requireThoughtSignatures = false } = {}) {
+async function geminiParts(content, attachments, {
+  signedToolCallIds = /* @__PURE__ */ new Set(),
+  requireThoughtSignatures = false,
+  toolIds = null,
+  requireToolIds = false
+} = {}) {
   const values = Array.isArray(content) ? content : [content];
   const parts = [];
   for (const part of values) {
@@ -6797,11 +6802,14 @@ async function geminiParts(content, attachments, { signedToolCallIds = /* @__PUR
     if (isToolResultPart(part)) {
       const callName = toolCallNameOf(part);
       const callId = toolCallIdOf(part);
-      const keepFunctionResponse = !requireThoughtSignatures || Boolean(callId && signedToolCallIds.has(callId));
+      const pairedId = requireToolIds ? callId ?? toolIds?.take(callName) ?? null : null;
+      const gateId = callId ?? pairedId;
+      const keepFunctionResponse = !requireThoughtSignatures || Boolean(gateId && signedToolCallIds.has(gateId));
       if (keepFunctionResponse) {
         parts.push({
           functionResponse: {
             name: callName,
+            ...pairedId ? { id: pairedId } : {},
             response: {
               name: callName,
               content: textFromContent(part.content ?? part.output ?? part.result ?? part.text)
@@ -6818,15 +6826,18 @@ async function geminiParts(content, attachments, { signedToolCallIds = /* @__PUR
       const args = toolCallArgsOf(part);
       const signature = thoughtSignatureForToolPart(part);
       const callId = toolCallIdOf(part);
+      const callIdForPart = requireToolIds ? callId ?? (toolIds?.issue(name2) ?? null) : null;
+      if (callIdForPart && toolIds && requireToolIds) toolIds.remember(name2, callIdForPart);
       if (signature) {
-        if (callId) {
-          rememberThoughtSignature(callId, signature);
-          signedToolCallIds.add(callId);
+        if (callIdForPart) {
+          rememberThoughtSignature(callIdForPart, signature);
+          signedToolCallIds.add(callIdForPart);
         }
         parts.push({
           functionCall: {
             name: name2,
-            args
+            args,
+            ...callIdForPart ? { id: callIdForPart } : {}
           },
           thoughtSignature: signature,
           thought_signature: signature
@@ -6834,7 +6845,13 @@ async function geminiParts(content, attachments, { signedToolCallIds = /* @__PUR
       } else if (requireThoughtSignatures) {
         parts.push({ text: toolCallText(name2, args) });
       } else {
-        parts.push({ functionCall: { name: name2, args } });
+        parts.push({
+          functionCall: {
+            name: name2,
+            args,
+            ...callIdForPart ? { id: callIdForPart } : {}
+          }
+        });
       }
       continue;
     }
@@ -6842,6 +6859,30 @@ async function geminiParts(content, attachments, { signedToolCallIds = /* @__PUR
     if (extracted) parts.push({ text: extracted });
   }
   return parts;
+}
+function modelNeedsToolCallIds(model) {
+  return /claude/iu.test(String(model ?? ""));
+}
+function createToolIdAllocator() {
+  let counter = 0;
+  const pendingByToolName = /* @__PURE__ */ new Map();
+  return {
+    issue(name2) {
+      counter += 1;
+      return `call_${counter}_${String(name2 ?? "tool").replace(/[^A-Za-z0-9_]/gu, "_").slice(0, 24)}`;
+    },
+    remember(name2, id) {
+      const key = String(name2 ?? "tool");
+      const queue = pendingByToolName.get(key) ?? [];
+      queue.push(id);
+      pendingByToolName.set(key, queue);
+    },
+    take(name2) {
+      const queue = pendingByToolName.get(String(name2 ?? "tool"));
+      if (!queue || queue.length === 0) return null;
+      return queue.shift() ?? null;
+    }
+  };
 }
 function modelRequiresThoughtSignatures(model) {
   const id = String(model ?? "").toLowerCase();
@@ -6966,11 +7007,15 @@ async function buildGeminiContents(request, attachments) {
   const messages = compactMessagesForContext(rawMessages, { maxMessages });
   const signedToolCallIds = collectSignedToolCallIds(messages);
   const requireThoughtSignatures = modelRequiresThoughtSignatures(request.model);
+  const requireToolIds = modelNeedsToolCallIds(request.model);
+  const toolIds = createToolIdAllocator();
   const contents = [];
   for (const message of messages) {
     const parts = await geminiParts(messageContentValues(message), attachments, {
       signedToolCallIds,
-      requireThoughtSignatures
+      requireThoughtSignatures,
+      toolIds,
+      requireToolIds
     });
     if (parts.length === 0) continue;
     contents.push({

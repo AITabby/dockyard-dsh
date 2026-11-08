@@ -1269,3 +1269,44 @@ test("the guard can wrap an async function that resolves to a stream", async () 
   assert.equal(calls, 2);
   assert.deepEqual(events.filter((event) => event.type === "text-delta").map((event) => event.text), ["answer"]);
 });
+
+test("Antigravity gives every tool call an id so Claude's tool_use translation validates", async () => {
+  // Regression: history replayed without call ids made the Anthropic
+  // translation behind Code Assist reject the whole request with
+  // `messages.N.content.M.tool_use.id: Field required`.
+  const built = await buildAntigravityRequest({
+    model: "claude-sonnet-5-5-medium",
+    messages: [
+      { role: "user", content: [{ type: "text", text: "read the file" }] },
+      // Claude history keeps signed calls as functionCall parts, and that is
+      // exactly the shape that must carry an id.
+      { role: "assistant", content: [{ type: "tool-call", name: "read_file", arguments: "{\"path\":\"/tmp/a\"}", thought_signature: "sig-read-1" }] },
+      { role: "tool", content: [{ type: "tool-result", name: "read_file", content: "hello" }] },
+    ],
+  });
+
+  const callPart = built.contents[1].parts.find((part) => part.functionCall);
+  assert.ok(callPart, "the assistant turn should carry a functionCall");
+  assert.equal(typeof callPart.functionCall.id, "string");
+  assert.ok(callPart.functionCall.id.length > 0, "the call must have a non-empty id");
+
+  const resultPart = built.contents[2].parts.find((part) => part.functionResponse);
+  assert.ok(resultPart, "the tool turn should carry a functionResponse");
+  assert.equal(resultPart.functionResponse.id, callPart.functionCall.id, "the result must point back at its call");
+});
+
+test("Antigravity keeps the host's own tool call ids", async () => {
+  const built = await buildAntigravityRequest({
+    model: "claude-sonnet-5-5-medium",
+    messages: [
+      { role: "user", content: [{ type: "text", text: "read the file" }] },
+      { role: "assistant", content: [{ type: "tool-call", id: "call_abc123", name: "read_file", arguments: "{}", thought_signature: "sig-read-2" }] },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "call_abc123", name: "read_file", content: "hello" }] },
+    ],
+  });
+
+  const callPart = built.contents[1].parts.find((part) => part.functionCall);
+  assert.equal(callPart.functionCall.id, "call_abc123");
+  const resultPart = built.contents[2].parts.find((part) => part.functionResponse);
+  assert.equal(resultPart.functionResponse.id, "call_abc123");
+});

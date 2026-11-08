@@ -879,7 +879,12 @@ function antigravityIdeVersion() {
   return process.env.DOCKYARD_ANTIGRAVITY_IDE_VERSION || "2.9.1";
 }
 
-async function geminiParts(content, attachments, { signedToolCallIds = new Set(), requireThoughtSignatures = false } = {}) {
+async function geminiParts(content, attachments, {
+  signedToolCallIds = new Set(),
+  requireThoughtSignatures = false,
+  toolIds = null,
+  requireToolIds = false,
+} = {}) {
   const values = Array.isArray(content) ? content : [content];
   const parts = [];
   for (const part of values) {
@@ -897,11 +902,18 @@ async function geminiParts(content, attachments, { signedToolCallIds = new Set()
     if (isToolResultPart(part)) {
       const callName = toolCallNameOf(part);
       const callId = toolCallIdOf(part);
-      const keepFunctionResponse = !requireThoughtSignatures || Boolean(callId && signedToolCallIds.has(callId));
+      // Claude models are served through an Anthropic translation, which
+      // requires tool_result.tool_use_id to name the call it answers. Pair the
+      // response with the id handed to the matching functionCall.
+      const pairedId = requireToolIds ? (callId ?? toolIds?.take(callName) ?? null) : null;
+      const gateId = callId ?? pairedId;
+      const keepFunctionResponse = !requireThoughtSignatures
+        || Boolean(gateId && signedToolCallIds.has(gateId));
       if (keepFunctionResponse) {
         parts.push({
           functionResponse: {
             name: callName,
+            ...(pairedId ? { id: pairedId } : {}),
             response: {
               name: callName,
               content: textFromContent(part.content ?? part.output ?? part.result ?? part.text),
@@ -918,15 +930,20 @@ async function geminiParts(content, attachments, { signedToolCallIds = new Set()
       const args = toolCallArgsOf(part);
       const signature = thoughtSignatureForToolPart(part);
       const callId = toolCallIdOf(part);
+      // Every call needs an id: the Anthropic translation used for Claude
+      // models rejects a tool_use without one ("tool_use.id: Field required").
+      const callIdForPart = requireToolIds ? (callId ?? (toolIds?.issue(name) ?? null)) : null;
+      if (callIdForPart && toolIds && requireToolIds) toolIds.remember(name, callIdForPart);
       if (signature) {
-        if (callId) {
-          rememberThoughtSignature(callId, signature);
-          signedToolCallIds.add(callId);
+        if (callIdForPart) {
+          rememberThoughtSignature(callIdForPart, signature);
+          signedToolCallIds.add(callIdForPart);
         }
         parts.push({
           functionCall: {
             name,
             args,
+            ...(callIdForPart ? { id: callIdForPart } : {}),
           },
           thoughtSignature: signature,
           thought_signature: signature,
@@ -934,7 +951,13 @@ async function geminiParts(content, attachments, { signedToolCallIds = new Set()
       } else if (requireThoughtSignatures) {
         parts.push({ text: toolCallText(name, args) });
       } else {
-        parts.push({ functionCall: { name, args } });
+        parts.push({
+          functionCall: {
+            name,
+            args,
+            ...(callIdForPart ? { id: callIdForPart } : {}),
+          },
+        });
       }
       continue;
     }
@@ -942,6 +965,41 @@ async function geminiParts(content, attachments, { signedToolCallIds = new Set()
     if (extracted) parts.push({ text: extracted });
   }
   return parts;
+}
+
+/**
+ * Hands out stable call ids for history that lost them, so every functionCall
+ * carries one and its functionResponse can point back at it.
+ */
+/**
+ * Claude models are served through an Anthropic translation that requires
+ * every tool_use to carry an id. Gemini models pair calls by name and order,
+ * so they keep the historical shape without ids.
+ */
+function modelNeedsToolCallIds(model) {
+  return /claude/iu.test(String(model ?? ""));
+}
+
+function createToolIdAllocator() {
+  let counter = 0;
+  const pendingByToolName = new Map();
+  return {
+    issue(name) {
+      counter += 1;
+      return `call_${counter}_${String(name ?? "tool").replace(/[^A-Za-z0-9_]/gu, "_").slice(0, 24)}`;
+    },
+    remember(name, id) {
+      const key = String(name ?? "tool");
+      const queue = pendingByToolName.get(key) ?? [];
+      queue.push(id);
+      pendingByToolName.set(key, queue);
+    },
+    take(name) {
+      const queue = pendingByToolName.get(String(name ?? "tool"));
+      if (!queue || queue.length === 0) return null;
+      return queue.shift() ?? null;
+    },
+  };
 }
 
 function modelRequiresThoughtSignatures(model) {
@@ -1091,11 +1149,17 @@ async function buildGeminiContents(request, attachments) {
   const messages = compactMessagesForContext(rawMessages, { maxMessages });
   const signedToolCallIds = collectSignedToolCallIds(messages);
   const requireThoughtSignatures = modelRequiresThoughtSignatures(request.model);
+  // Call ids are invented here only for history that lost them; explicit ids
+  // from the host always win, and responses are paired with calls in order.
+  const requireToolIds = modelNeedsToolCallIds(request.model);
+  const toolIds = createToolIdAllocator();
   const contents = [];
   for (const message of messages) {
     const parts = await geminiParts(messageContentValues(message), attachments, {
       signedToolCallIds,
       requireThoughtSignatures,
+      toolIds,
+      requireToolIds,
     });
     if (parts.length === 0) continue;
     contents.push({
