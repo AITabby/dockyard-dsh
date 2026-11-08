@@ -20,6 +20,7 @@
  */
 import { createServer } from "node:http";
 import { randomBytes, randomInt, randomUUID } from "node:crypto";
+import { guardEmptyCompletion } from "../../../packages/providers/src/native-transport.mjs";
 
 export const PROVIDER_ID = "trae-cn";
 
@@ -770,7 +771,7 @@ export function createTraeNativeExecutor({
   fetchImpl = fetch,
   timeoutMs = 300_000,
 } = {}) {
-  return async function executeTrae({ request = {}, credential, signal } = {}) {
+  async function executeTrae({ request = {}, credential, signal } = {}) {
     const account = credential ?? {};
     const body = traeChatBody(request, { site, model: request.model });
     const controller = new AbortController();
@@ -892,6 +893,7 @@ export function createTraeNativeExecutor({
       }
     })();
   };
+  return guardEmptyCompletion(executeTrae, { providerId: PROVIDER_ID });
 }
 
 /** Read the account's credit window (Trae CN bills in credits). */

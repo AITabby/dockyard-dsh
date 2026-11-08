@@ -434,7 +434,13 @@ test("CommandCodeNativeExecutor sends valid UUID threadId and deterministic sess
     fetchImpl: async (_url, init) => {
       capturedHeaders = init.headers;
       capturedBody = JSON.parse(init.body);
-      return new Response(JSON.stringify({ type: "finish", finishReason: "stop" }), {
+      // A real answer, not just a finish marker: an empty completion is now
+      // retried and eventually reported as a failure.
+      const body = [
+        JSON.stringify({ type: "text-delta", text: "ok" }),
+        JSON.stringify({ type: "finish", finishReason: "stop" }),
+      ].join("\n");
+      return new Response(body, {
         status: 200,
         headers: { "Content-Type": "application/x-ndjson" },
       });

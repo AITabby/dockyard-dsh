@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import {
+  guardEmptyCompletion,
   cleanupNativeResponse,
   fetchNativeResponse,
   finishReason,
@@ -1592,7 +1593,7 @@ export function createAntigravityNativeExecutor({
     return streamAntigravityResponse(response, context);
   };
   executor.nativeTransport = "gemini-stream-generate-content";
-  return executor;
+  return guardEmptyCompletion(executor, { providerId: PROVIDER_ID });
 }
 
 /**

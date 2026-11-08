@@ -622,6 +622,101 @@ export function finishReason(value, fallback = "stop") {
   return { kind: "stop" };
 }
 
+/**
+ * A completion that carries only reasoning and never produces text or a tool
+ * call is not an answer. Without this guard the host sees a well-formed stream,
+ * marks the turn complete, and the agent appears to stop mid-thought with
+ * nothing to show for it. Wrap a provider executor with this to retry such an
+ * attempt before anything reaches the host, and to fail loudly if it persists.
+ */
+export const EMPTY_COMPLETION_NUDGE = "上一次回复只写了思考过程，没有给出回答也没有调用工具。"
+  + "请直接用正文回答，或直接调用需要的工具，不要再输出思考过程。";
+
+function isEmptyCompletionOutput(event) {
+  // Only text and tool calls count as output. Reasoning, usage and the finish
+  // marker alone mean the model never actually answered.
+  if (event?.type === "text-delta" || event?.type === "tool-call-delta") return true;
+  if (event?.type === "block-start") return event.blockType !== "reasoning";
+  if (event?.type === "block-end") return event.block?.type !== "reasoning";
+  return false;
+}
+
+function withEmptyCompletionNudge(envelope, nudge) {
+  const base = (envelope && typeof envelope === "object" && "request" in envelope)
+    ? envelope
+    : { request: envelope ?? {} };
+  const request = base.request ?? {};
+  if (Array.isArray(request.messages)) {
+    return { ...base, request: { ...request, messages: [...request.messages, { role: "system", content: nudge }] } };
+  }
+  const system = typeof request.system === "string" && request.system.length > 0
+    ? `${request.system}\n\n${nudge}`
+    : nudge;
+  return { ...base, request: { ...request, system } };
+}
+
+export function guardEmptyCompletion(executor, {
+  providerId = "provider",
+  nudge = EMPTY_COMPLETION_NUDGE,
+  maxEmptyAttempts = 2,
+} = {}) {
+  // Transports are called either with a single envelope object or with
+  // positional arguments; forward whatever came in so both keep working.
+  return async function* guardedExecutor(...args) {
+    const envelope = args[0] ?? {};
+    const signal = envelope?.signal ?? envelope?.request?.signal;
+    // Only a wrapped envelope can carry the nudge; a bare request is retried
+    // unchanged rather than being reshaped underneath the caller.
+    const canNudge = Boolean(nudge)
+      && envelope && typeof envelope === "object"
+      && ("request" in envelope || "credential" in envelope);
+    for (let attempt = 0; ; attempt += 1) {
+      if (signal?.aborted) {
+        const abort = new Error("aborted");
+        abort.name = "AbortError";
+        throw abort;
+      }
+
+      const attemptArgs = attempt === 0 || !canNudge
+        ? args
+        : [withEmptyCompletionNudge(envelope, nudge), ...args.slice(1)];
+      const buffered = [];
+      let sawOutput = false;
+
+      // Some transports are generator functions, others are async functions
+      // that resolve to an async iterable. Accept both.
+      const attemptResult = executor(...attemptArgs);
+      const attemptStream = (attemptResult && typeof attemptResult[Symbol.asyncIterator] === "function")
+        ? attemptResult
+        : await attemptResult;
+      if (!attemptStream || typeof attemptStream[Symbol.asyncIterator] !== "function") {
+        throw nativeProviderError(providerId, "provider executor did not return a stream");
+      }
+      for await (const event of attemptStream) {
+        if (sawOutput) {
+          yield event;
+          continue;
+        }
+        buffered.push(event);
+        if (isEmptyCompletionOutput(event)) {
+          sawOutput = true;
+          for (const pending of buffered) yield pending;
+          buffered.length = 0;
+        }
+      }
+
+      if (sawOutput) return;
+      if (attempt >= maxEmptyAttempts) {
+        throw nativeProviderError(
+          providerId,
+          "模型只输出了思考内容，没有给出回答或工具调用；已自动重试仍无结果，请重试或换一个模型",
+          { code: "EMPTY_COMPLETION" },
+        );
+      }
+    }
+  };
+}
+
 export function buildOpenAiTools(tools) {
   if (!Array.isArray(tools)) return undefined;
   const result = tools.map((tool) => ({

@@ -6,6 +6,7 @@ import { DockyardError } from "../../../packages/core/src/index.mjs";
 import {
   DsmlStreamFilter,
   finishReason,
+  guardEmptyCompletion,
   normalizeUsage,
   parseDsmlCalls,
   readSseEvents,
@@ -837,7 +838,7 @@ export function createOpenRouterFreeNativeExecutor({
   env = process.env,
   timeoutMs = 120_000,
 } = {}) {
-  return async function* executeOpenRouterFreeStream(input = {}, maybeInvocation = {}, maybeContext = {}) {
+  const executeOpenRouterFreeStream = async function*(input = {}, maybeInvocation = {}, maybeContext = {}) {
     // Support both calling conventions:
     // 1) driver.stream: executor({ request, account, credential, signal })
     // 2) direct invocation: executor(request, invocation, context)
@@ -1215,15 +1216,6 @@ export function createOpenRouterFreeNativeExecutor({
       stop = "tool_calls";
     }
 
-    if (!substantiveYielded) {
-      // Some stealth models emit encrypted reasoning_details without visible text on short max_tokens.
-      // Emit a space so DSH does not treat a valid 200 completion as an empty stream error.
-      const idx = nextIndex++;
-      yield { type: "block-start", index: idx, blockType: "text" };
-      yield { type: "text-delta", index: idx, text: " " };
-      yield { type: "block-end", index: idx, block: { type: "text", text: " " } };
-    }
-
     if (rawUsage) {
       yield {
         type: "usage",
@@ -1236,4 +1228,5 @@ export function createOpenRouterFreeNativeExecutor({
       ...(rawUsage ? { usage: normalizeUsage(rawUsage) } : {}),
     };
   };
+  return guardEmptyCompletion(executeOpenRouterFreeStream, { providerId: "openrouter-free" });
 }

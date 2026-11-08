@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import {
+  guardEmptyCompletion,
   fetchNativeResponse,
   finishReason,
   nativeProviderError,
@@ -429,7 +430,7 @@ export function createClaudeNativeExecutor({
     return streamClaudeResponse(response);
   };
   executor.nativeTransport = "anthropic-messages";
-  return executor;
+  return guardEmptyCompletion(executor, { providerId: PROVIDER_ID });
 }
 
 export const claudeNativeTransportConstants = Object.freeze({

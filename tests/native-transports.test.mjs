@@ -13,6 +13,7 @@ import { createCursorNativeExecutor } from "../modules/provider-cursor/src/index
 import { bytesField, encodeAgentRunRequest, frameConnectMessage, stringField } from "../modules/provider-cursor/src/native-protocol.mjs";
 import {
   fetchNativeResponse,
+  guardEmptyCompletion,
   nativeProviderError,
   readSseEvents,
   validateNativeEndpoint,
@@ -667,7 +668,11 @@ test("native HTTP errors keep the upstream rate-limit signal without leaking raw
   });
 
   await assert.rejects(
-    () => executor({ request: { model: "gemini-3.7-flash-medium", messages: [{ role: "user", content: "Hi" }] } }),
+    // Executors are guarded generators now, so the failure surfaces while the
+    // stream is drained rather than at call time.
+    async () => {
+      for await (const event of executor({ request: { model: "gemini-3.7-flash-medium", messages: [{ role: "user", content: "Hi" }] } })) void event;
+    },
     (error) => {
       assert.equal(error.status, 429);
       assert.equal(error.code, 429);
@@ -1179,4 +1184,88 @@ test("Grok sends a tool call once, as tool_calls, never as marker text", async (
   const second = onlyCall.find((message) => message.role === "assistant");
   assert.equal(second.content, "");
   assert.equal(second.tool_calls.length, 1);
+});
+
+// A completion that only thinks is not an answer. The guard wraps every native
+// executor, so these cases describe what all providers now do.
+function guardedFixture(attempts) {
+  let calls = 0;
+  const seen = [];
+  const guarded = guardEmptyCompletion(async function* (envelope = {}) {
+    const attempt = attempts[Math.min(calls, attempts.length - 1)];
+    calls += 1;
+    seen.push(envelope?.request?.messages ?? []);
+    yield* attempt;
+  }, { providerId: "fixture" });
+  return { guarded, get calls() { return calls; }, seen };
+}
+
+const thinkingOnly = [
+  { type: "block-start", index: 1, blockType: "reasoning" },
+  { type: "reasoning-delta", index: 1, text: "thinking..." },
+  { type: "block-end", index: 1, block: { type: "reasoning", text: "thinking..." } },
+  { type: "finish", reason: { kind: "stop" } },
+];
+
+const realAnswer = [
+  { type: "block-start", index: 1, blockType: "text" },
+  { type: "text-delta", index: 1, text: "answer" },
+  { type: "block-end", index: 1, block: { type: "text", text: "answer" } },
+  { type: "finish", reason: { kind: "stop" } },
+];
+
+test("the guard retries a thinking-only completion instead of ending the turn", async () => {
+  const fixture = guardedFixture([thinkingOnly, realAnswer]);
+  const events = [];
+  for await (const event of fixture.guarded({ request: { messages: [{ role: "user", content: "hi" }] } })) {
+    events.push(event);
+  }
+  assert.equal(fixture.calls, 2);
+  // The abandoned attempt must not leak into the host stream: the answer
+  // attempt carries no reasoning at all, so nothing should arrive.
+  assert.equal(events.filter((event) => event.type === "reasoning-delta").length, 0);
+  assert.deepEqual(events.filter((event) => event.type === "text-delta").map((event) => event.text), ["answer"]);
+  // The retry explains what went wrong.
+  assert.ok(fixture.seen[1].some((message) => String(message.content).includes("只写了思考过程")));
+});
+
+test("the guard fails loudly when every attempt only thinks", async () => {
+  const fixture = guardedFixture([thinkingOnly]);
+  await assert.rejects(
+    async () => {
+      for await (const event of fixture.guarded({ request: { messages: [{ role: "user", content: "hi" }] } })) void event;
+    },
+    (error) => {
+      assert.equal(error.code, "EMPTY_COMPLETION");
+      return true;
+    },
+  );
+  assert.equal(fixture.calls, 3, "the first attempt plus two retries");
+});
+
+test("the guard leaves a real answer untouched", async () => {
+  const fixture = guardedFixture([realAnswer]);
+  const events = [];
+  for await (const event of fixture.guarded({ request: { messages: [{ role: "user", content: "hi" }] } })) {
+    events.push(event);
+  }
+  assert.equal(fixture.calls, 1);
+  assert.equal(events.at(-1).type, "finish");
+});
+
+test("the guard can wrap an async function that resolves to a stream", async () => {
+  let calls = 0;
+  const guarded = guardEmptyCompletion(async (envelope = {}) => {
+    calls += 1;
+    return (async function* () {
+      yield* calls === 1 ? thinkingOnly : realAnswer;
+    })();
+  }, { providerId: "fixture" });
+
+  const events = [];
+  for await (const event of guarded({ request: { messages: [{ role: "user", content: "hi" }] } })) {
+    events.push(event);
+  }
+  assert.equal(calls, 2);
+  assert.deepEqual(events.filter((event) => event.type === "text-delta").map((event) => event.text), ["answer"]);
 });

@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 
 import {
+  guardEmptyCompletion,
   fetchNativeResponse,
   finishReason,
   nativeProviderError,
@@ -267,7 +268,7 @@ export function createGrokNativeExecutor({
     return streamGrokResponse(response);
   };
   executor.nativeTransport = "xai-chat-completions";
-  return executor;
+  return guardEmptyCompletion(executor, { providerId: PROVIDER_ID });
 }
 
 export const grokNativeTransportConstants = Object.freeze({

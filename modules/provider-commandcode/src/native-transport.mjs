@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   DsmlStreamFilter,
+  guardEmptyCompletion,
   cleanupNativeResponse,
   fetchNativeResponse,
   finishReason,
@@ -314,7 +315,7 @@ export function createCommandCodeNativeExecutor({
     defaultEndpoint: DEFAULT_COMMANDCODE_GENERATE_ENDPOINT,
   });
 
-  return async function* commandCodeNativeExecutor({
+  async function* commandCodeNativeExecutor({
     request = {},
     account = null,
     credential = null,
@@ -629,4 +630,5 @@ export function createCommandCodeNativeExecutor({
       break;
     }
   };
+  return guardEmptyCompletion(commandCodeNativeExecutor, { providerId: PROVIDER_ID });
 }

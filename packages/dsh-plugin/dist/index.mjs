@@ -5874,6 +5874,70 @@ function finishReason(value, fallback = "stop") {
   if (reason.includes("error") || reason.includes("cancel")) return { kind: "error" };
   return { kind: "stop" };
 }
+var EMPTY_COMPLETION_NUDGE = "\u4E0A\u4E00\u6B21\u56DE\u590D\u53EA\u5199\u4E86\u601D\u8003\u8FC7\u7A0B\uFF0C\u6CA1\u6709\u7ED9\u51FA\u56DE\u7B54\u4E5F\u6CA1\u6709\u8C03\u7528\u5DE5\u5177\u3002\u8BF7\u76F4\u63A5\u7528\u6B63\u6587\u56DE\u7B54\uFF0C\u6216\u76F4\u63A5\u8C03\u7528\u9700\u8981\u7684\u5DE5\u5177\uFF0C\u4E0D\u8981\u518D\u8F93\u51FA\u601D\u8003\u8FC7\u7A0B\u3002";
+function isEmptyCompletionOutput(event) {
+  if (event?.type === "text-delta" || event?.type === "tool-call-delta") return true;
+  if (event?.type === "block-start") return event.blockType !== "reasoning";
+  if (event?.type === "block-end") return event.block?.type !== "reasoning";
+  return false;
+}
+function withEmptyCompletionNudge(envelope2, nudge) {
+  const base = envelope2 && typeof envelope2 === "object" && "request" in envelope2 ? envelope2 : { request: envelope2 ?? {} };
+  const request = base.request ?? {};
+  if (Array.isArray(request.messages)) {
+    return { ...base, request: { ...request, messages: [...request.messages, { role: "system", content: nudge }] } };
+  }
+  const system = typeof request.system === "string" && request.system.length > 0 ? `${request.system}
+
+${nudge}` : nudge;
+  return { ...base, request: { ...request, system } };
+}
+function guardEmptyCompletion(executor, {
+  providerId = "provider",
+  nudge = EMPTY_COMPLETION_NUDGE,
+  maxEmptyAttempts = 2
+} = {}) {
+  return async function* guardedExecutor(...args) {
+    const envelope2 = args[0] ?? {};
+    const signal = envelope2?.signal ?? envelope2?.request?.signal;
+    const canNudge = Boolean(nudge) && envelope2 && typeof envelope2 === "object" && ("request" in envelope2 || "credential" in envelope2);
+    for (let attempt = 0; ; attempt += 1) {
+      if (signal?.aborted) {
+        const abort = new Error("aborted");
+        abort.name = "AbortError";
+        throw abort;
+      }
+      const attemptArgs = attempt === 0 || !canNudge ? args : [withEmptyCompletionNudge(envelope2, nudge), ...args.slice(1)];
+      const buffered = [];
+      let sawOutput = false;
+      const attemptResult = executor(...attemptArgs);
+      const attemptStream = attemptResult && typeof attemptResult[Symbol.asyncIterator] === "function" ? attemptResult : await attemptResult;
+      if (!attemptStream || typeof attemptStream[Symbol.asyncIterator] !== "function") {
+        throw nativeProviderError(providerId, "provider executor did not return a stream");
+      }
+      for await (const event of attemptStream) {
+        if (sawOutput) {
+          yield event;
+          continue;
+        }
+        buffered.push(event);
+        if (isEmptyCompletionOutput(event)) {
+          sawOutput = true;
+          for (const pending of buffered) yield pending;
+          buffered.length = 0;
+        }
+      }
+      if (sawOutput) return;
+      if (attempt >= maxEmptyAttempts) {
+        throw nativeProviderError(
+          providerId,
+          "\u6A21\u578B\u53EA\u8F93\u51FA\u4E86\u601D\u8003\u5185\u5BB9\uFF0C\u6CA1\u6709\u7ED9\u51FA\u56DE\u7B54\u6216\u5DE5\u5177\u8C03\u7528\uFF1B\u5DF2\u81EA\u52A8\u91CD\u8BD5\u4ECD\u65E0\u7ED3\u679C\uFF0C\u8BF7\u91CD\u8BD5\u6216\u6362\u4E00\u4E2A\u6A21\u578B",
+          { code: "EMPTY_COMPLETION" }
+        );
+      }
+    }
+  };
+}
 function buildOpenAiTools(tools) {
   if (!Array.isArray(tools)) return void 0;
   const result = tools.map((tool) => ({
@@ -7369,7 +7433,7 @@ function createAntigravityNativeExecutor({
     return streamAntigravityResponse(response, context);
   };
   executor.nativeTransport = "gemini-stream-generate-content";
-  return executor;
+  return guardEmptyCompletion(executor, { providerId: PROVIDER_ID2 });
 }
 function createAntigravityNativeQuotaReader({
   endpoint: endpoint2 = process.env.DOCKYARD_ANTIGRAVITY_QUOTA_ENDPOINT || DEFAULT_QUOTA_ENDPOINT,
@@ -10621,7 +10685,7 @@ function createGrokNativeExecutor({
     return streamGrokResponse(response);
   };
   executor.nativeTransport = "xai-chat-completions";
-  return executor;
+  return guardEmptyCompletion(executor, { providerId: PROVIDER_ID5 });
 }
 var grokNativeTransportConstants = Object.freeze({
   providerId: PROVIDER_ID5,
@@ -11298,7 +11362,7 @@ function createClaudeNativeExecutor({
     return streamClaudeResponse(response);
   };
   executor.nativeTransport = "anthropic-messages";
-  return executor;
+  return guardEmptyCompletion(executor, { providerId: PROVIDER_ID6 });
 }
 var claudeNativeTransportConstants = Object.freeze({
   providerId: PROVIDER_ID6,
@@ -14266,7 +14330,7 @@ function createCommandCodeNativeExecutor({
   const validatedEndpoint = validateNativeEndpoint(endpoint2, "COMMANDCODE_ENDPOINT", {
     defaultEndpoint: DEFAULT_COMMANDCODE_GENERATE_ENDPOINT
   });
-  return async function* commandCodeNativeExecutor({
+  async function* commandCodeNativeExecutor({
     request = {},
     account = null,
     credential = null,
@@ -14553,7 +14617,9 @@ function createCommandCodeNativeExecutor({
       };
       break;
     }
-  };
+  }
+  ;
+  return guardEmptyCompletion(commandCodeNativeExecutor, { providerId: PROVIDER_ID11 });
 }
 
 // modules/provider-commandcode/src/driver.mjs
@@ -15592,54 +15658,7 @@ function createHermesNativeExecutor({
     };
   }
   ;
-  const MAX_EMPTY_ATTEMPTS = 2;
-  const EMPTY_ATTEMPT_NUDGE = "\u4E0A\u4E00\u6B21\u56DE\u590D\u53EA\u5199\u4E86\u601D\u8003\u8FC7\u7A0B\uFF0C\u6CA1\u6709\u7ED9\u51FA\u56DE\u7B54\u4E5F\u6CA1\u6709\u8C03\u7528\u5DE5\u5177\u3002\u8BF7\u76F4\u63A5\u7528\u6B63\u6587\u56DE\u7B54\u7528\u6237\uFF0C\u6216\u76F4\u63A5\u8C03\u7528\u9700\u8981\u7684\u5DE5\u5177\uFF0C\u4E0D\u8981\u518D\u8F93\u51FA\u601D\u8003\u8FC7\u7A0B\u3002";
-  function withNudge(envelope2) {
-    const base = envelope2 && typeof envelope2 === "object" && "request" in envelope2 ? envelope2 : { request: envelope2 ?? {} };
-    const request = base.request ?? {};
-    const messages = Array.isArray(request.messages) ? request.messages : [];
-    return {
-      ...base,
-      request: {
-        ...request,
-        messages: [...messages, { role: "system", content: EMPTY_ATTEMPT_NUDGE }]
-      }
-    };
-  }
-  return async function* hermesNativeExecutor(envelope2 = {}) {
-    const signal = envelope2?.signal ?? envelope2?.request?.signal;
-    for (let attempt = 0; ; attempt += 1) {
-      if (signal?.aborted) {
-        const abort = new Error("aborted");
-        abort.name = "AbortError";
-        throw abort;
-      }
-      const buffered = [];
-      let sawOutput = false;
-      const attemptEnvelope = attempt === 0 ? envelope2 : withNudge(envelope2);
-      for await (const event of runHermesAttempt(attemptEnvelope)) {
-        if (sawOutput) {
-          yield event;
-          continue;
-        }
-        buffered.push(event);
-        const isOutput = event.type === "text-delta" || event.type === "tool-call-delta" || event.type === "block-start" && event.blockType !== "reasoning" || event.type === "block-end" && event.block?.type !== "reasoning";
-        if (isOutput) {
-          sawOutput = true;
-          for (const pending of buffered) yield pending;
-          buffered.length = 0;
-        }
-      }
-      if (sawOutput) return;
-      if (attempt >= MAX_EMPTY_ATTEMPTS) {
-        throw nativeProviderError(
-          PROVIDER_ID13,
-          "\u6A21\u578B\u53EA\u8F93\u51FA\u4E86\u601D\u8003\u5185\u5BB9\uFF0C\u6CA1\u6709\u7ED9\u51FA\u56DE\u7B54\u6216\u5DE5\u5177\u8C03\u7528\uFF1B\u5DF2\u81EA\u52A8\u91CD\u8BD5\u4ECD\u65E0\u7ED3\u679C\uFF0C\u8BF7\u91CD\u8BD5\u6216\u6362\u4E00\u4E2A\u6A21\u578B",
-          { code: "EMPTY_COMPLETION" }
-        );
-      }
-    }
-  };
+  return guardEmptyCompletion(runHermesAttempt, { providerId: PROVIDER_ID13 });
 }
 
 // modules/provider-hermes/src/driver.mjs
@@ -16774,7 +16793,7 @@ function createOpenRouterFreeNativeExecutor({
   env = process.env,
   timeoutMs = 12e4
 } = {}) {
-  return async function* executeOpenRouterFreeStream(input = {}, maybeInvocation = {}, maybeContext = {}) {
+  const executeOpenRouterFreeStream = async function* (input = {}, maybeInvocation = {}, maybeContext = {}) {
     const isWrappedInput = input && typeof input === "object" && ("request" in input || "credential" in input);
     const request = isWrappedInput ? input.request ?? {} : input ?? {};
     const secret = isWrappedInput ? input.credential ?? input.secret ?? null : maybeInvocation?.secret ?? maybeInvocation?.credential ?? maybeContext?.secret ?? null;
@@ -17110,12 +17129,6 @@ function createOpenRouterFreeNativeExecutor({
       }
       stop = "tool_calls";
     }
-    if (!substantiveYielded) {
-      const idx = nextIndex++;
-      yield { type: "block-start", index: idx, blockType: "text" };
-      yield { type: "text-delta", index: idx, text: " " };
-      yield { type: "block-end", index: idx, block: { type: "text", text: " " } };
-    }
     if (rawUsage) {
       yield {
         type: "usage",
@@ -17128,6 +17141,7 @@ function createOpenRouterFreeNativeExecutor({
       ...rawUsage ? { usage: normalizeUsage(rawUsage) } : {}
     };
   };
+  return guardEmptyCompletion(executeOpenRouterFreeStream, { providerId: "openrouter-free" });
 }
 
 // modules/provider-openrouter-free/src/driver.mjs
@@ -18274,7 +18288,7 @@ function createTraeNativeExecutor({
   fetchImpl = fetch,
   timeoutMs = 3e5
 } = {}) {
-  return async function executeTrae({ request = {}, credential, signal } = {}) {
+  async function executeTrae({ request = {}, credential, signal } = {}) {
     const account = credential ?? {};
     const body = traeChatBody(request, { site, model: request.model });
     const controller = new AbortController();
@@ -18388,7 +18402,9 @@ function createTraeNativeExecutor({
         signal?.removeEventListener?.("abort", abort);
       }
     })();
-  };
+  }
+  ;
+  return guardEmptyCompletion(executeTrae, { providerId: PROVIDER_ID16 });
 }
 async function readTraeCredits({ credential, site = TRAE_CN_SITE, fetchImpl = fetch, timeoutMs = 2e4 } = {}) {
   const response = await fetchImpl(`${site.authHost}/trae/api/v2/pay/ide_user_ent_usage`, {
