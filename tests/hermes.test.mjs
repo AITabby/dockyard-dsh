@@ -515,3 +515,101 @@ test("createHermesNativeExecutor parses DSML tool calls emitted inside content d
   assert.ok(finish);
   assert.equal(finish.reason.kind, "tool-calls");
 });
+
+function hermesSseResponse(lines) {
+  return new Response(new ReadableStream({
+    start(controller) {
+      for (const line of lines) controller.enqueue(new TextEncoder().encode(line));
+      controller.close();
+    },
+  }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
+
+const reasoningOnlySse = [
+  `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "Only thinking, no answer." } }] })}\n\n`,
+  `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`,
+];
+
+const answerSse = [
+  `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "Now I know." } }] })}\n\n`,
+  `data: ${JSON.stringify({ choices: [{ delta: { content: "Final answer." } }] })}\n\n`,
+  `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`,
+];
+
+test("a turn that only thinks is retried and the answer survives", async () => {
+  let calls = 0;
+  const bodies = [];
+  const executor = createHermesNativeExecutor({
+    apiKey: "sk-test-key",
+    fetchImpl: async (_url, init) => {
+      calls += 1;
+      bodies.push(JSON.parse(init.body));
+      return calls === 1 ? hermesSseResponse(reasoningOnlySse) : hermesSseResponse(answerSse);
+    },
+  });
+
+  const events = [];
+  for await (const event of executor({ request: { model: "anthropic/claude-haiku-5.5", messages: [{ role: "user", content: "Hi" }] } })) {
+    events.push(event);
+  }
+
+  assert.equal(calls, 2, "the empty attempt should have been retried once");
+  // The retry must say what went wrong, otherwise it just thinks again.
+  const retried = bodies[1].messages;
+  assert.ok(
+    retried.some((message) => message.role === "system" && String(message.content).includes("只写了思考过程")),
+    "the retry should carry the corrective nudge",
+  );
+  assert.equal(bodies[0].messages.some((message) => String(message.content).includes("只写了思考过程")), false);
+  // The host must never see the abandoned attempt: no duplicated reasoning and
+  // exactly one answer.
+  const texts = events.filter((event) => event.type === "text-delta").map((event) => event.text);
+  assert.deepEqual(texts, ["Final answer."]);
+  const finishes = events.filter((event) => event.type === "finish");
+  assert.equal(finishes.length, 1);
+  assert.equal(finishes[0].reason.kind, "stop");
+});
+
+test("thinking forever fails loudly instead of ending the turn in silence", async () => {
+  let calls = 0;
+  const executor = createHermesNativeExecutor({
+    apiKey: "sk-test-key",
+    fetchImpl: async () => {
+      calls += 1;
+      return hermesSseResponse(reasoningOnlySse);
+    },
+  });
+
+  await assert.rejects(
+    async () => {
+      for await (const event of executor({ request: { model: "anthropic/claude-haiku-5.5", messages: [{ role: "user", content: "Hi" }] } })) {
+        void event;
+      }
+    },
+    (error) => {
+      assert.equal(error.code, "EMPTY_COMPLETION");
+      assert.match(String(error.message), /思考内容/u);
+      return true;
+    },
+  );
+  assert.equal(calls, 3, "two retries after the first attempt");
+});
+
+test("a normal answer is streamed without a second request", async () => {
+  let calls = 0;
+  const executor = createHermesNativeExecutor({
+    apiKey: "sk-test-key",
+    fetchImpl: async () => {
+      calls += 1;
+      return hermesSseResponse(answerSse);
+    },
+  });
+
+  const events = [];
+  for await (const event of executor({ request: { model: "anthropic/claude-haiku-5.5", messages: [{ role: "user", content: "Hi" }] } })) {
+    events.push(event);
+  }
+
+  assert.equal(calls, 1);
+  assert.deepEqual(events.filter((event) => event.type === "text-delta").map((event) => event.text), ["Final answer."]);
+});

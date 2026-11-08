@@ -7,6 +7,7 @@ import {
   DsmlStreamFilter,
   fetchNativeResponse,
   finishReason,
+  nativeProviderError,
   normalizeUsage,
   readSseEvents,
   resolveImageData,
@@ -273,7 +274,7 @@ export function createHermesNativeExecutor({
     defaultEndpoint: DEFAULT_HERMES_CHAT_ENDPOINT,
   });
 
-  return async function* hermesNativeExecutor(envelope = {}) {
+  async function* runHermesAttempt(envelope = {}) {
     const req = (envelope && typeof envelope === "object" && "request" in envelope)
       ? (envelope.request ?? {})
       : (envelope ?? {});
@@ -500,5 +501,79 @@ export function createHermesNativeExecutor({
       reason: finishReason(stop),
       ...(rawUsage ? { usage: normalizeUsage(rawUsage) } : {}),
     };
+  };
+
+  // Some models occasionally spend their whole turn inside the reasoning
+  // channel and finish without ever producing text or a tool call. The stream
+  // is valid, so the host sees a completed turn that did nothing — the agent
+  // looks like it stopped by itself mid-thought. Retry such an attempt while
+  // nothing has been handed to the host yet, and fail loudly if it persists
+  // instead of ending the turn in silence.
+  const MAX_EMPTY_ATTEMPTS = 2;
+
+  // Retrying the very same request can reproduce the same stall, so the second
+  // attempt tells the model what went wrong and what to do instead.
+  const EMPTY_ATTEMPT_NUDGE = "上一次回复只写了思考过程，没有给出回答也没有调用工具。"
+    + "请直接用正文回答用户，或直接调用需要的工具，不要再输出思考过程。";
+
+  function withNudge(envelope) {
+    const base = (envelope && typeof envelope === "object" && "request" in envelope)
+      ? envelope
+      : { request: envelope ?? {} };
+    const request = base.request ?? {};
+    const messages = Array.isArray(request.messages) ? request.messages : [];
+    return {
+      ...base,
+      request: {
+        ...request,
+        messages: [...messages, { role: "system", content: EMPTY_ATTEMPT_NUDGE }],
+      },
+    };
+  }
+
+  return async function* hermesNativeExecutor(envelope = {}) {
+    const signal = envelope?.signal ?? envelope?.request?.signal;
+    for (let attempt = 0; ; attempt += 1) {
+      if (signal?.aborted) {
+        const abort = new Error("aborted");
+        abort.name = "AbortError";
+        throw abort;
+      }
+
+      // Hold events back only until the attempt proves it has real output.
+      // Reasoning alone is not an answer, so it stays buffered until a text
+      // block or a tool call follows it.
+      const buffered = [];
+      let sawOutput = false;
+
+      const attemptEnvelope = attempt === 0 ? envelope : withNudge(envelope);
+      for await (const event of runHermesAttempt(attemptEnvelope)) {
+        if (sawOutput) {
+          yield event;
+          continue;
+        }
+        buffered.push(event);
+        // Only text and tool calls count as output. Reasoning, usage and the
+        // finish marker alone mean the model never actually answered.
+        const isOutput = event.type === "text-delta"
+          || event.type === "tool-call-delta"
+          || (event.type === "block-start" && event.blockType !== "reasoning")
+          || (event.type === "block-end" && event.block?.type !== "reasoning");
+        if (isOutput) {
+          sawOutput = true;
+          for (const pending of buffered) yield pending;
+          buffered.length = 0;
+        }
+      }
+
+      if (sawOutput) return;
+      if (attempt >= MAX_EMPTY_ATTEMPTS) {
+        throw nativeProviderError(
+          PROVIDER_ID,
+          "模型只输出了思考内容，没有给出回答或工具调用；已自动重试仍无结果，请重试或换一个模型",
+          { code: "EMPTY_COMPLETION" },
+        );
+      }
+    }
   };
 }

@@ -15393,7 +15393,7 @@ function createHermesNativeExecutor({
     providerId: PROVIDER_ID13,
     defaultEndpoint: DEFAULT_HERMES_CHAT_ENDPOINT
   });
-  return async function* hermesNativeExecutor(envelope2 = {}) {
+  async function* runHermesAttempt(envelope2 = {}) {
     const req = envelope2 && typeof envelope2 === "object" && "request" in envelope2 ? envelope2.request ?? {} : envelope2 ?? {};
     const attachments = envelope2?.attachments ?? req?.attachments;
     const credential = envelope2?.credential ?? req?.credential;
@@ -15590,6 +15590,55 @@ function createHermesNativeExecutor({
       reason: finishReason(stop),
       ...rawUsage ? { usage: normalizeUsage(rawUsage) } : {}
     };
+  }
+  ;
+  const MAX_EMPTY_ATTEMPTS = 2;
+  const EMPTY_ATTEMPT_NUDGE = "\u4E0A\u4E00\u6B21\u56DE\u590D\u53EA\u5199\u4E86\u601D\u8003\u8FC7\u7A0B\uFF0C\u6CA1\u6709\u7ED9\u51FA\u56DE\u7B54\u4E5F\u6CA1\u6709\u8C03\u7528\u5DE5\u5177\u3002\u8BF7\u76F4\u63A5\u7528\u6B63\u6587\u56DE\u7B54\u7528\u6237\uFF0C\u6216\u76F4\u63A5\u8C03\u7528\u9700\u8981\u7684\u5DE5\u5177\uFF0C\u4E0D\u8981\u518D\u8F93\u51FA\u601D\u8003\u8FC7\u7A0B\u3002";
+  function withNudge(envelope2) {
+    const base = envelope2 && typeof envelope2 === "object" && "request" in envelope2 ? envelope2 : { request: envelope2 ?? {} };
+    const request = base.request ?? {};
+    const messages = Array.isArray(request.messages) ? request.messages : [];
+    return {
+      ...base,
+      request: {
+        ...request,
+        messages: [...messages, { role: "system", content: EMPTY_ATTEMPT_NUDGE }]
+      }
+    };
+  }
+  return async function* hermesNativeExecutor(envelope2 = {}) {
+    const signal = envelope2?.signal ?? envelope2?.request?.signal;
+    for (let attempt = 0; ; attempt += 1) {
+      if (signal?.aborted) {
+        const abort = new Error("aborted");
+        abort.name = "AbortError";
+        throw abort;
+      }
+      const buffered = [];
+      let sawOutput = false;
+      const attemptEnvelope = attempt === 0 ? envelope2 : withNudge(envelope2);
+      for await (const event of runHermesAttempt(attemptEnvelope)) {
+        if (sawOutput) {
+          yield event;
+          continue;
+        }
+        buffered.push(event);
+        const isOutput = event.type === "text-delta" || event.type === "tool-call-delta" || event.type === "block-start" && event.blockType !== "reasoning" || event.type === "block-end" && event.block?.type !== "reasoning";
+        if (isOutput) {
+          sawOutput = true;
+          for (const pending of buffered) yield pending;
+          buffered.length = 0;
+        }
+      }
+      if (sawOutput) return;
+      if (attempt >= MAX_EMPTY_ATTEMPTS) {
+        throw nativeProviderError(
+          PROVIDER_ID13,
+          "\u6A21\u578B\u53EA\u8F93\u51FA\u4E86\u601D\u8003\u5185\u5BB9\uFF0C\u6CA1\u6709\u7ED9\u51FA\u56DE\u7B54\u6216\u5DE5\u5177\u8C03\u7528\uFF1B\u5DF2\u81EA\u52A8\u91CD\u8BD5\u4ECD\u65E0\u7ED3\u679C\uFF0C\u8BF7\u91CD\u8BD5\u6216\u6362\u4E00\u4E2A\u6A21\u578B",
+          { code: "EMPTY_COMPLETION" }
+        );
+      }
+    }
   };
 }
 
