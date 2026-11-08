@@ -258,9 +258,23 @@ export function createClaudeCatalogLoader({ registryLoader = null } = {}) {
   return async function loadCatalog({ force = false } = {}) {
     if (cached && !force) return cached;
     const registry = typeof registryLoader === "function" ? await registryLoader() : [];
+    const rows = Array.isArray(registry) ? registry.filter(Boolean) : [];
+    // Only Anthropic's own rows belong in a Claude subscription catalog. Other
+    // providers (Vercel AI Gateway, Cloudflare, OpenCode, ...) also speak the
+    // Anthropic messages protocol, so matching on `api` alone pulled hundreds
+    // of foreign models — poolside/laguna-s-2.1-free among them — into the
+    // Claude panel, where they could never authenticate. Fall back to the id
+    // prefix only if the registry carries no provider field at all.
+    // Rows that name another provider are never Anthropic's. Rows with no
+    // provider at all are alias rows the registry adds to enrich the same
+    // Claude model, so they stay when the id looks like Anthropic's.
+    const isClaudeRow = (rawModel) => rawModel.provider === "anthropic"
+      || (rawModel.provider == null
+        && rawModel.api === "anthropic-messages"
+        && /^claude-/u.test(String(rawModel.id ?? "")));
     const modelsById = new Map();
-    for (const rawModel of (Array.isArray(registry) ? registry : [])) {
-      if (!rawModel || (rawModel.provider !== "anthropic" && rawModel.api !== "anthropic-messages")) continue;
+    for (const rawModel of rows) {
+      if (!isClaudeRow(rawModel)) continue;
       const model = catalogModel(rawModel);
       if (typeof model.id !== "string" || model.id.length === 0) continue;
       const previous = modelsById.get(model.id);

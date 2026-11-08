@@ -196,8 +196,8 @@ const indexDocument = {
         zh: "Dockyard 账号池与原生 Provider",
       },
       description: {
-        en: "Native account-pool and provider plugin for DeepSeek Harness — Codex, Antigravity, Grok, Claude, Cursor, WorkBuddy, Command Code, Hermes and OpenRouter Free, on macOS and Windows.",
-        zh: "DeepSeek Harness 原生账号池与官方 Provider 插件——支持 Codex、Antigravity、Grok、Claude、Cursor、WorkBuddy、Command Code、Hermes、OpenRouter Free，macOS 与 Windows 均可使用。",
+        en: "Native account-pool and provider plugin for DeepSeek Harness — Codex, Antigravity, Grok, Claude, Cursor, Command Code, Hermes and OpenRouter Free, on macOS and Windows.",
+        zh: "DeepSeek Harness 原生账号池与官方 Provider 插件——支持 Codex、Antigravity、Grok、Claude、Cursor、Command Code、Hermes、OpenRouter Free，macOS 与 Windows 均可使用。",
       },
       icon: iconDataUrl,
       author: "AITabby",
@@ -219,7 +219,6 @@ const indexDocument = {
           "grok",
           "claude",
           "cursor",
-          "workbuddy",
           "commandcode",
           "command-code",
           "hermes",

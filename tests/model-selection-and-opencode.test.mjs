@@ -174,35 +174,67 @@ test("OpenCode provider module manifests and catalog parsing", async () => {
   assert.equal(parsed.models[1].name, "test-free (Free)");
 });
 
-test("DockyardRuntime auto-imports WorkBuddy free account and LLM adapter filters by modelSelection", async () => {
+test("DockyardRuntime auto-imports a free account and the LLM adapter filters by modelSelection", async () => {
   const { DockyardRuntime } = await import("../packages/runtime/src/dockyard-runtime.mjs");
   const { createDockyardLlmAdapter } = await import("../packages/dsh-bridge/src/llm-adapter.mjs");
+  const { createHermesDriver, createHermesModule } = await import("../modules/provider-hermes/src/index.mjs");
+  const { mkdtempSync, writeFileSync, unlinkSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
 
-  const stateStore = memoryStateStore({});
-  const runtime = new DockyardRuntime({
-    stateStore,
-  });
-  await runtime.init();
+  // Hermes auto-provisions from its local auth file, which gives this test a
+  // provider whose catalog exists without any network round-trip.
+  const dir = mkdtempSync(join(tmpdir(), "dockyard-selection-"));
+  const authPath = join(dir, "auth.json");
+  writeFileSync(authPath, JSON.stringify({
+    accounts: [{ accountId: "hermes-acc-1", displayName: "Hermes Account 1", apiKey: "sk-hermes-1", balance: 50 }],
+  }));
+  const previousAuthPath = process.env.HERMES_AUTH_PATH;
+  process.env.HERMES_AUTH_PATH = authPath;
 
-  const snapshot = runtime.snapshot();
-  const wbEntry = snapshot.providers.find((p) => p.providerId === "workbuddy");
-  assert.ok(wbEntry, "WorkBuddy provider should be present");
-  assert.equal(wbEntry.accounts.length, 1, "WorkBuddy should auto-provision the free account");
-  assert.equal(wbEntry.accounts[0].accountId, "workbuddy-free");
+  try {
+    const stateStore = memoryStateStore({});
+    const runtime = new DockyardRuntime({
+      stateStore,
+      secretStore: {
+        data: new Map(),
+        async write(ref, value) { this.data.set(ref, value); },
+        async read(ref) { return this.data.get(ref); },
+      },
+      providers: [{
+        module: createHermesModule({
+          driver: createHermesDriver({
+            apiKey: "sk-mock-key",
+            fetchImpl: async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
+          }),
+        }),
+      }],
+    });
+    await runtime.init();
 
-  const adapter = createDockyardLlmAdapter({ runtime, providerIds: ["workbuddy"] });
+    const snapshot = runtime.snapshot();
+    const entry = snapshot.providers.find((provider) => provider.providerId === "hermes");
+    assert.ok(entry, "Hermes provider should be present");
+    assert.equal(entry.accounts.length, 1, "Hermes should auto-provision the account from its auth file");
 
-  // Initially all models returned
-  const allModels = await adapter.listModels("workbuddy");
-  assert.ok(allModels.length >= 2, "WorkBuddy should list available models by default");
+    const adapter = createDockyardLlmAdapter({ runtime, providerIds: ["hermes"] });
 
-  // Restrict to subset
-  const subset = [allModels[0].id];
-  await runtime.setModelSelection("workbuddy", subset);
+    // Initially all models are returned.
+    const allModels = await adapter.listModels("hermes");
+    assert.ok(allModels.length >= 2, "the catalog should be listed by default");
 
-  const filteredModels = await adapter.listModels("workbuddy");
-  assert.equal(filteredModels.length, 1);
-  assert.deepEqual(filteredModels.map((m) => m.id), subset);
+    // Restricting the selection narrows the adapter's list.
+    const subset = [allModels[0].id];
+    await runtime.setModelSelection("hermes", subset);
+
+    const filteredModels = await adapter.listModels("hermes");
+    assert.equal(filteredModels.length, 1);
+    assert.deepEqual(filteredModels.map((model) => model.id), subset);
+  } finally {
+    if (previousAuthPath === undefined) delete process.env.HERMES_AUTH_PATH;
+    else process.env.HERMES_AUTH_PATH = previousAuthPath;
+    try { unlinkSync(authPath); } catch {}
+  }
 });
 
 test("createOpencodeNativeExecutor yields standard DSH streaming protocol", async () => {

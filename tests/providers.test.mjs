@@ -2627,3 +2627,32 @@ test("Grok official CLI executor keeps streaming-json and live model selection",
   assert.ok(calls[0].args.includes("--reasoning-effort") && calls[0].args.includes("high"));
   assert.deepEqual(chunks.filter((chunk) => chunk.type === "text-delta").map((chunk) => chunk.text), ["Grok response"]);
 });
+
+test("Claude catalog keeps Anthropic's own rows and drops other gateways", async () => {
+  // Every row below speaks the Anthropic messages protocol, but only the first
+  // two are Anthropic models. A real registry has 276 such rows (192 of them
+  // from Vercel AI Gateway), and they used to fill the Claude panel with models
+  // that could never authenticate — poolside/laguna-s-2.1-free was one.
+  const loader = createClaudeCatalogLoader({
+    registryLoader: async () => [
+      { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "anthropic", api: "anthropic-messages", contextWindow: 1_000_000 },
+      { id: "claude-fable-5", name: "Claude Fable 5", provider: "anthropic", api: "anthropic-messages", contextWindow: 1_000_000 },
+      { id: "poolside/laguna-s-2.1-free", name: "Laguna S 2.1 Free", provider: "vercel-ai-gateway", api: "anthropic-messages", contextWindow: 250_000 },
+      { id: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "openrouter", api: "anthropic-messages" },
+    ],
+  });
+  const catalog = await loader({});
+  assert.deepEqual(catalog.models.map((model) => model.id), ["claude-sonnet-4-6", "claude-fable-5"]);
+});
+
+test("Claude catalog falls back to ids when the registry has no provider field", async () => {
+  const loader = createClaudeCatalogLoader({
+    registryLoader: async () => [
+      { id: "claude-opus-4-6", name: "Claude Opus 4.6", api: "anthropic-messages", contextWindow: 1_000_000 },
+      { id: "some-other-model", name: "Other", api: "anthropic-messages" },
+      { id: "claude-not-messages-api", api: "openai-responses" },
+    ],
+  });
+  const catalog = await loader({});
+  assert.deepEqual(catalog.models.map((model) => model.id), ["claude-opus-4-6"]);
+});

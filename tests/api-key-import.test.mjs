@@ -13,9 +13,9 @@ import {
   createHermesModule,
 } from "../modules/provider-hermes/src/index.mjs";
 import {
-  createWorkbuddyDriver,
-  createWorkbuddyModule,
-} from "../modules/provider-workbuddy/src/index.mjs";
+  createTraeCnDriver,
+  createTraeCnModule,
+} from "../modules/provider-trae-cn/src/index.mjs";
 import { DockyardRuntime } from "../packages/runtime/src/dockyard-runtime.mjs";
 
 function memoryStateStore() {
@@ -146,59 +146,16 @@ test("hermes importSource stores the pasted key and derives a stable account id"
   });
 });
 
-// WorkBuddy is the opposite case: its account lives in the official desktop
-// client and the plugin reads that session. There is no key to paste, so the
-// panel must not offer a field and must not claim health it cannot verify.
-
-test("workbuddy does not advertise a key field", () => {
-  const capabilities = createWorkbuddyModule().manifest.capabilities;
-  assert.ok(!capabilities.includes("api_key_auth"));
-  assert.ok(!capabilities.includes("oauth_authorization"));
-});
-
-test("workbuddy explains that the account comes from the desktop client", async () => {
-  const driver = createWorkbuddyDriver();
-  const instructions = await driver.authorizationInstructions();
-  // Both branches name the desktop client and the scan action; neither may tell
-  // the user to paste a key, because no such key exists.
-  assert.match(instructions, /桌面端/);
-  assert.match(instructions, /扫描本机登录态/);
-  assert.doesNotMatch(instructions, /粘贴/);
-});
-
-test("workbuddy offers no importSource", () => {
-  assert.equal(createWorkbuddyDriver().importSource, undefined);
-});
-
-test("workbuddy refreshAccount reports healthy only when a token resolves", async () => {
-  const driver = createWorkbuddyDriver();
-  const secretStore = memorySecretStore();
-  await secretStore.write("keychain://dockyard-dsh/workbuddy/manual", { access: "wb-token-1234" });
-  const account = { auth: { credentialRef: "keychain://dockyard-dsh/workbuddy/manual" } };
-
-  const refreshed = await driver.refreshAccount(account, { secretStore });
-  assert.equal(refreshed.health.status, "healthy");
-});
-
-test("workbuddy discover does not invent a quota", async () => {
-  const driver = createWorkbuddyDriver();
-  const result = await driver.discover();
-  const candidate = result.candidates[0];
-  // It used to report a hard-coded 100/100 "requests" allowance on every scan.
-  assert.equal(candidate.quota?.remaining, undefined);
-  assert.equal(candidate.quota?.limit, undefined);
-});
-
 test("the runtime surfaces a provider's own authorization instructions", async () => {
   const runtime = new DockyardRuntime({
     stateStore: memoryStateStore(),
     secretStore: memorySecretStore(),
-    providers: [{ module: createWorkbuddyModule({ driver: createWorkbuddyDriver() }) }],
+    providers: [{ module: createTraeCnModule({ driver: createTraeCnDriver() }) }],
   });
   await runtime.init();
 
-  const instructions = await runtime.authorizationInstructions("workbuddy");
-  assert.ok(typeof instructions === "string" && instructions.includes("桌面端"));
+  const instructions = await runtime.authorizationInstructions("trae-cn");
+  assert.ok(typeof instructions === "string" && instructions.includes("授权页"));
 
   // A provider that says nothing keeps the host's generic sentence.
   assert.equal(await runtime.authorizationInstructions("not-a-provider"), null);

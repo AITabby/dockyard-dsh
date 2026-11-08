@@ -1018,8 +1018,8 @@ var init_dockyard_remote_host = __esm({
 });
 
 // packages/dsh-plugin/src/index.mjs
-import { existsSync as existsSync9, readFileSync as readFileSync8 } from "node:fs";
-import { join as join20 } from "node:path";
+import { existsSync as existsSync7, readFileSync as readFileSync6 } from "node:fs";
+import { join as join18 } from "node:path";
 
 // packages/core/src/errors.mjs
 var DockyardError = class extends Error {
@@ -11505,9 +11505,11 @@ function createClaudeCatalogLoader({ registryLoader = null } = {}) {
   return async function loadCatalog({ force = false } = {}) {
     if (cached && !force) return cached;
     const registry = typeof registryLoader === "function" ? await registryLoader() : [];
+    const rows = Array.isArray(registry) ? registry.filter(Boolean) : [];
+    const isClaudeRow = (rawModel) => rawModel.provider === "anthropic" || rawModel.provider == null && rawModel.api === "anthropic-messages" && /^claude-/u.test(String(rawModel.id ?? ""));
     const modelsById = /* @__PURE__ */ new Map();
-    for (const rawModel of Array.isArray(registry) ? registry : []) {
-      if (!rawModel || rawModel.provider !== "anthropic" && rawModel.api !== "anthropic-messages") continue;
+    for (const rawModel of rows) {
+      if (!isClaudeRow(rawModel)) continue;
       const model = catalogModel(rawModel);
       if (typeof model.id !== "string" || model.id.length === 0) continue;
       const previous = modelsById.get(model.id);
@@ -13874,802 +13876,8 @@ function summarizeOpencodeCandidate(candidate2) {
   return candidate2?.displayName ?? candidate2?.email ?? candidate2?.accountId ?? "OpenCode Free";
 }
 
-// modules/provider-workbuddy/src/driver.mjs
-import { existsSync as existsSync5, readdirSync, readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
-import { join as join13 } from "node:path";
-
-// modules/provider-workbuddy/src/native-transport.mjs
-import { execFileSync as execFileSync4 } from "node:child_process";
-import { randomBytes as randomBytes4, randomUUID as randomUUID10 } from "node:crypto";
-import { existsSync as existsSync4, readFileSync as readFileSync3 } from "node:fs";
-import { homedir as homedir11 } from "node:os";
-import { join as join12 } from "node:path";
-function firstString9(...values) {
-  for (const val of values) {
-    if (typeof val === "string" && val.length > 0) return val;
-  }
-  return null;
-}
-var PROVIDER_ID10 = "workbuddy";
-var DEFAULT_WORKBUDDY_ENDPOINT = "https://www.workbuddy.ai/v2/chat/completions";
-var cachedSession = null;
-var cachedSessionExpiry = 0;
-function findWorkbuddyElectronPath() {
-  if (process.env.WORKBUDDY_ELECTRON_PATH && existsSync4(process.env.WORKBUDDY_ELECTRON_PATH)) {
-    return process.env.WORKBUDDY_ELECTRON_PATH;
-  }
-  const candidates = [
-    "/Applications/WorkBuddy AI.app/Contents/MacOS/Electron",
-    "/Applications/WorkBuddy.app/Contents/MacOS/Electron",
-    join12(homedir11(), "Applications/WorkBuddy AI.app/Contents/MacOS/Electron"),
-    join12(homedir11(), "Applications/WorkBuddy.app/Contents/MacOS/Electron")
-  ];
-  for (const candidate2 of candidates) {
-    if (existsSync4(candidate2)) return candidate2;
-  }
-  return null;
-}
-function findWorkbuddyAuthFilePath() {
-  if (process.env.WORKBUDDY_AUTH_FILE_PATH && existsSync4(process.env.WORKBUDDY_AUTH_FILE_PATH)) {
-    return process.env.WORKBUDDY_AUTH_FILE_PATH;
-  }
-  const candidate2 = join12(
-    homedir11(),
-    "Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop-ai.info"
-  );
-  if (existsSync4(candidate2)) return candidate2;
-  return null;
-}
-function findWorkbuddyConfigDir() {
-  if (process.env.WORKBUDDY_CONFIG_DIR && existsSync4(process.env.WORKBUDDY_CONFIG_DIR)) {
-    return process.env.WORKBUDDY_CONFIG_DIR;
-  }
-  const candidates = [
-    join12(homedir11(), ".workbuddy-ai"),
-    join12(homedir11(), ".workbuddy")
-  ];
-  for (const candidate2 of candidates) {
-    if (existsSync4(candidate2)) return candidate2;
-  }
-  return null;
-}
-function extractWorkbuddySession({ force = false } = {}) {
-  const now = Date.now();
-  if (!force && cachedSession && now < cachedSessionExpiry - 6e4) {
-    return cachedSession;
-  }
-  const electronPath = findWorkbuddyElectronPath();
-  const authPath = findWorkbuddyAuthFilePath();
-  const configDir = findWorkbuddyConfigDir();
-  if (!electronPath || !authPath || !configDir) {
-    if (process.env.WORKBUDDY_ACCESS_TOKEN) {
-      const fallback = {
-        accessToken: process.env.WORKBUDDY_ACCESS_TOKEN,
-        uid: process.env.WORKBUDDY_UID || "workbuddy-user",
-        email: process.env.WORKBUDDY_EMAIL || "workbuddy@desktop.ai",
-        nickname: "WorkBuddy User",
-        expiresAt: now + 36e5
-      };
-      cachedSession = fallback;
-      cachedSessionExpiry = fallback.expiresAt;
-      return fallback;
-    }
-    return null;
-  }
-  const script = `
-    const asarMain = "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar/main";
-    const dist = require(asarMain + "/dist.js");
-    const cp = require(asarMain + "/credential-protection.js");
-    dist.s();
-    cp.t();
-
-    const b = process._linkedBinding("electron_browser_workbuddy_storage");
-    const r = b.loggerGet();
-    const i = dist.T(r);
-    const configDir = ${JSON.stringify(configDir)};
-    const o = dist.u({ keyblobPath: dist.l(configDir), protectorKey: i.symmetric.value });
-
-    const bootstrap = {
-      policy: "fields",
-      symmetricKey: i.symmetric.value,
-      userKey: o.value,
-      developerPublicKey: i.developerPublicKey.value
-    };
-    cp._(bootstrap);
-
-    const fs = require("fs");
-    const authPath = ${JSON.stringify(authPath)};
-    const content = fs.readFileSync(authPath, "utf8");
-    const parsed = JSON.parse(content);
-    const codec = cp.v({ purpose: "workbuddy-auth-session", resourceId: "auth/workbuddy-desktop-ai.info" });
-    const fields = [
-      { path: ["auth", "accessToken"] },
-      { path: ["auth", "refreshToken"] },
-      { path: ["account", "phoneNumber"] },
-      { path: ["account", "departmentFullName"] },
-      { path: ["account", "nickname"] },
-      { path: ["account", "email"] }
-    ];
-    const decoded = codec.decode(parsed, fields);
-    const result = {
-      accessToken: decoded.value.auth?.accessToken || null,
-      refreshToken: decoded.value.auth?.refreshToken || null,
-      uid: parsed.account?.uid || null,
-      nickname: decoded.value.account?.nickname || null,
-      email: decoded.value.account?.email || parsed.account?.email || null,
-      expiresAt: decoded.value.auth?.expiresAt || null
-    };
-    process.stdout.write(JSON.stringify(result));
-  `;
-  try {
-    const stdout = execFileSync4(
-      electronPath,
-      ["-e", script],
-      {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          ELECTRON_RUN_AS_NODE: "1"
-        },
-        timeout: 1e4
-      }
-    );
-    const parsed = JSON.parse(stdout.trim());
-    if (parsed?.accessToken) {
-      cachedSession = parsed;
-      cachedSessionExpiry = parsed.expiresAt ? Number(parsed.expiresAt) : now + 36e5;
-      return parsed;
-    }
-  } catch (error) {
-    if (process.env.WORKBUDDY_ACCESS_TOKEN) {
-      const fallback = {
-        accessToken: process.env.WORKBUDDY_ACCESS_TOKEN,
-        uid: process.env.WORKBUDDY_UID || "workbuddy-user",
-        email: process.env.WORKBUDDY_EMAIL || "workbuddy@desktop.ai",
-        nickname: "WorkBuddy User",
-        expiresAt: now + 36e5
-      };
-      cachedSession = fallback;
-      cachedSessionExpiry = fallback.expiresAt;
-      return fallback;
-    }
-  }
-  return null;
-}
-async function buildWorkbuddyMessages(request, attachments = []) {
-  const messages = [];
-  const rawMessages = Array.isArray(request?.messages) ? request.messages : [];
-  const systemPrompt = request?.systemPrompt || request?.system;
-  let hasSystemMessage = false;
-  for (const message of rawMessages) {
-    const role = message?.role ?? "user";
-    if (role === "system") {
-      hasSystemMessage = true;
-      messages.push({
-        role: "system",
-        content: typeof message?.content === "string" ? message.content : textFromContent(message?.content)
-      });
-      continue;
-    }
-    if (role === "tool") {
-      const content = typeof message?.content === "string" ? message.content : textFromContent(message?.content ?? message?.text ?? message?.output ?? message?.result);
-      messages.push({
-        role: "tool",
-        tool_call_id: sanitizeToolCallId(firstString9(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
-        content: content || ""
-      });
-      continue;
-    }
-    if (role === "user" || role === "assistant") {
-      let content = "";
-      const calls = [];
-      if (typeof message?.content === "string") {
-        content = message.content;
-      } else if (Array.isArray(message?.content)) {
-        const parts = [];
-        for (const part of message.content) {
-          if (part?.type === "text" && typeof part?.text === "string") {
-            parts.push(part.text);
-          } else if (part?.type === "tool-call" || part?.type === "tool_call") {
-            calls.push({
-              id: sanitizeToolCallId(firstString9(part.id, part.toolCallId, `call_${calls.length}`)),
-              type: "function",
-              function: {
-                name: firstString9(part.name, part.function?.name, "tool"),
-                arguments: typeof (part.arguments ?? part.function?.arguments) === "string" ? part.arguments ?? part.function?.arguments : JSON.stringify(part.arguments ?? part.input ?? {})
-              }
-            });
-          } else if (typeof part === "string") {
-            parts.push(part);
-          }
-        }
-        content = parts.join("\n");
-      }
-      if (Array.isArray(message?.tool_calls)) {
-        for (const tc of message.tool_calls) {
-          calls.push({
-            id: sanitizeToolCallId(firstString9(tc.id, tc.toolCallId, `call_${calls.length}`)),
-            type: "function",
-            function: {
-              name: firstString9(tc.name, tc.function?.name, "tool"),
-              arguments: typeof (tc.arguments ?? tc.function?.arguments) === "string" ? tc.arguments ?? tc.function?.arguments : JSON.stringify(tc.arguments ?? tc.input ?? {})
-            }
-          });
-        }
-      }
-      const msgObj = { role, content };
-      if (role === "assistant" && calls.length > 0) {
-        msgObj.tool_calls = calls;
-      }
-      messages.push(msgObj);
-      continue;
-    }
-  }
-  if (!hasSystemMessage) {
-    messages.unshift({
-      role: "system",
-      content: systemPrompt || "You are a helpful AI assistant."
-    });
-  }
-  return messages;
-}
-function createWorkbuddyNativeExecutor({
-  endpoint: endpoint2 = DEFAULT_WORKBUDDY_ENDPOINT,
-  accessToken = null,
-  fetchImpl = fetch,
-  timeoutMs = 12e4
-} = {}) {
-  const validatedEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID10 });
-  return async function* workbuddyNativeExecutor(envelope2 = {}) {
-    const req = envelope2?.request ?? envelope2 ?? {};
-    const { attachments, credential, signal } = envelope2;
-    let token = accessToken ?? (credential?.accessToken && credential.accessToken !== "free-tier" ? credential.accessToken : null) ?? (credential?.access && credential.access !== "free-tier" ? credential.access : null) ?? credential?.apiKey ?? credential?.token ?? process.env.WORKBUDDY_ACCESS_TOKEN ?? null;
-    let uid = credential?.uid ?? null;
-    if (!token) {
-      const session = extractWorkbuddySession();
-      if (session?.accessToken) {
-        token = session.accessToken;
-        uid = session.uid;
-      }
-    }
-    if (!token) {
-      throw nativeProviderError(
-        PROVIDER_ID10,
-        "\u672A\u68C0\u6D4B\u5230\u672C\u5730 WorkBuddy \u767B\u5F55\u51ED\u636E\uFF0C\u8BF7\u5148\u5728 WorkBuddy \u684C\u9762\u7AEF\u767B\u5F55\u6216\u8BBE\u7F6E WORKBUDDY_ACCESS_TOKEN"
-      );
-    }
-    const messages = await buildWorkbuddyMessages(req, attachments);
-    const tools = buildOpenAiTools(req.tools);
-    const convId = randomUUID10();
-    const reqId = randomUUID10();
-    const msgId = randomUUID10();
-    const traceId = randomBytes4(16).toString("hex");
-    const spanId = randomBytes4(8).toString("hex");
-    const parentSpanId = randomBytes4(8).toString("hex");
-    const headers = {
-      Accept: "text/event-stream",
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-      "x-requested-with": "XMLHttpRequest",
-      "x-codebuddy-request": "1",
-      "X-Conversation-ID": convId,
-      "X-Conversation-Request-ID": reqId,
-      "X-Conversation-Message-ID": msgId,
-      "X-Request-ID": reqId,
-      "X-Agent-Intent": "craft",
-      "X-Agent-Purpose": "conversation",
-      "X-IDE-Type": "WorkBuddy",
-      "X-IDE-Name": "WorkBuddy",
-      "X-IDE-Version": "5.9.4",
-      "X-Private-Data": "true",
-      "X-Product": "SaaS",
-      "User-Agent": "WorkBuddy/5.9.4 WorkBuddy/5.9.4",
-      traceparent: `00-${traceId}-${spanId}-01`,
-      b3: `${traceId}-${spanId}-1-${parentSpanId}`,
-      "X-B3-TraceId": traceId,
-      "X-B3-SpanId": spanId,
-      "X-B3-Sampled": "1",
-      "X-Trace-ID": traceId,
-      ...uid ? { "X-User-Id": uid } : {}
-    };
-    const effort = req.reasoningEffort ?? req.reasoning_effort ?? req.reasoning?.effort;
-    const body = {
-      model: req.model ?? "deepseek-v4.1-flash",
-      messages,
-      stream: true,
-      ...typeof req.temperature === "number" ? { temperature: req.temperature } : {},
-      ...typeof req.maxTokens === "number" ? { max_tokens: req.maxTokens } : {},
-      ...effort ? { reasoning_effort: effort, reasoning: { effort } } : {},
-      ...tools ? { tools } : {}
-    };
-    const response = await fetchNativeResponse(
-      validatedEndpoint,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal
-      },
-      {
-        providerId: PROVIDER_ID10,
-        timeoutMs,
-        fetchImpl
-      }
-    );
-    const streamEvents = [];
-    let nextIndex = 1;
-    let rawUsage = null;
-    let stop = "stop";
-    const activeTools = /* @__PURE__ */ new Map();
-    const reasoningFilter = new DsmlStreamFilter({
-      onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "reasoning" }),
-      onTextDelta: (index, text3) => streamEvents.push({ type: "reasoning-delta", index, text: text3 }),
-      onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "reasoning", text: text3 } })
-    });
-    const textFilter = new DsmlStreamFilter({
-      onTextBlockStart: (index) => streamEvents.push({ type: "block-start", index, blockType: "text" }),
-      onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
-      onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "text", text: text3 } })
-    });
-    for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID10 })) {
-      if (event?.done) continue;
-      const parsed = event?.data;
-      if (!parsed || typeof parsed !== "object") continue;
-      if (parsed.usage) rawUsage = parsed.usage;
-      const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : null;
-      if (!choice) continue;
-      const delta = choice.delta ?? {};
-      const reasoningDelta = firstString9(delta.reasoning_content, delta.reasoning, delta.thought);
-      if (reasoningDelta) {
-        textFilter.closeText();
-        while (streamEvents.length > 0) yield streamEvents.shift();
-        reasoningFilter.push(reasoningDelta, () => nextIndex++);
-        while (streamEvents.length > 0) yield streamEvents.shift();
-      }
-      for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
-        const key = Number(call.index ?? activeTools.size);
-        if (!activeTools.has(key)) {
-          reasoningFilter.closeText();
-          textFilter.closeText();
-          while (streamEvents.length > 0) yield streamEvents.shift();
-          const state2 = {
-            index: nextIndex++,
-            id: firstString9(call.id, `call_${key}_${randomUUID10().slice(0, 8)}`),
-            name: firstString9(call.function?.name, call.name, "tool"),
-            arguments: ""
-          };
-          activeTools.set(key, state2);
-          yield { type: "block-start", index: state2.index, blockType: "tool-call" };
-        }
-        const state = activeTools.get(key);
-        const argumentDelta = call.function?.arguments ?? call.arguments ?? "";
-        if (call.id) state.id = call.id;
-        if (call.function?.name) state.name = call.function.name;
-        state.arguments += argumentDelta;
-        if (argumentDelta) {
-          yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: argumentDelta };
-        }
-      }
-      const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
-      if (content) {
-        reasoningFilter.closeText();
-        while (streamEvents.length > 0) yield streamEvents.shift();
-        textFilter.push(content, () => nextIndex++);
-        while (streamEvents.length > 0) yield streamEvents.shift();
-      }
-      if (choice.finish_reason) {
-        stop = choice.finish_reason;
-      }
-    }
-    reasoningFilter.closeText();
-    textFilter.closeText();
-    const reasoningDsml = reasoningFilter.flush(() => nextIndex++);
-    const textDsml = textFilter.flush(() => nextIndex++);
-    while (streamEvents.length > 0) yield streamEvents.shift();
-    const allDsmlCalls = [
-      ...reasoningDsml?.toolCalls || [],
-      ...textDsml?.toolCalls || []
-    ];
-    if (activeTools.size > 0) {
-      for (const state of activeTools.values()) {
-        yield {
-          type: "block-end",
-          index: state.index,
-          block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments || "{}" }
-        };
-      }
-      stop = "tool_calls";
-    } else if (allDsmlCalls.length > 0) {
-      for (const dsml of allDsmlCalls) {
-        const toolIndex = nextIndex++;
-        const toolId = `call_${randomUUID10().slice(0, 8)}`;
-        yield { type: "block-start", index: toolIndex, blockType: "tool-call" };
-        yield { type: "tool-call-delta", index: toolIndex, id: toolId, name: dsml.name, argumentsDelta: dsml.arguments };
-        yield {
-          type: "block-end",
-          index: toolIndex,
-          block: { type: "tool-call", id: toolId, name: dsml.name, arguments: dsml.arguments }
-        };
-      }
-      stop = "tool_calls";
-    }
-    if (rawUsage) {
-      yield {
-        type: "usage",
-        usage: normalizeUsage(rawUsage)
-      };
-    }
-    yield {
-      type: "finish",
-      reason: finishReason(stop),
-      ...rawUsage ? { usage: normalizeUsage(rawUsage) } : {}
-    };
-  };
-}
-
-// modules/provider-workbuddy/src/driver.mjs
-var PROVIDER_ID11 = "workbuddy";
-function workbuddySession() {
-  try {
-    return extractWorkbuddySession();
-  } catch {
-    return null;
-  }
-}
-function envAccessToken() {
-  const token = process.env.WORKBUDDY_ACCESS_TOKEN;
-  return token && token.trim().length > 0 ? token.trim() : null;
-}
-var BUILTIN_WORKBUDDY_FREE_MODELS = Object.freeze([
-  {
-    id: "hy4free",
-    name: "Hy4",
-    contextWindow: 1e6,
-    maxTokens: 64e3,
-    reasoning: {
-      efforts: [
-        { id: "minimal", name: "Minimal" },
-        { id: "low", name: "Low" },
-        { id: "medium", name: "Medium" },
-        { id: "high", name: "High" }
-      ],
-      defaultEffort: "high"
-    }
-  },
-  {
-    id: "hy4",
-    name: "Hy4",
-    contextWindow: 1e6,
-    maxTokens: 64e3,
-    reasoning: {
-      efforts: [
-        { id: "minimal", name: "Minimal" },
-        { id: "low", name: "Low" },
-        { id: "medium", name: "Medium" },
-        { id: "high", name: "High" }
-      ],
-      defaultEffort: "high"
-    }
-  },
-  {
-    id: "deepseek-v4.1-flash",
-    name: "DeepSeek v4.1 Flash",
-    contextWindow: 1e6,
-    maxTokens: 128e3,
-    reasoning: {
-      efforts: [
-        { id: "minimal", name: "Minimal" },
-        { id: "low", name: "Low" },
-        { id: "medium", name: "Medium" },
-        { id: "high", name: "High" }
-      ],
-      defaultEffort: "medium"
-    }
-  },
-  {
-    id: "hy3",
-    name: "Hunyuan 3",
-    contextWindow: 192e3,
-    maxTokens: 64e3,
-    reasoning: {
-      efforts: [
-        { id: "minimal", name: "Minimal" },
-        { id: "low", name: "Low" },
-        { id: "medium", name: "Medium" },
-        { id: "high", name: "High" }
-      ],
-      defaultEffort: "medium"
-    }
-  }
-]);
-function summarizeWorkbuddyCandidate(candidate2) {
-  return candidate2?.displayName ?? candidate2?.email ?? candidate2?.accountId ?? "WorkBuddy Free";
-}
-function findLocalWorkbuddySnapshot() {
-  const configDir = findWorkbuddyConfigDir();
-  let latestFile = null;
-  let latestMtime = 0;
-  if (configDir) {
-    const storageDir = join13(configDir, "storage");
-    if (existsSync5(storageDir)) {
-      try {
-        const userDirs = readdirSync(storageDir).filter((d) => d.startsWith("user-"));
-        for (const userDir of userDirs) {
-          const scopedDir = join13(storageDir, userDir, "scoped");
-          if (existsSync5(scopedDir)) {
-            const scopes = readdirSync(scopedDir);
-            for (const scope of scopes) {
-              const configFile = join13(scopedDir, scope, "wb-product-config.json");
-              if (existsSync5(configFile)) {
-                try {
-                  const mtime = statSync2(configFile).mtimeMs;
-                  if (mtime > latestMtime) {
-                    latestMtime = mtime;
-                    latestFile = configFile;
-                  }
-                } catch {
-                }
-              }
-            }
-          }
-        }
-      } catch {
-      }
-    }
-  }
-  if (latestFile) return latestFile;
-  const appAsarProductJson = "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar/cli/product.json";
-  if (existsSync5(appAsarProductJson)) return appAsarProductJson;
-  const unpackedProductJson = "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/product.json";
-  if (existsSync5(unpackedProductJson)) return unpackedProductJson;
-  return null;
-}
-function parseWorkbuddyCatalog(data) {
-  let rawModels = [];
-  if (data?.["product-config-snapshot"]?.data?.models) {
-    rawModels = data["product-config-snapshot"].data.models;
-  } else if (Array.isArray(data?.models)) {
-    rawModels = data.models;
-  } else if (Array.isArray(data?.data)) {
-    rawModels = data.data;
-  }
-  if (!rawModels || rawModels.length === 0) {
-    return { models: [...BUILTIN_WORKBUDDY_FREE_MODELS] };
-  }
-  const freeModels = [];
-  const paidModels = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const item of rawModels) {
-    const id = stringValue(item?.id);
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    const credits = stringValue(item?.credits) ?? "";
-    const isFree = credits === "x0.00" || credits === "x0.00 credits" || credits === "0.00x" || credits === "0" || item?.free === true || item?.isFree === true;
-    const baseName = stringValue(item?.name) || stringValue(item?.title) || id;
-    const name2 = credits && !isFree ? `${baseName} (${credits})` : baseName;
-    const builtin = BUILTIN_WORKBUDDY_FREE_MODELS.find((m) => m.id === id);
-    const contextWindow = resolveContextWindowFromModel(item, builtin?.contextWindow ?? 131072);
-    const maxTokens = resolveMaxTokensFromModel(item, builtin?.maxTokens ?? 16384);
-    const reasoning = resolveReasoningFromModel(item) ?? builtin?.reasoning;
-    const modelRecord = {
-      id,
-      name: name2,
-      contextWindow,
-      maxTokens,
-      free: isFree,
-      credits,
-      ...reasoning ? { reasoning } : {}
-    };
-    if (isFree) {
-      freeModels.push(modelRecord);
-    } else {
-      paidModels.push(modelRecord);
-    }
-  }
-  return { models: [...freeModels, ...paidModels] };
-}
-function createWorkbuddyCatalogLoader({
-  cacheTtlMs = 6e4
-} = {}) {
-  let cached = null;
-  let cachedAt = 0;
-  return async function workbuddyCatalogLoader({ force = false } = {}) {
-    const now = Date.now();
-    if (!force && cached && now - cachedAt < cacheTtlMs) {
-      return cached;
-    }
-    const snapshotPath = findLocalWorkbuddySnapshot();
-    if (snapshotPath) {
-      try {
-        const raw = readFileSync4(snapshotPath, "utf8");
-        const json = JSON.parse(raw);
-        cached = parseWorkbuddyCatalog(json);
-        cachedAt = Date.now();
-        return cached;
-      } catch {
-      }
-    }
-    cached = { models: [...BUILTIN_WORKBUDDY_FREE_MODELS] };
-    cachedAt = Date.now();
-    return cached;
-  };
-}
-var WorkbuddyDriver = class {
-  constructor({
-    endpoint: endpoint2 = DEFAULT_WORKBUDDY_ENDPOINT,
-    catalogLoader = null,
-    requestExecutor = null,
-    fetchImpl = fetch,
-    timeoutMs = 12e4
-  } = {}) {
-    this.endpoint = endpoint2;
-    this.fetchImpl = fetchImpl;
-    this.timeoutMs = timeoutMs;
-    this.catalogLoader = catalogLoader ?? createWorkbuddyCatalogLoader({ cacheTtlMs: 6e4 });
-    this.requestExecutor = requestExecutor ?? createWorkbuddyNativeExecutor({
-      endpoint: endpoint2,
-      fetchImpl,
-      timeoutMs
-    });
-  }
-  async discover() {
-    const session = workbuddySession();
-    const usable = Boolean(session?.accessToken) || Boolean(envAccessToken());
-    const displayName = session?.nickname ? `WorkBuddy Free (${session.nickname})` : "WorkBuddy Free";
-    const email = session?.email || (session?.nickname?.includes("@") ? session.nickname : "workbuddy@desktop.ai");
-    return {
-      candidates: [
-        {
-          candidateId: "workbuddy-free",
-          accountId: "workbuddy-free",
-          displayName,
-          email,
-          subscription: {
-            plan: "WorkBuddy Free Rotation",
-            status: usable ? "active" : "unknown"
-          },
-          // WorkBuddy publishes no quota, and this plugin does not invent one.
-          quota: { source: "unknown" },
-          source: "workbuddy_free_tier",
-          health: {
-            status: usable ? "healthy" : "auth_expired"
-          }
-        }
-      ],
-      source: "workbuddy_free_tier",
-      diagnostics: usable ? [] : ["\u672A\u68C0\u6D4B\u5230 WorkBuddy \u5B98\u65B9\u684C\u9762\u7AEF\u4F1A\u8BDD\uFF1B\u8BF7\u767B\u5F55\u5B98\u65B9 WorkBuddy \u684C\u9762\u7AEF\uFF0C\u6216\u5728\u9762\u677F\u4E2D\u586B\u5199 access token\u3002"]
-    };
-  }
-  async importAccount(candidate2, context = {}) {
-    const accountId = candidate2?.accountId || "workbuddy-free";
-    const ref = createCredentialRef(PROVIDER_ID11, accountId);
-    if (context.secretStore) {
-      let session = null;
-      try {
-        session = extractWorkbuddySession();
-      } catch {
-      }
-      await context.secretStore.write(ref, {
-        type: "workbuddy_free",
-        access: session?.accessToken || "free-tier",
-        uid: session?.uid || null,
-        email: session?.email || null
-      }).catch(() => {
-      });
-    }
-    return createAccountRecord({
-      accountId,
-      providerId: PROVIDER_ID11,
-      displayName: candidate2?.displayName || "WorkBuddy Free",
-      email: candidate2?.email || "workbuddy@desktop.ai",
-      auth: {
-        kind: "workbuddy_free",
-        credentialRef: ref
-      },
-      subscription: {
-        plan: candidate2?.subscription?.plan || "WorkBuddy Free Rotation",
-        status: "active"
-      },
-      quota: createQuotaSnapshot(candidate2?.quota ?? {}),
-      health: {
-        status: candidate2?.health?.status ?? "healthy"
-      }
-    });
-  }
-  async getActiveSession() {
-    return this.discover().then((res) => Array.isArray(res?.candidates) ? res.candidates[0] : null);
-  }
-  /**
-   * WorkBuddy has no authorization page: the account lives in the official
-   * desktop client, and this plugin reads that session. Saying so is the whole
-   * instruction — there is no key the user could paste in its place.
-   */
-  async authorizationInstructions() {
-    const session = workbuddySession();
-    if (session?.accessToken) {
-      return "\u5DF2\u68C0\u6D4B\u5230 WorkBuddy \u5B98\u65B9\u684C\u9762\u7AEF\u4F1A\u8BDD\uFF0C\u70B9\u300C\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\u300D\u5373\u53EF\u6DFB\u52A0\u8BE5\u8D26\u53F7\u3002";
-    }
-    return "WorkBuddy \u4F7F\u7528\u5B98\u65B9\u684C\u9762\u7AEF\u7684\u8D26\u53F7\u4F1A\u8BDD\uFF0C\u6CA1\u6709 OAuth \u6388\u6743\u9875\uFF0C\u4E5F\u6CA1\u6709\u53EF\u586B\u5199\u7684 API Key\u3002\u8BF7\u5148\u5B89\u88C5\u5E76\u767B\u5F55 WorkBuddy \u5B98\u65B9\u684C\u9762\u7AEF\uFF0C\u7136\u540E\u70B9\u300C\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\u300D\uFF1B\u63D2\u4EF6\u4F1A\u8BFB\u53D6\u8BE5\u5BA2\u6237\u7AEF\u7684\u767B\u5F55\u72B6\u6001\uFF0C\u4E0D\u80FD\u51ED\u7A7A\u521B\u5EFA\u4E00\u4E2A\u8D26\u53F7\u3002\uFF08\u65E0\u6CD5\u5B89\u88C5\u684C\u9762\u7AEF\u7684\u9AD8\u7EA7\u7528\u6CD5\uFF1A\u5728\u542F\u52A8 DSH \u7684 shell \u4E2D\u8BBE\u7F6E WORKBUDDY_ACCESS_TOKEN\u3002\uFF09";
-  }
-  /** Resolve a usable token from the imported credential, the environment or the desktop app. */
-  async #resolveAccessToken(account, context = {}) {
-    if (context.secretStore && account?.auth?.credentialRef) {
-      try {
-        const secret = await context.secretStore.read(account.auth.credentialRef);
-        const stored = stringValue(secret?.access);
-        if (stored && stored !== "free-tier") return stored;
-      } catch {
-      }
-    }
-    const fromEnv = envAccessToken();
-    if (fromEnv) return fromEnv;
-    return workbuddySession()?.accessToken ?? null;
-  }
-  async refreshAccount(account, context = {}) {
-    const token = await this.#resolveAccessToken(account, context);
-    if (!token) return { health: { status: "auth_expired" } };
-    return {
-      health: {
-        status: "healthy",
-        lastCheckedAt: (/* @__PURE__ */ new Date()).toISOString()
-      }
-    };
-  }
-  async getQuota() {
-    return createQuotaSnapshot({ source: "unknown" });
-  }
-  async getCatalog(context = {}) {
-    return this.catalogLoader({ force: Boolean(context.force) });
-  }
-  async invoke(request, invocation, context = {}) {
-    const envelope2 = request && typeof request === "object" && ("request" in request || "credential" in request) ? request : null;
-    const req = envelope2?.request ?? request ?? {};
-    const inv = envelope2?.invocation ?? invocation ?? {};
-    const ctx = envelope2?.context ?? context ?? {};
-    const executor = ctx.requestExecutor ?? this.requestExecutor;
-    let credential = envelope2?.credential ?? null;
-    if (!credential && ctx.secretStore && inv?.auth?.credentialRef) {
-      credential = await ctx.secretStore.read(inv.auth.credentialRef).catch(() => null);
-    }
-    if (!credential) {
-      credential = inv?.auth ?? { access: "free-tier" };
-    }
-    return executor({
-      request: req,
-      invocation: inv,
-      context: ctx,
-      attachments: ctx.attachments ?? inv?.attachments,
-      credential,
-      signal: ctx.signal ?? inv?.signal
-    });
-  }
-  async stream(request, invocation, context = {}) {
-    return this.invoke(request, invocation, context);
-  }
-};
-function createWorkbuddyDriver(options = {}) {
-  return new WorkbuddyDriver(options);
-}
-
-// modules/provider-workbuddy/src/index.mjs
-function createWorkbuddyModule({ driver = {} } = {}) {
-  return defineProviderModule({
-    id: "workbuddy",
-    displayName: "WorkBuddy",
-    capabilities: [
-      "quota",
-      "catalog",
-      "invoke",
-      "stream",
-      PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
-      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP
-    ],
-    driver
-  });
-}
-
 // modules/provider-kilo/src/driver.mjs
-var PROVIDER_ID12 = "kilo";
+var PROVIDER_ID10 = "kilo";
 var STANDARD_KILO_REASONING_EFFORTS = Object.freeze([
   { id: "low", name: "Low", description: "\u5FEB\u901F\u601D\u8003\uFF0C\u4FDD\u7559\u57FA\u7840\u63A8\u7406" },
   { id: "medium", name: "Medium", description: "\u6807\u51C6\u601D\u8003\uFF0C\u5E73\u8861\u63A8\u7406\u6DF1\u5EA6\u4E0E\u54CD\u5E94\u901F\u5EA6" },
@@ -14776,7 +13984,7 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
 ]);
 function summarizeKiloCandidate(candidate2) {
   return {
-    providerId: PROVIDER_ID12,
+    providerId: PROVIDER_ID10,
     candidateId: candidate2?.candidateId ?? "kilo-free",
     accountId: candidate2?.accountId ?? "kilo-free",
     displayName: candidate2?.displayName ?? "Kilo Free Tier",
@@ -14787,37 +13995,37 @@ function summarizeKiloCandidate(candidate2) {
 
 // modules/provider-commandcode/src/driver.mjs
 import { createHash as createHash10 } from "node:crypto";
-import { existsSync as existsSync7, readdirSync as readdirSync2, readFileSync as readFileSync6 } from "node:fs";
-import { homedir as homedir13 } from "node:os";
-import { join as join15 } from "node:path";
+import { existsSync as existsSync5, readdirSync, readFileSync as readFileSync4 } from "node:fs";
+import { homedir as homedir12 } from "node:os";
+import { join as join13 } from "node:path";
 
 // modules/provider-commandcode/src/native-transport.mjs
-import { createHash as createHash9, randomBytes as randomBytes5, randomUUID as randomUUID11 } from "node:crypto";
-import { existsSync as existsSync6, readFileSync as readFileSync5 } from "node:fs";
-import { homedir as homedir12 } from "node:os";
-import { join as join14 } from "node:path";
-function firstString10(...values) {
+import { createHash as createHash9, randomBytes as randomBytes4, randomUUID as randomUUID10 } from "node:crypto";
+import { existsSync as existsSync4, readFileSync as readFileSync3 } from "node:fs";
+import { homedir as homedir11 } from "node:os";
+import { join as join12 } from "node:path";
+function firstString9(...values) {
   for (const val of values) {
     if (typeof val === "string" && val.length > 0) return val;
   }
   return null;
 }
-var PROVIDER_ID13 = "commandcode";
+var PROVIDER_ID11 = "commandcode";
 var DEFAULT_COMMANDCODE_GENERATE_ENDPOINT = "https://api.commandcode.ai/alpha/generate";
 var DEFAULT_COMMANDCODE_WHOAMI_ENDPOINT = "https://api.commandcode.ai/alpha/whoami";
 var DEFAULT_COMMANDCODE_CREDITS_ENDPOINT = "https://api.commandcode.ai/alpha/billing/credits";
 var DEFAULT_COMMANDCODE_SUBSCRIPTIONS_ENDPOINT = "https://api.commandcode.ai/alpha/billing/subscriptions";
 var DEFAULT_COMMANDCODE_MODELS_ENDPOINT = "https://api.commandcode.ai/provider/v1/models?view=client";
 function findCommandCodeAuthFilePath() {
-  if (process.env.COMMAND_CODE_AUTH_PATH && existsSync6(process.env.COMMAND_CODE_AUTH_PATH)) {
+  if (process.env.COMMAND_CODE_AUTH_PATH && existsSync4(process.env.COMMAND_CODE_AUTH_PATH)) {
     return process.env.COMMAND_CODE_AUTH_PATH;
   }
-  const candidate2 = join14(homedir12(), ".commandcode", "auth.json");
-  if (existsSync6(candidate2)) return candidate2;
+  const candidate2 = join12(homedir11(), ".commandcode", "auth.json");
+  if (existsSync4(candidate2)) return candidate2;
   return null;
 }
 function extractCommandCodeAuth({ force = false } = {}) {
-  const envKey = firstString10(process.env.COMMAND_CODE_API_KEY, process.env.COMMANDCODE_API_KEY);
+  const envKey = firstString9(process.env.COMMAND_CODE_API_KEY, process.env.COMMANDCODE_API_KEY);
   if (envKey) {
     return {
       apiKey: envKey,
@@ -14829,7 +14037,7 @@ function extractCommandCodeAuth({ force = false } = {}) {
   const authPath = findCommandCodeAuthFilePath();
   if (!authPath) return null;
   try {
-    const raw = readFileSync5(authPath, "utf8");
+    const raw = readFileSync3(authPath, "utf8");
     const json = JSON.parse(raw);
     if (!json?.apiKey) return null;
     return {
@@ -14881,7 +14089,7 @@ ${text3}` : text3;
       continue;
     }
     if (role === "assistant") {
-      let reasoningContent = firstString10(
+      let reasoningContent = firstString9(
         msg.reasoning_content,
         msg.reasoning,
         msg.thought,
@@ -14899,7 +14107,7 @@ ${text3}` : text3;
               if (!reasoningContent) reasoningContent = rText;
             }
           } else if (block.type === "tool_use" || block.type === "tool-call") {
-            const rawId = block.id || block.toolCallId || `call_${randomUUID11().slice(0, 8)}`;
+            const rawId = block.id || block.toolCallId || `call_${randomUUID10().slice(0, 8)}`;
             const toolCallId = sanitizeToolCallId(rawId);
             const toolName = block.name || block.toolName || "tool";
             toolNameById.set(toolCallId, toolName);
@@ -14969,7 +14177,7 @@ ${text3}` : text3;
           const resolved = await resolveImageData(block, attachments);
           if (!resolved) {
             throw nativeProviderError(
-              PROVIDER_ID13,
+              PROVIDER_ID11,
               "\u56FE\u7247\u9644\u4EF6\u65E0\u6CD5\u8BFB\u53D6\uFF1A\u7F3A\u5C11 DSH \u9644\u4EF6\u670D\u52A1\u6216\u9644\u4EF6\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u7C98\u8D34\u56FE\u7247"
             );
           }
@@ -15071,7 +14279,7 @@ function createCommandCodeNativeExecutor({
     if (!apiKey) {
       const err = new Error("Command Code API Key \u672A\u914D\u7F6E\uFF0C\u8BF7\u5148\u8FD0\u884C cmd login \u6216\u5728\u9762\u677F\u4E2D\u8BBE\u7F6E API Key\u3002");
       err.code = "AUTH_REQUIRED";
-      err.providerId = PROVIDER_ID13;
+      err.providerId = PROVIDER_ID11;
       throw err;
     }
     const sessionId = deriveConversationSessionId(request, explicitSessionId);
@@ -15130,7 +14338,7 @@ function createCommandCodeNativeExecutor({
             signal
           },
           {
-            providerId: PROVIDER_ID13,
+            providerId: PROVIDER_ID11,
             timeoutMs,
             fetchImpl
           }
@@ -15147,7 +14355,7 @@ function createCommandCodeNativeExecutor({
               signal
             },
             {
-              providerId: PROVIDER_ID13,
+              providerId: PROVIDER_ID11,
               timeoutMs,
               fetchImpl
             }
@@ -15169,7 +14377,7 @@ function createCommandCodeNativeExecutor({
         onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
         onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "text", text: text3 } })
       });
-      for await (const event of readNdjsonLines(response, { signal, timeoutMs, providerId: PROVIDER_ID13 })) {
+      for await (const event of readNdjsonLines(response, { signal, timeoutMs, providerId: PROVIDER_ID11 })) {
         if (!event || typeof event !== "object") continue;
         if (event.type === "error") {
           const errObj = event.error || {};
@@ -15179,7 +14387,7 @@ function createCommandCodeNativeExecutor({
             shouldRetryReasoning = true;
             break;
           }
-          throw nativeProviderError(PROVIDER_ID13, msg, {
+          throw nativeProviderError(PROVIDER_ID11, msg, {
             status,
             code: errObj.type || "server_error"
           });
@@ -15231,7 +14439,7 @@ function createCommandCodeNativeExecutor({
           }
           textFilter.closeText();
           while (streamEvents.length > 0) yield streamEvents.shift();
-          const toolId = event.id || `call_${activeTools.size}_${randomUUID11().slice(0, 8)}`;
+          const toolId = event.id || `call_${activeTools.size}_${randomUUID10().slice(0, 8)}`;
           const state = {
             index: nextIndex++,
             id: toolId,
@@ -15271,7 +14479,7 @@ function createCommandCodeNativeExecutor({
             const argsStr = typeof event.input === "string" ? event.input : JSON.stringify(event.input ?? {});
             const state = {
               index: nextIndex++,
-              id: toolId || `call_${randomUUID11().slice(0, 8)}`,
+              id: toolId || `call_${randomUUID10().slice(0, 8)}`,
               name: event.toolName || "tool",
               arguments: argsStr
             };
@@ -15349,7 +14557,7 @@ function createCommandCodeNativeExecutor({
 }
 
 // modules/provider-commandcode/src/driver.mjs
-var PROVIDER_ID14 = "commandcode";
+var PROVIDER_ID12 = "commandcode";
 function fingerprintApiKey(apiKey) {
   return createHash10("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
 }
@@ -15482,7 +14690,7 @@ var BUILTIN_COMMANDCODE_MODELS = Object.freeze([
 ]);
 function summarizeCommandCodeCandidate(candidate2) {
   return {
-    providerId: PROVIDER_ID14,
+    providerId: PROVIDER_ID12,
     candidateId: candidate2?.candidateId ?? "commandcode-default",
     accountId: candidate2?.accountId ?? "commandcode-default",
     displayName: candidate2?.displayName ?? "Command Code",
@@ -15493,18 +14701,18 @@ function summarizeCommandCodeCandidate(candidate2) {
   };
 }
 function findLocalCommandCodeCatalogFile() {
-  const dir = join15(homedir13(), ".commandcode", "cache", "model-catalog", "v1");
-  if (existsSync7(dir)) {
+  const dir = join13(homedir12(), ".commandcode", "cache", "model-catalog", "v1");
+  if (existsSync5(dir)) {
     try {
-      const files = readdirSync2(dir).filter((f) => f.startsWith("catalog-") && f.endsWith(".json"));
+      const files = readdirSync(dir).filter((f) => f.startsWith("catalog-") && f.endsWith(".json"));
       if (files.length > 0) {
-        return join15(dir, files[0]);
+        return join13(dir, files[0]);
       }
     } catch {
     }
   }
-  const devJson = join15(homedir13(), ".commandcode", "cache", "models-dev.json");
-  if (existsSync7(devJson)) return devJson;
+  const devJson = join13(homedir12(), ".commandcode", "cache", "models-dev.json");
+  if (existsSync5(devJson)) return devJson;
   return null;
 }
 var KNOWN_RETIRED_COMMANDCODE_MODELS = /* @__PURE__ */ new Set([
@@ -15612,7 +14820,7 @@ function createCommandCodeCatalogLoader({
     const localCatalog = findLocalCommandCodeCatalogFile();
     if (localCatalog) {
       try {
-        const raw = readFileSync6(localCatalog, "utf8");
+        const raw = readFileSync4(localCatalog, "utf8");
         const json = JSON.parse(raw);
         cached = parseCommandCodeCatalog(json);
         cachedAt = Date.now();
@@ -15747,7 +14955,7 @@ var CommandCodeDriver = class {
     const manual = candidate2?.source === "manual_api_key";
     const apiKey = candidate2?.apiKey || auth?.apiKey || "";
     const accountId = candidate2?.accountId || (manual ? `commandcode-${fingerprintApiKey(apiKey)}` : auth?.userId) || "commandcode-default";
-    const ref = createCredentialRef(PROVIDER_ID14, accountId);
+    const ref = createCredentialRef(PROVIDER_ID12, accountId);
     if (context.secretStore) {
       await context.secretStore.write(ref, {
         type: "commandcode_auth",
@@ -15760,7 +14968,7 @@ var CommandCodeDriver = class {
     }
     return createAccountRecord({
       accountId,
-      providerId: PROVIDER_ID14,
+      providerId: PROVIDER_ID12,
       displayName: candidate2?.displayName || "Command Code User",
       email: candidate2?.email || "user@commandcode.ai",
       auth: {
@@ -15954,29 +15162,29 @@ function createCommandCodeModule({ driver = {} } = {}) {
 import { createHash as createHash11 } from "node:crypto";
 
 // modules/provider-hermes/src/native-transport.mjs
-import { existsSync as existsSync8, readFileSync as readFileSync7, statSync as statSync3 } from "node:fs";
-import { homedir as homedir14 } from "node:os";
-import { join as join16 } from "node:path";
-import { randomUUID as randomUUID12 } from "node:crypto";
-function firstString11(...values) {
+import { existsSync as existsSync6, readFileSync as readFileSync5, statSync as statSync2 } from "node:fs";
+import { homedir as homedir13 } from "node:os";
+import { join as join14 } from "node:path";
+import { randomUUID as randomUUID11 } from "node:crypto";
+function firstString10(...values) {
   for (const val of values) {
     if (typeof val === "string" && val.length > 0) return val;
   }
   return null;
 }
-var PROVIDER_ID15 = "hermes";
+var PROVIDER_ID13 = "hermes";
 var DEFAULT_HERMES_CHAT_ENDPOINT = "https://inference-api.nousresearch.com/v1/chat/completions";
 var DEFAULT_HERMES_MODELS_ENDPOINT = "https://inference-api.nousresearch.com/v1/models";
 var cachedAuth = null;
 var cachedAuthMtime = 0;
 function findHermesAuthFilePath() {
-  if (process.env.HERMES_AUTH_PATH && existsSync8(process.env.HERMES_AUTH_PATH)) {
+  if (process.env.HERMES_AUTH_PATH && existsSync6(process.env.HERMES_AUTH_PATH)) {
     return process.env.HERMES_AUTH_PATH;
   }
-  const hermesPath = join16(homedir14(), ".hermes", "auth.json");
-  if (existsSync8(hermesPath)) return hermesPath;
-  const nousPath = join16(homedir14(), ".nous", "auth.json");
-  if (existsSync8(nousPath)) return nousPath;
+  const hermesPath = join14(homedir13(), ".hermes", "auth.json");
+  if (existsSync6(hermesPath)) return hermesPath;
+  const nousPath = join14(homedir13(), ".nous", "auth.json");
+  if (existsSync6(nousPath)) return nousPath;
   return null;
 }
 function extractHermesAuth({ force = false } = {}) {
@@ -15989,9 +15197,9 @@ function extractHermesAuth({ force = false } = {}) {
   const authFile = findHermesAuthFilePath();
   if (authFile) {
     try {
-      const stats = statSync3(authFile);
+      const stats = statSync2(authFile);
       if (force || !cachedAuth || stats.mtimeMs !== cachedAuthMtime) {
-        const raw = readFileSync7(authFile, "utf8");
+        const raw = readFileSync5(authFile, "utf8");
         const parsed = JSON.parse(raw);
         cachedAuth = parsed;
         cachedAuthMtime = stats.mtimeMs;
@@ -16107,7 +15315,7 @@ async function buildHermesMessages(request = {}, attachments = null) {
     if (message?.role === "tool") {
       result.push({
         role: "tool",
-        tool_call_id: sanitizeToolCallId(firstString11(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
+        tool_call_id: sanitizeToolCallId(firstString10(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
         content: typeof message.content === "string" ? message.content : textFromContent(message.content ?? message.text ?? message.output ?? message.result)
       });
       continue;
@@ -16119,10 +15327,10 @@ async function buildHermesMessages(request = {}, attachments = null) {
       for (const part of message.content) {
         if (part?.type === "tool-call" || part?.type === "tool_call") {
           calls.push({
-            id: sanitizeToolCallId(firstString11(part.id, part.toolCallId, `call_${calls.length}`)),
+            id: sanitizeToolCallId(firstString10(part.id, part.toolCallId, `call_${calls.length}`)),
             type: "function",
             function: {
-              name: firstString11(part.name, part.function?.name, "tool"),
+              name: firstString10(part.name, part.function?.name, "tool"),
               arguments: typeof (part.arguments ?? part.function?.arguments) === "string" ? part.arguments ?? part.function?.arguments : JSON.stringify(part.arguments ?? part.input ?? {})
             }
           });
@@ -16132,10 +15340,10 @@ async function buildHermesMessages(request = {}, attachments = null) {
     if (Array.isArray(message?.tool_calls)) {
       for (const tc of message.tool_calls) {
         calls.push({
-          id: sanitizeToolCallId(firstString11(tc.id, tc.toolCallId, `call_${calls.length}`)),
+          id: sanitizeToolCallId(firstString10(tc.id, tc.toolCallId, `call_${calls.length}`)),
           type: "function",
           function: {
-            name: firstString11(tc.name, tc.function?.name, "tool"),
+            name: firstString10(tc.name, tc.function?.name, "tool"),
             arguments: typeof (tc.arguments ?? tc.function?.arguments) === "string" ? tc.arguments ?? tc.function?.arguments : JSON.stringify(tc.arguments ?? tc.input ?? {})
           }
         });
@@ -16163,12 +15371,12 @@ async function buildHermesMessages(request = {}, attachments = null) {
 }
 function extractReasoningDelta(delta) {
   if (!delta || typeof delta !== "object") return null;
-  const direct = firstString11(delta.reasoning_content, delta.reasoning, delta.thought);
+  const direct = firstString10(delta.reasoning_content, delta.reasoning, delta.thought);
   if (direct) return direct;
   if (Array.isArray(delta.reasoning_details)) {
     for (const item of delta.reasoning_details) {
       if (item && item.type !== "reasoning.encrypted") {
-        const text3 = firstString11(item.text, item.content, item.summary);
+        const text3 = firstString10(item.text, item.content, item.summary);
         if (text3) return text3;
       }
     }
@@ -16182,7 +15390,7 @@ function createHermesNativeExecutor({
   timeoutMs = 18e4
 } = {}) {
   const validatedEndpoint = validateNativeEndpoint(endpoint2, {
-    providerId: PROVIDER_ID15,
+    providerId: PROVIDER_ID13,
     defaultEndpoint: DEFAULT_HERMES_CHAT_ENDPOINT
   });
   return async function* hermesNativeExecutor(envelope2 = {}) {
@@ -16200,7 +15408,7 @@ function createHermesNativeExecutor({
     if (!token) {
       const err = new Error("Hermes API Key \u672A\u914D\u7F6E\uFF0C\u53EF\u5728 ~/.hermes/auth.json \u4E2D\u914D\u7F6E\u6216\u5728\u9762\u677F\u4E2D\u8BBE\u7F6E API Key\u3002");
       err.code = "AUTH_REQUIRED";
-      err.providerId = PROVIDER_ID15;
+      err.providerId = PROVIDER_ID13;
       throw err;
     }
     const messages = await buildHermesMessages(req, attachments);
@@ -16243,7 +15451,7 @@ function createHermesNativeExecutor({
           signal
         },
         {
-          providerId: PROVIDER_ID15,
+          providerId: PROVIDER_ID13,
           timeoutMs,
           fetchImpl
         }
@@ -16260,7 +15468,7 @@ function createHermesNativeExecutor({
             signal
           },
           {
-            providerId: PROVIDER_ID15,
+            providerId: PROVIDER_ID13,
             timeoutMs,
             fetchImpl
           }
@@ -16285,7 +15493,7 @@ function createHermesNativeExecutor({
       onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
       onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "text", text: text3 } })
     });
-    for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID15 })) {
+    for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID13 })) {
       if (event?.done) continue;
       const parsed = event?.data;
       if (!parsed || typeof parsed !== "object") continue;
@@ -16312,8 +15520,8 @@ function createHermesNativeExecutor({
           while (streamEvents.length > 0) yield streamEvents.shift();
           const state2 = {
             index: nextIndex++,
-            id: firstString11(call.id, `call_${key}_${randomUUID12().slice(0, 8)}`),
-            name: firstString11(call.function?.name, call.name, "tool"),
+            id: firstString10(call.id, `call_${key}_${randomUUID11().slice(0, 8)}`),
+            name: firstString10(call.function?.name, call.name, "tool"),
             arguments: ""
           };
           activeTools.set(key, state2);
@@ -16360,7 +15568,7 @@ function createHermesNativeExecutor({
     } else if (allDsmlCalls.length > 0) {
       for (const dsml of allDsmlCalls) {
         const toolIndex = nextIndex++;
-        const toolId = `call_${randomUUID12().slice(0, 8)}`;
+        const toolId = `call_${randomUUID11().slice(0, 8)}`;
         yield { type: "block-start", index: toolIndex, blockType: "tool-call" };
         yield { type: "tool-call-delta", index: toolIndex, id: toolId, name: dsml.name, argumentsDelta: dsml.arguments };
         yield {
@@ -16386,7 +15594,7 @@ function createHermesNativeExecutor({
 }
 
 // modules/provider-hermes/src/driver.mjs
-var PROVIDER_ID16 = "hermes";
+var PROVIDER_ID14 = "hermes";
 function fingerprintApiKey2(apiKey) {
   return createHash11("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
 }
@@ -16549,7 +15757,7 @@ function createHermesCatalogLoader({
       token = auth?.accounts?.[0]?.apiKey;
     }
     try {
-      assertSecureEndpointUrl(modelsUrl, { providerId: PROVIDER_ID16 });
+      assertSecureEndpointUrl(modelsUrl, { providerId: PROVIDER_ID14 });
       const headers = {
         Accept: "application/json",
         ...token ? { Authorization: `Bearer ${token}` } : {}
@@ -16574,7 +15782,7 @@ function createHermesCatalogLoader({
 }
 function summarizeHermesCandidate(candidate2) {
   return {
-    providerId: PROVIDER_ID16,
+    providerId: PROVIDER_ID14,
     candidateId: candidate2?.candidateId ?? "hermes-default",
     displayName: candidate2?.displayName ?? "Hermes Account",
     email: candidate2?.email ?? null,
@@ -16649,7 +15857,7 @@ var HermesDriver = class {
   async importAccount(candidate2, context = {}) {
     const manual = candidate2?.source === "manual_api_key";
     const accountId = candidate2?.accountId || (manual ? `hermes-${fingerprintApiKey2(candidate2?.apiKey)}` : null) || "hermes-default";
-    const ref = createCredentialRef(PROVIDER_ID16, accountId);
+    const ref = createCredentialRef(PROVIDER_ID14, accountId);
     if (context.secretStore) {
       await context.secretStore.write(ref, {
         type: "hermes_auth",
@@ -16663,7 +15871,7 @@ var HermesDriver = class {
     const amount = typeof candidate2?.balance?.amount === "number" && Number.isFinite(candidate2.balance.amount) ? candidate2.balance.amount : null;
     return createAccountRecord({
       accountId,
-      providerId: PROVIDER_ID16,
+      providerId: PROVIDER_ID14,
       displayName: candidate2?.displayName || "Hermes Account",
       email: candidate2?.email || null,
       auth: {
@@ -16827,7 +16035,7 @@ import os2 from "node:os";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import crypto, { randomUUID as randomUUID13 } from "node:crypto";
+import crypto, { randomUUID as randomUUID12 } from "node:crypto";
 var OPENROUTER_API_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 var OPENROUTER_MODELS_ENDPOINT = "https://openrouter.ai/api/v1/models";
 var OPENROUTER_CREDITS_ENDPOINT = "https://openrouter.ai/api/v1/credits";
@@ -17788,7 +16996,7 @@ function createOpenRouterFreeNativeExecutor({
           while (streamEvents.length > 0) yield streamEvents.shift();
           const state2 = {
             index: nextIndex++,
-            id: sanitizeToolCallId(call.id || `call_${key}_${randomUUID13().slice(0, 8)}`),
+            id: sanitizeToolCallId(call.id || `call_${key}_${randomUUID12().slice(0, 8)}`),
             name: call.function?.name || call.name || "tool",
             arguments: ""
           };
@@ -17842,7 +17050,7 @@ function createOpenRouterFreeNativeExecutor({
       for (const dsml of allDsmlCalls) {
         substantiveYielded = true;
         const toolIndex = nextIndex++;
-        const toolId = `call_${randomUUID13().slice(0, 8)}`;
+        const toolId = `call_${randomUUID12().slice(0, 8)}`;
         yield { type: "block-start", index: toolIndex, blockType: "tool-call" };
         yield { type: "tool-call-delta", index: toolIndex, id: toolId, name: dsml.name, argumentsDelta: dsml.arguments };
         yield {
@@ -17874,7 +17082,7 @@ function createOpenRouterFreeNativeExecutor({
 }
 
 // modules/provider-openrouter-free/src/driver.mjs
-var PROVIDER_ID17 = "openrouter-free";
+var PROVIDER_ID15 = "openrouter-free";
 var OPENROUTER_KEYS_PAGE = "https://openrouter.ai/settings/keys";
 async function readSecret(secretStore, ref) {
   if (!secretStore || !ref) return null;
@@ -17909,7 +17117,7 @@ function createOpenRouterFreeCatalogLoader({
       forceRefresh: Boolean(context?.force)
     });
     return {
-      providerId: PROVIDER_ID17,
+      providerId: PROVIDER_ID15,
       source: "openrouter_live_free_catalog",
       fetchedAt: (/* @__PURE__ */ new Date()).toISOString(),
       models
@@ -18053,7 +17261,7 @@ var OpenRouterFreeDriver = class {
       return {
         candidateId: `openrouter-free:${accountId}`,
         accountId,
-        providerId: PROVIDER_ID17,
+        providerId: PROVIDER_ID15,
         displayName: item.label,
         email: item.maskedKey,
         status: "available",
@@ -18087,10 +17295,10 @@ var OpenRouterFreeDriver = class {
     }
     const fingerprint = candidate2.fingerprint ?? hashApiKeyFingerprint(apiKey);
     const masked = maskApiKey3(apiKey);
-    const credentialRef = createCredentialRef(PROVIDER_ID17, candidate2.accountId);
+    const credentialRef = createCredentialRef(PROVIDER_ID15, candidate2.accountId);
     await writeSecret(context.secretStore, credentialRef, {
       type: "openrouter_free_auth",
-      providerId: PROVIDER_ID17,
+      providerId: PROVIDER_ID15,
       accountId: candidate2.accountId,
       apiKey,
       label: candidate2.displayName ?? `OpenRouter Key (${masked})`,
@@ -18117,7 +17325,7 @@ var OpenRouterFreeDriver = class {
       };
     }
     return createAccountRecord({
-      providerId: PROVIDER_ID17,
+      providerId: PROVIDER_ID15,
       accountId: candidate2.accountId,
       displayName: candidate2.displayName || quotaInfo.keyLabel || `OpenRouter Key (${masked})`,
       email: candidate2.email || masked,
@@ -18164,7 +17372,7 @@ var OpenRouterFreeDriver = class {
     const account = await this.importAccount({
       candidateId: `openrouter-free:${accountId}`,
       accountId,
-      providerId: PROVIDER_ID17,
+      providerId: PROVIDER_ID15,
       displayName: customLabel || `OpenRouter Key (${masked})`,
       email: masked,
       source: "manual_api_key",
@@ -18182,7 +17390,7 @@ var OpenRouterFreeDriver = class {
     }
     return {
       status: "completed",
-      providerId: PROVIDER_ID17,
+      providerId: PROVIDER_ID15,
       instructions: "\u5DF2\u81EA\u52A8\u5BFC\u5165\u672C\u673A OpenRouter API Key\u3002",
       accounts
     };
@@ -18192,7 +17400,7 @@ var OpenRouterFreeDriver = class {
     if (active) return active;
     return {
       status: "opened",
-      providerId: PROVIDER_ID17,
+      providerId: PROVIDER_ID15,
       authorizationUrl: OPENROUTER_KEYS_PAGE,
       instructions: "\u8BF7\u5728\u4E0B\u65B9\u76F4\u63A5\u7C98\u8D34\u60A8\u7684 OpenRouter API Key\uFF08sk-or-v1-...\uFF09\uFF0C\u6216\u5728\u6253\u5F00\u7684 OpenRouter \u9875\u9762\u521B\u5EFA\u65B0 Key \u540E\u7C98\u8D34\u6DFB\u52A0\u3002"
     };
@@ -18343,14 +17551,14 @@ function createOpenRouterFreeModule(options = {}) {
 }
 
 // modules/provider-trae-cn/src/driver.mjs
-import { randomUUID as randomUUID15 } from "node:crypto";
+import { randomUUID as randomUUID14 } from "node:crypto";
 
 // modules/provider-trae-cn/src/native-transport.mjs
 import { createServer as createServer2 } from "node:http";
-import { randomBytes as randomBytes6, randomInt, randomUUID as randomUUID14 } from "node:crypto";
-var PROVIDER_ID18 = "trae-cn";
+import { randomBytes as randomBytes5, randomInt, randomUUID as randomUUID13 } from "node:crypto";
+var PROVIDER_ID16 = "trae-cn";
 var TRAE_CN_SITE = Object.freeze({
-  id: PROVIDER_ID18,
+  id: PROVIDER_ID16,
   name: "Trae CN",
   webHost: "https://www.trae.cn",
   authHost: "https://api.trae.cn",
@@ -18664,7 +17872,7 @@ var digits = (count) => Array.from(
 function newTraeDevice() {
   return {
     deviceId: digits(16),
-    machineId: randomBytes6(16).toString("hex")
+    machineId: randomBytes5(16).toString("hex")
   };
 }
 function traeWhen(value) {
@@ -18709,7 +17917,7 @@ function readTraeCallback(params, { site = TRAE_CN_SITE, device } = {}) {
     host: String(params.get("host") ?? "")
   };
 }
-function traeAuthorizationUrl({ callback, device, site = TRAE_CN_SITE, traceId = randomUUID14() }) {
+function traeAuthorizationUrl({ callback, device, site = TRAE_CN_SITE, traceId = randomUUID13() }) {
   const query = new URLSearchParams({
     login_version: "1",
     auth_from: "solo",
@@ -18824,7 +18032,7 @@ function traeHeaders(account, { site = TRAE_CN_SITE, extra = {} } = {}) {
     "x-app-id": site.appId,
     "x-device-id": String(account?.device?.deviceId ?? ""),
     "x-machine-id": String(account?.device?.machineId ?? ""),
-    "x-request-id": randomUUID14(),
+    "x-request-id": randomUUID13(),
     "x-app-version": site.clientVersion,
     "x-app-version-code": site.clientVersionCode,
     "x-ide-version": site.clientVersion,
@@ -18927,8 +18135,8 @@ function traeChatBody(request = {}, { site = TRAE_CN_SITE, model } = {}) {
     config_name: chosen,
     model: chosen,
     stream: true,
-    request_id: randomUUID14(),
-    session_id: String(request.sessionId ?? randomUUID14())
+    request_id: randomUUID13(),
+    session_id: String(request.sessionId ?? randomUUID13())
   };
   if (typeof request.reasoningEffort === "string" && request.reasoningEffort.trim()) {
     body.reasoning_effort = request.reasoningEffort.trim();
@@ -19234,7 +18442,7 @@ function accountIdFor(credential) {
 }
 function summarizeTraeCnCandidate(candidate2) {
   return {
-    providerId: PROVIDER_ID18,
+    providerId: PROVIDER_ID16,
     candidateId: candidate2?.candidateId ?? "trae-cn",
     accountId: candidate2?.accountId ?? "trae-cn",
     displayName: candidate2?.displayName ?? "Trae CN",
@@ -19301,7 +18509,7 @@ var TraeCnSubscriptionDriver = class {
       site: this.site,
       timeoutMs: this.signInTimeoutMs
     });
-    const sessionId = `${PROVIDER_ID18}:${randomUUID15()}`;
+    const sessionId = `${PROVIDER_ID16}:${randomUUID14()}`;
     const state = { status: "pending", credential: null, error: null };
     session.result.then((result) => {
       if (result?.ok) {
@@ -19317,7 +18525,7 @@ var TraeCnSubscriptionDriver = class {
     this.#sessions.set(sessionId, { session, state, startedAt: (/* @__PURE__ */ new Date()).toISOString() });
     return {
       status: "pending",
-      providerId: PROVIDER_ID18,
+      providerId: PROVIDER_ID16,
       sessionId,
       authorizationUrl: session.authorizationUrl,
       instructions: session.instructions,
@@ -19329,7 +18537,7 @@ var TraeCnSubscriptionDriver = class {
     if (!entry) {
       return {
         status: "failed",
-        providerId: PROVIDER_ID18,
+        providerId: PROVIDER_ID16,
         sessionId,
         diagnostic: "\u8FD9\u6B21\u767B\u5F55\u4F1A\u8BDD\u5DF2\u7ECF\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u53D1\u8D77\u767B\u5F55\u3002"
       };
@@ -19338,7 +18546,7 @@ var TraeCnSubscriptionDriver = class {
       this.#sessions.delete(sessionId);
       return {
         status: "failed",
-        providerId: PROVIDER_ID18,
+        providerId: PROVIDER_ID16,
         sessionId,
         diagnostic: entry.state.error
       };
@@ -19346,7 +18554,7 @@ var TraeCnSubscriptionDriver = class {
     if (entry.state.result) return entry.state.result;
     const credential = entry.state.credential;
     if (!credential) {
-      return { status: "pending", providerId: PROVIDER_ID18, sessionId };
+      return { status: "pending", providerId: PROVIDER_ID16, sessionId };
     }
     const accountId = accountIdFor(credential);
     const candidate2 = {
@@ -19359,7 +18567,7 @@ var TraeCnSubscriptionDriver = class {
     Object.defineProperty(candidate2, CREDENTIAL_SLOT6, { value: credential, enumerable: false });
     const completed = {
       status: "completed",
-      providerId: PROVIDER_ID18,
+      providerId: PROVIDER_ID16,
       sessionId,
       diagnostic: null,
       accounts: [candidate2]
@@ -19374,13 +18582,13 @@ var TraeCnSubscriptionDriver = class {
       entry.session.cancel();
       this.#sessions.delete(sessionId);
     }
-    return { status: "cancelled", providerId: PROVIDER_ID18, sessionId };
+    return { status: "cancelled", providerId: PROVIDER_ID16, sessionId };
   }
   async importAccount(candidate2, context = {}) {
     const credential = candidate2?.[CREDENTIAL_SLOT6];
     if (!credential) throw new Error("Trae CN \u7684\u767B\u5F55\u4FE1\u606F\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55");
     const accountId = candidate2?.accountId ?? accountIdFor(credential);
-    const ref = createCredentialRef(PROVIDER_ID18, accountId);
+    const ref = createCredentialRef(PROVIDER_ID16, accountId);
     if (!context.secretStore) {
       throw new Error("Trae CN \u9700\u8981\u5B89\u5168\u51ED\u636E\u5B58\u50A8\uFF0C\u4F46\u5F53\u524D\u73AF\u5883\u6CA1\u6709\u63D0\u4F9B secretStore");
     }
@@ -19402,7 +18610,7 @@ var TraeCnSubscriptionDriver = class {
       }
     }
     return createAccountRecord({
-      providerId: PROVIDER_ID18,
+      providerId: PROVIDER_ID16,
       accountId,
       credentialRef: ref,
       displayName: candidate2?.displayName ?? credential.name ?? "Trae CN",
@@ -19550,7 +18758,6 @@ var candidateSummarizers = /* @__PURE__ */ new Map([
   ["claude", summarizeClaudeCandidate],
   ["cursor", summarizeCursorCandidate],
   ["opencode", summarizeOpencodeCandidate],
-  ["workbuddy", summarizeWorkbuddyCandidate],
   ["kilo", summarizeKiloCandidate],
   ["commandcode", summarizeCommandCodeCandidate],
   ["hermes", summarizeHermesCandidate],
@@ -19712,15 +18919,6 @@ function createDefaultProviderEntries(options = {}) {
         })
       }),
       driver: options.cursorDriver
-    },
-    {
-      module: createWorkbuddyModule({
-        driver: options.workbuddyDriver ?? createWorkbuddyDriver({
-          ...withRequestExecutor("workbuddy", options.workbuddy, requestExecutors),
-          ...catalogLoaders.workbuddy ? { catalogLoader: catalogLoaders.workbuddy } : {}
-        })
-      }),
-      driver: options.workbuddyDriver
     },
     {
       module: createCommandCodeModule({
@@ -20506,7 +19704,7 @@ var DockyardRuntime = class {
 // packages/dsh-plugin/src/codex-transport.mjs
 import { access, readFile as readFile7 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname as dirname8, join as join17, resolve } from "node:path";
+import { dirname as dirname8, join as join15, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 var activeCodexModels = /* @__PURE__ */ new Map();
 function recordCodexModels(models) {
@@ -20552,15 +19750,15 @@ async function findPackageRoot(startDirectory, packageName) {
   const packageParts = packageName.split("/");
   let current = resolve(startDirectory);
   while (true) {
-    const candidate2 = join17(current, "node_modules", ...packageParts);
-    if (await isFile2(join17(candidate2, "package.json"))) return candidate2;
+    const candidate2 = join15(current, "node_modules", ...packageParts);
+    if (await isFile2(join15(candidate2, "package.json"))) return candidate2;
     const parent = dirname8(current);
     if (parent === current) return null;
     current = parent;
   }
 }
 async function packageImportUrl(packageRoot, subpath = null) {
-  const packageJson = JSON.parse(await readFile7(join17(packageRoot, "package.json"), "utf8"));
+  const packageJson = JSON.parse(await readFile7(join15(packageRoot, "package.json"), "utf8"));
   const exports = packageJson.exports;
   let target = null;
   if (!subpath) {
@@ -20582,7 +19780,7 @@ async function packageImportUrl(packageRoot, subpath = null) {
   if (typeof target !== "string") {
     throw new Error(`Cannot resolve ${subpath ?? "."} from ${packageRoot}`);
   }
-  return pathToFileURL(join17(packageRoot, target)).href;
+  return pathToFileURL(join15(packageRoot, target)).href;
 }
 async function importFromDshInstall(moduleAnchor) {
   const anchor = moduleAnchor ?? process.env.DOCKYARD_DSH_CLI_PATH ?? process.argv[1] ?? import.meta.url;
@@ -21398,7 +20596,7 @@ function createDockyardCredentialStore(credentials, fallback = null) {
 // packages/dsh-plugin/src/native-key-pool-host.mjs
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAgentLoopRequest, markAgentLoopRequest } from "@deepseek-ai/dsh-llm";
-import { join as join18 } from "node:path";
+import { join as join16 } from "node:path";
 
 // packages/dsh-plugin/src/native-usage.mjs
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -21696,7 +20894,7 @@ var NativeKeyPoolHost = class {
     this.logger = logger ?? console;
     this.contextWindowOverrides = contextWindowOverrides;
     this.stateStore = stateStore ?? new JsonStateStore({
-      filePath: join18(defaultDockyardHome(), "native-key-pools.json")
+      filePath: join16(defaultDockyardHome(), "native-key-pools.json")
     });
     this.readyPromise = this.loadState();
   }
@@ -22063,7 +21261,7 @@ var NativeKeyPoolHost = class {
 // packages/dsh-plugin/src/vpn-ssrf-patch.mjs
 var import_ipaddr = __toESM(require_ipaddr(), 1);
 import { createRequire as createRequire2 } from "node:module";
-import { dirname as dirname9, join as join19 } from "node:path";
+import { dirname as dirname9, join as join17 } from "node:path";
 var isPatched = false;
 function patchFakeIpVpnSupport() {
   if (isPatched) return true;
@@ -22089,7 +21287,7 @@ function patchFakeIpVpnSupport() {
   ];
   if (typeof process?.execPath === "string") {
     try {
-      candidates.push(join19(dirname9(dirname9(process.execPath)), "Resources/app.asar/dsh/node_modules/ipaddr.js"));
+      candidates.push(join17(dirname9(dirname9(process.execPath)), "Resources/app.asar/dsh/node_modules/ipaddr.js"));
     } catch {
     }
   }
@@ -22146,7 +21344,6 @@ function apply(ctx, config = {}) {
       claude: runtimeOptions.requestExecutors?.claude ?? createClaudeNativeExecutor(runtimeOptions.claude ?? {}),
       cursor: runtimeOptions.requestExecutors?.cursor ?? createCursorNativeExecutor(runtimeOptions.cursor ?? {}),
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
-      workbuddy: runtimeOptions.requestExecutors?.workbuddy ?? createWorkbuddyNativeExecutor(runtimeOptions.workbuddy ?? {}),
       commandcode: runtimeOptions.requestExecutors?.commandcode ?? createCommandCodeNativeExecutor(runtimeOptions.commandcode ?? {}),
       hermes: runtimeOptions.requestExecutors?.hermes ?? createHermesNativeExecutor(runtimeOptions.hermes ?? {}),
       "openrouter-free": runtimeOptions.requestExecutors?.["openrouter-free"] ?? createOpenRouterFreeNativeExecutor(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {})
@@ -22162,7 +21359,6 @@ function apply(ctx, config = {}) {
       }),
       claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
-      workbuddy: runtimeOptions.catalogLoaders?.workbuddy ?? createWorkbuddyCatalogLoader(runtimeOptions.workbuddy ?? {}),
       commandcode: runtimeOptions.catalogLoaders?.commandcode ?? createCommandCodeCatalogLoader(runtimeOptions.commandcode ?? {}),
       hermes: runtimeOptions.catalogLoaders?.hermes ?? createHermesCatalogLoader(runtimeOptions.hermes ?? {}),
       "openrouter-free": runtimeOptions.catalogLoaders?.["openrouter-free"] ?? createOpenRouterFreeCatalogLoader(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {})
@@ -22292,8 +21488,8 @@ function apply(ctx, config = {}) {
                   res.end("Forbidden");
                   return;
                 }
-                const filePath = join20(process.cwd(), "artifacts", cleanPath);
-                if (!existsSync9(filePath)) {
+                const filePath = join18(process.cwd(), "artifacts", cleanPath);
+                if (!existsSync7(filePath)) {
                   res.writeHead(404);
                   res.end("Not Found");
                   return;
@@ -22308,7 +21504,7 @@ function apply(ctx, config = {}) {
                   svg: "image/svg+xml"
                 };
                 const contentType = mimeTypes[ext] ?? "application/octet-stream";
-                const content = readFileSync8(filePath);
+                const content = readFileSync6(filePath);
                 res.writeHead(200, {
                   "Content-Type": contentType,
                   "Content-Length": content.length,

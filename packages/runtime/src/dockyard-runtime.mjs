@@ -16,7 +16,6 @@ import { createGrokDriver, createGrokModule, summarizeGrokCandidate } from "../.
 import { createClaudeDriver, createClaudeModule, summarizeClaudeCandidate } from "../../../modules/provider-claude/src/index.mjs";
 import { createCursorDriver, createCursorModule, summarizeCursorCandidate } from "../../../modules/provider-cursor/src/index.mjs";
 import { createOpencodeDriver, createOpencodeModule, summarizeOpencodeCandidate } from "../../../modules/provider-opencode/src/index.mjs";
-import { createWorkbuddyDriver, createWorkbuddyModule, summarizeWorkbuddyCandidate } from "../../../modules/provider-workbuddy/src/index.mjs";
 import { createKiloDriver, createKiloModule, summarizeKiloCandidate } from "../../../modules/provider-kilo/src/index.mjs";
 import {
   createCommandCodeDriver,
@@ -43,7 +42,6 @@ const candidateSummarizers = new Map([
   ["claude", summarizeClaudeCandidate],
   ["cursor", summarizeCursorCandidate],
   ["opencode", summarizeOpencodeCandidate],
-  ["workbuddy", summarizeWorkbuddyCandidate],
   ["kilo", summarizeKiloCandidate],
   ["commandcode", summarizeCommandCodeCandidate],
   ["hermes", summarizeHermesCandidate],
@@ -248,15 +246,6 @@ export function createDefaultProviderEntries(options = {}) {
         }),
       }),
       driver: options.cursorDriver,
-    },
-    {
-      module: createWorkbuddyModule({
-        driver: options.workbuddyDriver ?? createWorkbuddyDriver({
-          ...withRequestExecutor("workbuddy", options.workbuddy, requestExecutors),
-          ...(catalogLoaders.workbuddy ? { catalogLoader: catalogLoaders.workbuddy } : {}),
-        }),
-      }),
-      driver: options.workbuddyDriver,
     },
     {
       module: createCommandCodeModule({

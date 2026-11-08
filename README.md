@@ -23,7 +23,6 @@ Dockyard DSH 把多个官方 OAuth 授权和官方客户端会话接入 DeepSeek
 | **Grok** | xAI 官方浏览器 OAuth，CLI fallback | 原生流式；额度取官方 credits |
 | **Claude** | 官方浏览器 OAuth，支持带 `state` 的手动回调地址 | 原生请求适配 |
 | **Cursor** | 官方登录轮询（`loginDeepControl` + `/auth/poll`） | 原生请求适配 |
-| **WorkBuddy** | **仅 macOS**：读取官方桌面端已保存的会话。没有授权页，也没有可填写的 Key | 官方端点原生流式 |
 | **Command Code** | 本地认证文件，或在面板里粘贴 API Key | 官方网关，原生流式 + tool calling |
 | **Hermes** | 本地会话文件，或在面板里粘贴 API Key | 原生流式 |
 | **OpenRouter Free** | 从 DSH 凭据或环境变量发现 API Key | 官方端点，`:free` 目录动态拉取 |
@@ -49,7 +48,6 @@ Dockyard DSH 把多个官方 OAuth 授权和官方客户端会话接入 DeepSeek
 | 凭据存储 | macOS Keychain + Swift helper | 宿主 DSH 的 Credentials 服务 |
 | CLI fallback | ✅ | ✅ 解析 `.cmd` shim 并经 `%ComSpec%` 启动，停止时 `taskkill` 清理进程树 |
 | 本机会话扫描 | ✅ | ❌ 按不可用降级，请改用浏览器 OAuth |
-| WorkBuddy | ✅ | ❌ 只能读 macOS 桌面端会话 |
 
 Windows 上如果宿主 DSH 没有 Credentials 服务，插件会**明确报错**，不会静默丢登录态。
 
@@ -189,7 +187,7 @@ tests/                  安全、生命周期、provider 与 runtime 测试
 - DSH 本身仍是 developer preview，上游可能有 breaking changes。
 - provider 的 CLI、客户端路径、OAuth 返回字段和额度接口都可能变；缺失字段保持未知，不做猜测。
 - 浏览器多账号依赖 provider 官方授权页与 token response；对方改了流程就需要重新验证，而不是猜协议。
-- Windows 上的本机会话扫描与 WorkBuddy 不可用。
+- Windows 上的本机会话扫描不可用。
 - **首字延迟主要不在插件**：实测直连上游首包约 2.8s，经插件约 2.6s（预热后几乎不额外增加）。界面上更长的等待通常来自 DSH 侧的上下文组装，以及切换模型后该模型的提示缓存需要重建；长会话定期开新会话、减少切换模型都能明显改善。
 
 ---
@@ -209,7 +207,6 @@ Dockyard DSH connects official OAuth authorizations and official client sessions
 | **Grok** | xAI browser OAuth, CLI fallback | Native streaming; quota from official credits |
 | **Claude** | Official browser OAuth, plus state-bound manual callback entry | Native request adapter |
 | **Cursor** | Official login polling (`loginDeepControl` + `/auth/poll`) | Native request adapter |
-| **WorkBuddy** | **macOS only**: reads the session the official desktop client stored. No OAuth page, no key field | Official streaming |
 | **Command Code** | Local auth file, or paste an API key in the panel | Official gateway, streaming with tool calling |
 | **Hermes** | Local session file, or paste an API key in the panel | Native streaming |
 | **OpenRouter Free** | Discovers an API key from DSH credentials or the environment | Official endpoint, live `:free` catalog |
@@ -235,7 +232,6 @@ When an official client, CLI, or OAuth source is missing, Dockyard reports an ex
 | Credential storage | macOS Keychain + Swift helper | Host DSH Credentials service |
 | CLI fallback | ✅ | ✅ resolves `.cmd` shims through `%ComSpec%`, stops the tree with `taskkill` |
 | Local session scanning | ✅ | ❌ degrades to unavailable; use browser OAuth |
-| WorkBuddy | ✅ | ❌ it can only read a macOS desktop session |
 
 On Windows, a host without the Credentials service produces a clear error rather than silently dropping the login.
 
@@ -370,5 +366,5 @@ The rule is simple: provider-specific logic stays in provider modules, account s
 - DeepSeek Harness is still a developer preview and may introduce breaking changes.
 - Provider CLIs, desktop paths, OAuth fields, and quota APIs can change; missing fields stay unknown rather than guessed.
 - Multi-account browser flows depend on each provider's official authorization page and token response; a changed flow has to be re-verified, not guessed.
-- On Windows, local session scanning and WorkBuddy are unavailable.
+- On Windows, local session scanning is unavailable.
 - **Time to first token is mostly not the plugin**: a direct upstream call starts streaming in about 2.8s, and through the plugin in about 2.6s once warm. Longer waits in the UI usually come from DSH assembling the context, plus the prompt cache being rebuilt after a model switch; starting a fresh session and switching models less often both help.
