@@ -435,3 +435,31 @@ test("the daily 100 credits are claimed without the IDE", async () => {
   assert.equal(third.claimed, false);
   assert.equal(calls.length, 1);
 });
+
+test("back-to-back tool calls never repeat the text block already closed", async () => {
+  // Regression: the text buffer survived a block close, so every further tool
+  // call closed the same text again. In the wild that rendered one paragraph
+  // twice, with the two copies separated only by tool-call blocks.
+  const fetchImpl = async () => new Response(sseBody([
+    'event:output\ndata:{"response":"第一段","reasoning_content":null}\n\n',
+    'event:output\ndata:{"response":"","tool_calls":[{"index":0,"id":"call_a","function_call":{"name":"bash","arguments":"{}"}}]}\n\n',
+    'event:output\ndata:{"response":"","tool_calls":[{"index":1,"id":"call_b","function_call":{"name":"read","arguments":"{}"}}]}\n\n',
+    'event:output\ndata:{"response":"第二段","reasoning_content":null}\n\n',
+    'event:output\ndata:{"response":"","tool_calls":[{"index":2,"id":"call_c","function_call":{"name":"ls","arguments":"{}"}}]}\n\n',
+    'event:done\ndata:{"finish_reason":"tool_calls"}\n\n',
+  ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+
+  const executor = createTraeNativeExecutor({ fetchImpl });
+  const events = await collectEvents(await executor({
+    request: { model: "deepseek-v4.1-flash", messages: [{ role: "user", content: "hi" }] },
+    credential: { token: "tok", uid: "1", device: { deviceId: "1", machineId: "m" } },
+  }));
+
+  const textBlocks = events
+    .filter((event) => event.type === "block-end" && event.block?.type === "text")
+    .map((event) => event.block.text);
+  // Each paragraph is closed exactly once, no matter how many calls follow it.
+  assert.deepEqual(textBlocks, ["第一段", "第二段"]);
+  assert.equal(events.filter((event) => event.type === "block-end" && event.block?.type === "tool-call").length, 3);
+  assert.deepEqual(events.at(-1), { type: "finish", reason: { kind: "tool-calls" } });
+});

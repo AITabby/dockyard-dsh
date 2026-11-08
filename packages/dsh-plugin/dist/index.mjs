@@ -18355,13 +18355,41 @@ function createTraeNativeExecutor({
     signal?.addEventListener?.("abort", abort, { once: true });
     const timer = setTimeout(abort, timeoutMs);
     return (async function* responseStream() {
+      let nextIndex = 0;
+      let textOpen = false;
+      let textIndex = 0;
       let text3 = "";
+      let reasoningOpen = false;
+      let reasoningIndex = 0;
       let reasoning = "";
-      let responseIndex = 0;
-      let reasoningIndex = null;
-      let started = false;
       const calls = /* @__PURE__ */ new Map();
       let callIndex = null;
+      function* closeText() {
+        if (!textOpen) return;
+        yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+        textOpen = false;
+        text3 = "";
+      }
+      function* closeReasoning() {
+        if (!reasoningOpen) return;
+        yield { type: "block-end", index: reasoningIndex, block: { type: "reasoning", text: reasoning } };
+        reasoningOpen = false;
+        reasoning = "";
+      }
+      function* openText() {
+        if (textOpen) return;
+        textIndex = nextIndex;
+        nextIndex += 1;
+        textOpen = true;
+        yield { type: "block-start", index: textIndex, blockType: "text" };
+      }
+      function* openReasoning() {
+        if (reasoningOpen) return;
+        reasoningIndex = nextIndex;
+        nextIndex += 1;
+        reasoningOpen = true;
+        yield { type: "block-start", index: reasoningIndex, blockType: "reasoning" };
+      }
       try {
         const response = await fetchImpl(`${site.apiHost}/api/agent/v3/llm_utils_chat`, {
           method: "POST",
@@ -18375,10 +18403,6 @@ function createTraeNativeExecutor({
         if (!response.ok) {
           const detail = await response.text().catch(() => "");
           throw traeRequestError(response.status, detail);
-        }
-        if (!started) {
-          started = true;
-          yield { type: "block-start", index: responseIndex, blockType: "text" };
         }
         for await (const { event, data } of traeSseEvents(response.body)) {
           if (event === "error") {
@@ -18395,17 +18419,10 @@ function createTraeNativeExecutor({
             const name2 = fn?.name;
             const args = fn?.arguments;
             if (!existing) {
-              if (reasoningIndex !== null) {
-                yield { type: "block-end", index: reasoningIndex, block: { type: "reasoning", text: reasoning } };
-                reasoningIndex = null;
-                responseIndex += 1;
-              }
-              if (started) {
-                yield { type: "block-end", index: responseIndex, block: { type: "text", text: text3 } };
-                responseIndex += 1;
-              }
-              callIndex = { index: responseIndex, id: String(piece?.id ?? `call_${key}`), name: "", arguments: "" };
-              responseIndex += 1;
+              yield* closeReasoning();
+              yield* closeText();
+              callIndex = { index: nextIndex, id: String(piece?.id ?? `call_${key}`), name: "", arguments: "" };
+              nextIndex += 1;
               calls.set(key, callIndex);
               yield { type: "block-start", index: callIndex.index, blockType: "tool-call" };
             }
@@ -18420,29 +18437,21 @@ function createTraeNativeExecutor({
           }
           const thought = typeof data.reasoning_content === "string" ? data.reasoning_content : "";
           if (thought) {
-            if (reasoningIndex === null) {
-              yield { type: "block-end", index: responseIndex, block: { type: "text", text: text3 } };
-              reasoningIndex = responseIndex + 1;
-              yield { type: "block-start", index: reasoningIndex, blockType: "reasoning" };
-            }
+            yield* closeText();
+            yield* openReasoning();
             reasoning += thought;
             yield { type: "reasoning-delta", index: reasoningIndex, text: thought };
           }
           const answer = typeof data.response === "string" ? data.response : "";
           if (answer) {
-            if (reasoningIndex !== null) {
-              yield { type: "block-end", index: reasoningIndex, block: { type: "reasoning", text: reasoning } };
-              reasoningIndex = null;
-              responseIndex += 2;
-              yield { type: "block-start", index: responseIndex, blockType: "text" };
-            }
+            yield* closeReasoning();
+            yield* openText();
             text3 += answer;
-            yield { type: "text-delta", index: responseIndex, text: answer };
+            yield { type: "text-delta", index: textIndex, text: answer };
           }
         }
-        if (reasoningIndex !== null) {
-          yield { type: "block-end", index: reasoningIndex, block: { type: "reasoning", text: reasoning } };
-        }
+        yield* closeReasoning();
+        yield* closeText();
         for (const state of calls.values()) {
           yield {
             type: "block-end",
@@ -18450,12 +18459,7 @@ function createTraeNativeExecutor({
             block: { type: "tool-call", id: state.id, name: state.name || "tool", arguments: state.arguments || "{}" }
           };
         }
-        if (calls.size === 0) {
-          yield { type: "block-end", index: responseIndex, block: { type: "text", text: text3 } };
-          yield { type: "finish", reason: { kind: "stop" } };
-        } else {
-          yield { type: "finish", reason: { kind: "tool-calls" } };
-        }
+        yield { type: "finish", reason: calls.size === 0 ? { kind: "stop" } : { kind: "tool-calls" } };
       } finally {
         clearTimeout(timer);
         signal?.removeEventListener?.("abort", abort);
