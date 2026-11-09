@@ -48,7 +48,7 @@ Selection happens in the runtime, not in the menu bar, so concurrent DSH session
 
 ### Provider modules
 
-The registered modules (see `packages/runtime/src/dockyard-runtime.mjs`) are `provider-codex` (id `openai-codex`), `provider-antigravity`, `provider-grok`, `provider-claude`, `provider-cursor`, `provider-commandcode`, `provider-nvidia`, `provider-hermes`, and `provider-openrouter-free`. `provider-opencode` and `provider-kilo` still exist and are validated by `scripts/build.mjs`, but they are no longer registered: neither free tier is open to third-party clients. Each module receives a provider driver for:
+The registered modules (see `packages/runtime/src/dockyard-runtime.mjs`) are `provider-codex` (id `openai-codex`), `provider-antigravity`, `provider-grok`, `provider-claude`, `provider-cursor`, `provider-commandcode`, `provider-hermes`, and `provider-openrouter-free`. `provider-opencode` and `provider-kilo` still exist and are validated by `scripts/build.mjs`, but they are no longer registered: neither free tier is open to third-party clients. Each module receives a provider driver for:
 
 - OAuth discovery and provider-native official authorization;
 - refresh and re-authentication;

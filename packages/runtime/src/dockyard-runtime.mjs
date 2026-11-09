@@ -33,7 +33,6 @@ import {
   summarizeOpenRouterFreeCandidate,
 } from "../../../modules/provider-openrouter-free/src/index.mjs";
 import { createTraeCnDriver, createTraeCnModule, summarizeTraeCnCandidate } from "../../../modules/provider-trae-cn/src/index.mjs";
-import { createNvidiaDriver, createNvidiaModule, summarizeNvidiaCandidate } from "../../../modules/provider-nvidia/src/index.mjs";
 import { redactError } from "../../providers/src/provider-utils.mjs";
 
 const candidateSummarizers = new Map([
@@ -48,7 +47,6 @@ const candidateSummarizers = new Map([
   ["hermes", summarizeHermesCandidate],
   ["openrouter-free", summarizeOpenRouterFreeCandidate],
   ["trae-cn", summarizeTraeCnCandidate],
-  ["nvidia-nim", summarizeNvidiaCandidate],
 ]);
 
 // Official provider CLIs may need a network round-trip to rotate OAuth
@@ -275,15 +273,6 @@ export function createDefaultProviderEntries(options = {}) {
         }),
       }),
       driver: options.openrouterFreeDriver,
-    },
-    {
-      module: createNvidiaModule({
-        driver: options.nvidiaDriver ?? createNvidiaDriver({
-          ...withRequestExecutor("nvidia-nim", options.nvidia, requestExecutors),
-          ...(catalogLoaders["nvidia-nim"] ? { catalogLoader: catalogLoaders["nvidia-nim"] } : {}),
-        }),
-      }),
-      driver: options.nvidiaDriver,
     },
     {
       module: createTraeCnModule({

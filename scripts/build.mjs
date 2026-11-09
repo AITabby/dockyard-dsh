@@ -14,7 +14,6 @@ import { createCommandCodeModule } from "../modules/provider-commandcode/src/ind
 import { createHermesModule } from "../modules/provider-hermes/src/index.mjs";
 import { createOpenRouterFreeModule } from "../modules/provider-openrouter-free/src/index.mjs";
 import { createTraeCnModule } from "../modules/provider-trae-cn/src/index.mjs";
-import { createNvidiaModule } from "../modules/provider-nvidia/src/index.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -55,10 +54,9 @@ await runtime.register(createCommandCodeModule());
 await runtime.register(createHermesModule());
 await runtime.register(createOpenRouterFreeModule());
 await runtime.register(createTraeCnModule());
-await runtime.register(createNvidiaModule());
 
 const ids = runtime.list().map((module) => module.id);
-if (!ids.includes("openai-codex") || !ids.includes("antigravity") || !ids.includes("grok") || !ids.includes("claude") || !ids.includes("cursor") || !ids.includes("opencode") || !ids.includes("kilo") || !ids.includes("commandcode") || !ids.includes("hermes") || !ids.includes("openrouter-free") || !ids.includes("trae-cn") || !ids.includes("nvidia-nim")) {
+if (!ids.includes("openai-codex") || !ids.includes("antigravity") || !ids.includes("grok") || !ids.includes("claude") || !ids.includes("cursor") || !ids.includes("opencode") || !ids.includes("kilo") || !ids.includes("commandcode") || !ids.includes("hermes") || !ids.includes("openrouter-free") || !ids.includes("trae-cn")) {
   throw new Error("Initial provider modules are not registered");
 }
 

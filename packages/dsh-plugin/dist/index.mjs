@@ -1018,8 +1018,8 @@ var init_dockyard_remote_host = __esm({
 });
 
 // packages/dsh-plugin/src/index.mjs
-import { existsSync as existsSync8, readFileSync as readFileSync7 } from "node:fs";
-import { join as join19 } from "node:path";
+import { existsSync as existsSync7, readFileSync as readFileSync6 } from "node:fs";
+import { join as join18 } from "node:path";
 
 // packages/core/src/errors.mjs
 var DockyardError = class extends Error {
@@ -18878,615 +18878,6 @@ function createTraeCnModule({ driver = {} } = {}) {
   });
 }
 
-// modules/provider-nvidia/src/driver.mjs
-import { createHash as createHash12 } from "node:crypto";
-import { existsSync as existsSync7, readFileSync as readFileSync6 } from "node:fs";
-import { homedir as homedir14 } from "node:os";
-import { join as join15 } from "node:path";
-
-// modules/provider-nvidia/src/native-transport.mjs
-var PROVIDER_ID17 = "nvidia-nim";
-var DEFAULT_NVIDIA_CHAT_ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions";
-var DEFAULT_NVIDIA_MODELS_ENDPOINT = "https://integrate.api.nvidia.com/v1/models";
-function firstString11(...values) {
-  return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
-}
-function toolCallPart3(part) {
-  const type = String(part?.type ?? "").toLowerCase().replace(/[_-]/g, "");
-  return type === "toolcall" || type === "functioncall" || type === "tooluse" ? part : null;
-}
-async function openAiContent3(content, attachments) {
-  const values = Array.isArray(content) ? content : [content];
-  const blocks = [];
-  for (const part of values) {
-    if (typeof part === "string") {
-      if (part) blocks.push({ type: "text", text: part });
-      continue;
-    }
-    if (!part || typeof part !== "object") continue;
-    if (part.type === "image") {
-      const image = await resolveImageData(part, attachments);
-      if (!image) throw nativeProviderError(PROVIDER_ID17, "image attachment could not be resolved");
-      blocks.push({ type: "image_url", image_url: { url: `data:${image.mediaType};base64,${image.data}` } });
-      continue;
-    }
-    if (part.type === "tool-result" || part.type === "tool_result") {
-      blocks.push({
-        type: "text",
-        text: `[Tool Result ${part.toolCallId ?? part.id ?? ""}]
-${textFromContent(part.content ?? part.output ?? part.result ?? part.text)}`
-      });
-      continue;
-    }
-    if (toolCallPart3(part)) continue;
-    const text3 = textFromContent(part);
-    if (text3) blocks.push({ type: "text", text: text3 });
-  }
-  return blocks;
-}
-async function buildNvidiaMessages(request, attachments) {
-  const result = [];
-  if (typeof request.system === "string" && request.system.length > 0) {
-    result.push({ role: "system", content: request.system });
-  }
-  for (const message of Array.isArray(request.messages) ? request.messages : []) {
-    const role = message?.role === "assistant" ? "assistant" : message?.role === "tool" ? "tool" : "user";
-    if (role === "tool") {
-      result.push({
-        role: "tool",
-        tool_call_id: sanitizeToolCallId(firstString11(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
-        content: textFromContent(message.content ?? message.text ?? message.output ?? message.result)
-      });
-      continue;
-    }
-    const content = await openAiContent3(message?.content ?? message?.text, attachments);
-    const calls = (Array.isArray(message?.content) ? message.content : [message?.content]).map(toolCallPart3).filter(Boolean).map((call, index) => ({
-      id: sanitizeToolCallId(firstString11(call.id, call.toolCallId, call.tool_call_id, `tool-${index}`)),
-      type: "function",
-      function: {
-        name: firstString11(call.name, call.function?.name, "tool"),
-        arguments: typeof (call.arguments ?? call.function?.arguments) === "string" ? call.arguments ?? call.function.arguments : JSON.stringify(call.arguments ?? call.input ?? call.function?.arguments ?? {})
-      }
-    }));
-    const value = {
-      role,
-      content: content.length === 0 ? "" : content.length === 1 && content[0].type === "text" ? content[0].text : content
-    };
-    if (role === "assistant" && calls.length > 0) value.tool_calls = calls;
-    result.push(value);
-  }
-  if (!result.some((message) => message.role === "user")) result.push({ role: "user", content: "Continue the conversation." });
-  return result;
-}
-function buildNvidiaTools(tools) {
-  if (!Array.isArray(tools)) return void 0;
-  const result = tools.map((tool) => ({
-    type: "function",
-    function: {
-      name: tool?.name ?? tool?.function?.name ?? "tool",
-      ...tool?.description ? { description: String(tool.description) } : {},
-      parameters: tool?.parameters ?? tool?.input_schema ?? tool?.function?.parameters ?? { type: "object" }
-    }
-  }));
-  return result.length > 0 ? result : void 0;
-}
-async function buildNvidiaRequest(request = {}, context = {}) {
-  const body = {
-    model: request.model,
-    messages: await buildNvidiaMessages(request, context.attachments),
-    stream: true,
-    stream_options: { include_usage: true }
-  };
-  if (request.temperature !== void 0) body.temperature = request.temperature;
-  const maxTokens = request.maxTokens ?? request.modelContext?.maxTokens;
-  if (Number.isInteger(maxTokens) && maxTokens > 0) body.max_tokens = maxTokens;
-  const tools = buildNvidiaTools(request.tools);
-  if (tools) body.tools = tools;
-  return body;
-}
-async function* streamNvidiaResponse(response) {
-  let text3 = "";
-  let textIndex = 0;
-  let textOpen = true;
-  let nextIndex = 1;
-  let usage = null;
-  let stop = "stop";
-  let reasoning = null;
-  const tools = /* @__PURE__ */ new Map();
-  let terminated = false;
-  yield { type: "block-start", index: textIndex, blockType: "text" };
-  for await (const event of readSseEvents(response)) {
-    if (event?.done) {
-      terminated = true;
-      continue;
-    }
-    const payload = event.data;
-    if (!payload || typeof payload !== "object") continue;
-    if (payload.error) {
-      throw nativeProviderError(PROVIDER_ID17, payload.error.message ?? "NVIDIA NIM returned an error", {
-        status: payload.error.code ?? payload.error.status,
-        body: payload.error
-      });
-    }
-    usage = normalizeUsage(payload.usage) ?? usage;
-    const choice = payload.choices?.[0];
-    if (!choice) continue;
-    stop = choice.finish_reason ?? stop;
-    if (typeof choice.finish_reason === "string" && choice.finish_reason.trim()) terminated = true;
-    const delta = choice.delta ?? {};
-    const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
-    if (content) {
-      if (reasoning) {
-        yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-        reasoning = null;
-      }
-      if (!textOpen) {
-        textIndex = nextIndex++;
-        text3 = "";
-        textOpen = true;
-        yield { type: "block-start", index: textIndex, blockType: "text" };
-      }
-      text3 += content;
-      yield { type: "text-delta", index: textIndex, text: content };
-    }
-    const reasoningDelta = delta.reasoning_content ?? delta.reasoningContent;
-    if (reasoningDelta) {
-      if (textOpen) {
-        yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
-        textOpen = false;
-      }
-      if (!reasoning) {
-        reasoning = { index: nextIndex++, text: "" };
-        yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
-      }
-      const value = String(reasoningDelta);
-      reasoning.text += value;
-      yield { type: "reasoning-delta", index: reasoning.index, text: value };
-    }
-    for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
-      const key = Number(call.index ?? tools.size);
-      if (!tools.has(key)) {
-        if (reasoning) {
-          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-          reasoning = null;
-        }
-        if (textOpen) {
-          yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
-          textOpen = false;
-        }
-        const state2 = {
-          index: nextIndex++,
-          id: firstString11(call.id, `tool-${key}`),
-          name: firstString11(call.function?.name, call.name, "tool"),
-          arguments: ""
-        };
-        tools.set(key, state2);
-        yield { type: "block-start", index: state2.index, blockType: "tool-call" };
-      }
-      const state = tools.get(key);
-      const argumentDelta = call.function?.arguments ?? call.arguments ?? "";
-      if (call.id) state.id = call.id;
-      if (call.function?.name) state.name = call.function.name;
-      state.arguments += argumentDelta;
-      if (argumentDelta) {
-        yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: argumentDelta };
-      }
-    }
-  }
-  if (!terminated) {
-    throw nativeProviderError(
-      PROVIDER_ID17,
-      "NVIDIA \u6D41\u5728\u6CA1\u6709 finish_reason \u6216 [DONE] \u7684\u60C5\u51B5\u4E0B\u7ED3\u675F\uFF0C\u54CD\u5E94\u53EF\u80FD\u88AB\u622A\u65AD",
-      { code: "NVIDIA_TRUNCATED_STREAM" }
-    );
-  }
-  if (reasoning) yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-  if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
-  for (const state of tools.values()) {
-    yield { type: "block-end", index: state.index, block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments || "{}" } };
-  }
-  if (usage) yield { type: "usage", usage };
-  yield { type: "finish", reason: finishReason(stop) };
-}
-function createNvidiaNativeExecutor({
-  endpoint: endpoint2 = process.env.DOCKYARD_NVIDIA_ENDPOINT || DEFAULT_NVIDIA_CHAT_ENDPOINT,
-  env = process.env,
-  timeoutMs = 3e5,
-  fetchImpl = fetch,
-  userAgent = process.env.DOCKYARD_NVIDIA_USER_AGENT
-} = {}) {
-  const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID17 });
-  const executor = async ({ request = {}, credential, context = {} } = {}) => {
-    const effectiveEnv = env;
-    const token = firstString11(credential?.apiKey, credential?.access, effectiveEnv.NVIDIA_API_KEY);
-    if (!token) {
-      const error = nativeProviderError(PROVIDER_ID17, "NVIDIA API Key \u672A\u914D\u7F6E\uFF0C\u8BF7\u5728\u9762\u677F\u4E2D\u7C98\u8D34 build.nvidia.com \u751F\u6210\u7684 nvapi- Key");
-      error.code = "AUTH_REQUIRED";
-      throw error;
-    }
-    const headers = {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      accept: "text/event-stream"
-    };
-    const configuredUserAgent = userAgent ?? effectiveEnv.DOCKYARD_NVIDIA_USER_AGENT;
-    if (configuredUserAgent) headers["user-agent"] = configuredUserAgent;
-    const response = await fetchNativeResponse(safeEndpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(await buildNvidiaRequest(request, context)),
-      signal: context.signal
-    }, { providerId: PROVIDER_ID17, timeoutMs, fetchImpl });
-    return streamNvidiaResponse(response);
-  };
-  executor.nativeTransport = "nvidia-nim-chat-completions";
-  return guardEmptyCompletion(executor, { providerId: PROVIDER_ID17 });
-}
-var nvidiaNativeTransportConstants = Object.freeze({
-  providerId: PROVIDER_ID17,
-  endpoint: DEFAULT_NVIDIA_CHAT_ENDPOINT,
-  modelsEndpoint: DEFAULT_NVIDIA_MODELS_ENDPOINT
-});
-
-// modules/provider-nvidia/src/driver.mjs
-var PROVIDER_ID18 = "nvidia-nim";
-var NVIDIA_CONTEXT_FALLBACK = 128e3;
-var NVIDIA_FREE_NOTE = "NVIDIA NIM \u514D\u8D39\u989D\u5EA6\uFF1A\u6309\u901F\u7387\u9650\u5236\uFF0C\u4E0D\u6309\u91D1\u989D\u8BA1\u91CF";
-function fingerprintApiKey3(apiKey) {
-  return createHash12("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
-}
-function maskApiKey4(apiKey) {
-  const value = String(apiKey ?? "");
-  if (value.length <= 10) return "****";
-  return `${value.slice(0, 6)}\u2026${value.slice(-4)}`;
-}
-function isNvidiaKey(value) {
-  return typeof value === "string" && value.startsWith("nvapi-");
-}
-function modelLabel(id) {
-  return id;
-}
-function registryMetadata(registry) {
-  const byId = /* @__PURE__ */ new Map();
-  for (const raw of Array.isArray(registry) ? registry : []) {
-    if (!raw || raw.provider !== "nvidia") continue;
-    const id = typeof raw.id === "string" ? raw.id : null;
-    if (!id) continue;
-    byId.set(id, raw);
-  }
-  return byId;
-}
-function parseNvidiaCatalog(data, { registry = null } = {}) {
-  const list = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
-  const metadataById = registryMetadata(registry);
-  const models = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const item of list) {
-    const id = typeof item?.id === "string" ? item.id.trim() : "";
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    const known = metadataById.get(id) ?? null;
-    models.push({
-      id,
-      name: modelLabel(id),
-      contextWindow: known ? resolveContextWindowFromModel(known, NVIDIA_CONTEXT_FALLBACK) : NVIDIA_CONTEXT_FALLBACK,
-      maxTokens: known ? resolveMaxTokensFromModel(known, 16384) : 16384,
-      inputModalities: Array.isArray(known?.input) ? [...known.input] : ["text"],
-      // Everything NVIDIA hosts here is on the free tier; the panel groups by
-      // this flag, and a model that is not free would need its own pricing.
-      free: true
-    });
-  }
-  return { models, source: "nvidia_live_catalog" };
-}
-function createNvidiaAvailabilityProber({
-  endpoint: endpoint2 = DEFAULT_NVIDIA_CHAT_ENDPOINT,
-  fetchImpl = fetch,
-  timeoutMs = 12e3,
-  concurrency = 8
-} = {}) {
-  return async function probeNvidiaModels(ids, { token } = {}) {
-    const verdicts = /* @__PURE__ */ new Map();
-    const queue = Array.isArray(ids) ? [...ids] : [];
-    if (!token || queue.length === 0) return verdicts;
-    let cursor = 0;
-    const worker = async () => {
-      while (cursor < queue.length) {
-        const id = queue[cursor];
-        cursor += 1;
-        if (typeof id !== "string" || id.length === 0) continue;
-        try {
-          const response = await fetchImpl(endpoint2, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "content-type": "application/json"
-            },
-            body: JSON.stringify({ model: id, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
-            signal: AbortSignal.timeout(timeoutMs)
-          });
-          await response.text().catch(() => "");
-          verdicts.set(id, !(response.status === 404 || response.status === 410));
-        } catch {
-          verdicts.set(id, true);
-        }
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => worker()));
-    return verdicts;
-  };
-}
-function createNvidiaCatalogLoader({
-  modelsUrl = DEFAULT_NVIDIA_MODELS_ENDPOINT,
-  fetchImpl = fetch,
-  cacheTtlMs = 3e5,
-  registryLoader = null,
-  prober = null,
-  probeTtlMs = 6e5
-} = {}) {
-  let cached = null;
-  let cachedAt = 0;
-  let probeState = { verdicts: null, at: 0 };
-  let probing = null;
-  function applyProbe(catalog) {
-    const verdicts = probeState.verdicts;
-    if (!verdicts || !catalog?.models) return catalog;
-    const models = catalog.models.filter((model) => verdicts.get(model.id) !== false);
-    const hidden = catalog.models.length - models.length;
-    return {
-      ...catalog,
-      models,
-      ...hidden > 0 ? { diagnostics: [`\u5DF2\u9690\u85CF ${hidden} \u4E2A\u5F53\u524D\u8D26\u53F7\u4E0D\u53EF\u7528\u7684\u6A21\u578B`] } : {}
-    };
-  }
-  async function runProbe(ids, token) {
-    if (probing) return probing;
-    probing = (async () => {
-      try {
-        const verdicts = await prober(ids, { token });
-        probeState = { verdicts, at: Date.now() };
-        cachedAt = 0;
-        return verdicts;
-      } catch {
-        return null;
-      } finally {
-        probing = null;
-      }
-    })();
-    return probing;
-  }
-  return async function nvidiaCatalogLoader({ force = false, credential = null, accounts = null } = {}) {
-    const now = Date.now();
-    if (!force && cached && cachedAt > 0 && now - cachedAt < cacheTtlMs) return applyProbe(cached);
-    let token = credential?.apiKey ?? credential?.access ?? null;
-    if (!token && Array.isArray(accounts) && accounts.length > 0) token = accounts[0]?.auth?.apiKey ?? null;
-    if (!cached || force) {
-      try {
-        assertSecureEndpointUrl(modelsUrl, { providerId: PROVIDER_ID18 });
-        const { body } = await fetchJson(
-          modelsUrl,
-          { headers: { Accept: "application/json", ...token ? { Authorization: `Bearer ${token}` } : {} } },
-          { fetchImpl, timeoutMs: 2e4 }
-        );
-        const registry = typeof registryLoader === "function" ? await registryLoader().catch(() => null) : null;
-        const parsed = parseNvidiaCatalog(body, { registry });
-        if (parsed.models.length > 0) {
-          cached = parsed;
-          cachedAt = now;
-        }
-      } catch {
-      }
-    }
-    if (!cached) {
-      return {
-        models: [],
-        source: "nvidia_live_catalog",
-        diagnostics: ["\u672A\u80FD\u8BFB\u53D6 NVIDIA \u6A21\u578B\u5217\u8868\uFF08https://integrate.api.nvidia.com/v1/models\uFF09\uFF0C\u7A0D\u540E\u91CD\u8BD5"]
-      };
-    }
-    const stale = !probeState.verdicts || now - probeState.at > probeTtlMs;
-    if (prober && token && stale) {
-      const ids = cached.models.map((model) => model.id);
-      if (force) await runProbe(ids, token);
-      else void runProbe(ids, token);
-    }
-    return applyProbe(cached);
-  };
-}
-function discoverDshCredentialKey({ home = homedir14() } = {}) {
-  try {
-    const path2 = join15(home, ".dsh", ".credentials.yaml");
-    if (!existsSync7(path2)) return null;
-    for (const line of readFileSync6(path2, "utf8").split("\n")) {
-      const match = /^\s*NVIDIA_API_KEY:\s*(\S+)\s*$/u.exec(line);
-      if (match) {
-        const value = match[1].replace(/^["']|["']$/gu, "");
-        if (isNvidiaKey(value)) return value;
-      }
-    }
-  } catch {
-  }
-  return null;
-}
-function summarizeNvidiaCandidate(candidate2) {
-  return {
-    providerId: PROVIDER_ID18,
-    candidateId: candidate2?.candidateId ?? "nvidia-default",
-    displayName: candidate2?.displayName ?? "NVIDIA NIM",
-    email: candidate2?.email ?? null,
-    plan: candidate2?.subscription?.plan ?? "NVIDIA NIM \u514D\u8D39",
-    quota: candidate2?.quota ?? null
-  };
-}
-var NvidiaDriver = class {
-  constructor({
-    catalogLoader = null,
-    requestExecutor = null,
-    fetchImpl = fetch,
-    env = process.env,
-    home = homedir14(),
-    registryLoader = null,
-    prober = null
-  } = {}) {
-    this.fetchImpl = fetchImpl;
-    this.env = env;
-    this.home = home;
-    this.prober = prober === null ? createNvidiaAvailabilityProber({ fetchImpl }) : prober ?? createNvidiaAvailabilityProber({ fetchImpl });
-    this.catalogLoader = catalogLoader ?? createNvidiaCatalogLoader({
-      fetchImpl,
-      registryLoader,
-      prober: this.prober
-    });
-    this.requestExecutor = requestExecutor ?? createNvidiaNativeExecutor({ fetchImpl, env });
-  }
-  /** NVIDIA has no OAuth: a key comes from build.nvidia.com, or the environment. */
-  async discover() {
-    const envKey = typeof this.env.NVIDIA_API_KEY === "string" && this.env.NVIDIA_API_KEY.length > 0 ? this.env.NVIDIA_API_KEY : null;
-    const key = envKey ?? discoverDshCredentialKey({ home: this.home });
-    if (!key) {
-      return {
-        source: "nvidia_env",
-        candidates: [],
-        diagnostics: ["\u672A\u53D1\u73B0 NVIDIA_API_KEY\uFF1B\u53EF\u5728\u9762\u677F\u4E2D\u76F4\u63A5\u7C98\u8D34 build.nvidia.com \u751F\u6210\u7684 nvapi- Key\u3002"]
-      };
-    }
-    return {
-      source: envKey ? "nvidia_env" : "dsh_credentials",
-      candidates: [{
-        candidateId: `nvidia:${fingerprintApiKey3(key)}`,
-        accountId: `nvidia-nim-${fingerprintApiKey3(key)}`,
-        providerId: PROVIDER_ID18,
-        displayName: `NVIDIA Key (${maskApiKey4(key)})`,
-        apiKey: key,
-        subscription: { plan: "NVIDIA NIM \u514D\u8D39", status: "active" }
-      }]
-    };
-  }
-  async importAccount(candidate2, context = {}) {
-    const apiKey = String(candidate2?.apiKey ?? "").trim();
-    const accountId = candidate2?.accountId || `nvidia-nim-${fingerprintApiKey3(apiKey)}`;
-    const ref = createCredentialRef(PROVIDER_ID18, accountId);
-    if (context.secretStore) {
-      await context.secretStore.write(ref, {
-        type: "nvidia_api_key",
-        providerId: PROVIDER_ID18,
-        apiKey,
-        displayName: candidate2?.displayName || "NVIDIA NIM"
-      }).catch(() => {
-      });
-    }
-    return createAccountRecord({
-      accountId,
-      providerId: PROVIDER_ID18,
-      displayName: candidate2?.displayName || `NVIDIA Key (${maskApiKey4(apiKey)})`,
-      email: candidate2?.email ?? null,
-      auth: { kind: "api_key", credentialRef: ref },
-      subscription: { plan: "NVIDIA NIM \u514D\u8D39", status: "active", expiresAt: null },
-      resources: {
-        quotaSource: "nvidia_free_tier",
-        quotaAvailable: false,
-        quotaDiagnostic: NVIDIA_FREE_NOTE,
-        quotaUrl: "https://build.nvidia.com"
-      },
-      health: { status: "healthy" }
-    });
-  }
-  async importSource(source, context = {}) {
-    const raw = typeof source === "string" ? source : source?.apiKey ?? source?.key ?? source?.token ?? "";
-    const apiKey = String(raw ?? "").trim();
-    if (!apiKey) throw new ValidationError("\u8BF7\u8F93\u5165 NVIDIA API Key\uFF08\u5F62\u5982 nvapi-...\uFF09");
-    if (!isNvidiaKey(apiKey)) throw new ValidationError("NVIDIA API Key \u5E94\u4EE5 nvapi- \u5F00\u5934\uFF0C\u8BF7\u5230 build.nvidia.com \u590D\u5236");
-    const label = typeof source === "object" && typeof source?.label === "string" ? source.label.trim() : "";
-    return [await this.importAccount({
-      apiKey,
-      source: "manual_api_key",
-      displayName: label || `NVIDIA Key (${maskApiKey4(apiKey)})`,
-      email: maskApiKey4(apiKey)
-    }, context)];
-  }
-  async refreshAccount(account, context = {}) {
-    let apiKey = null;
-    if (context.secretStore && account?.auth?.credentialRef) {
-      try {
-        const stored = await context.secretStore.read(account.auth.credentialRef);
-        apiKey = stored?.apiKey ?? null;
-      } catch {
-      }
-    }
-    return {
-      health: {
-        // A missing key is the only unhealthy state we can observe locally;
-        // rate limits surface as request errors on the first call.
-        status: apiKey || account?.auth?.credentialRef ? "healthy" : "expired",
-        lastCheckedAt: (/* @__PURE__ */ new Date()).toISOString()
-      },
-      quota: await this.getQuota(account, context)
-    };
-  }
-  async getQuota(account, context = {}) {
-    return {
-      quota: createQuotaSnapshot({}),
-      resources: {
-        quotaSource: "nvidia_free_tier",
-        quotaDiagnostic: NVIDIA_FREE_NOTE,
-        quotaUrl: "https://build.nvidia.com"
-      }
-    };
-  }
-  async getCatalog(context = {}) {
-    let credential = null;
-    if (context.secretStore && context.accounts?.[0]?.auth?.credentialRef) {
-      try {
-        credential = await context.secretStore.read(context.accounts[0].auth.credentialRef);
-      } catch {
-      }
-    }
-    return this.catalogLoader({
-      force: Boolean(context?.force),
-      credential,
-      accounts: context?.accounts ?? null
-    });
-  }
-  async invoke(request, invocation, context = {}) {
-    return this.stream(request, invocation, context);
-  }
-  async stream(request, invocation, context = {}) {
-    let credential = null;
-    if (context.secretStore && invocation?.account?.auth?.credentialRef) {
-      try {
-        credential = await context.secretStore.read(invocation.account.auth.credentialRef);
-      } catch {
-      }
-    }
-    return this.requestExecutor({
-      request,
-      account: invocation?.account ?? null,
-      credential,
-      signal: context.signal ?? null,
-      attachments: context.attachments ?? invocation?.attachments ?? null
-    });
-  }
-};
-function createNvidiaDriver(options = {}) {
-  return new NvidiaDriver(options);
-}
-
-// modules/provider-nvidia/src/index.mjs
-function createNvidiaModule({ driver = {} } = {}) {
-  return defineProviderModule({
-    id: "nvidia-nim",
-    displayName: "NVIDIA NIM",
-    capabilities: [
-      "api_key_auth",
-      "catalog",
-      "quota",
-      "invoke",
-      "stream"
-    ],
-    driver
-  });
-}
-
 // packages/runtime/src/dockyard-runtime.mjs
 var candidateSummarizers = /* @__PURE__ */ new Map([
   ["openai-codex", summarizeCodexCandidate],
@@ -19499,8 +18890,7 @@ var candidateSummarizers = /* @__PURE__ */ new Map([
   ["commandcode", summarizeCommandCodeCandidate],
   ["hermes", summarizeHermesCandidate],
   ["openrouter-free", summarizeOpenRouterFreeCandidate],
-  ["trae-cn", summarizeTraeCnCandidate],
-  ["nvidia-nim", summarizeNvidiaCandidate]
+  ["trae-cn", summarizeTraeCnCandidate]
 ]);
 var DEFAULT_REFRESH_TIMEOUT_MS = 3e4;
 function numericOption(value, fallback) {
@@ -19684,15 +19074,6 @@ function createDefaultProviderEntries(options = {}) {
         })
       }),
       driver: options.openrouterFreeDriver
-    },
-    {
-      module: createNvidiaModule({
-        driver: options.nvidiaDriver ?? createNvidiaDriver({
-          ...withRequestExecutor("nvidia-nim", options.nvidia, requestExecutors),
-          ...catalogLoaders["nvidia-nim"] ? { catalogLoader: catalogLoaders["nvidia-nim"] } : {}
-        })
-      }),
-      driver: options.nvidiaDriver
     },
     {
       module: createTraeCnModule({
@@ -20451,7 +19832,7 @@ var DockyardRuntime = class {
 // packages/dsh-plugin/src/codex-transport.mjs
 import { access, readFile as readFile7 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname as dirname8, join as join16, resolve } from "node:path";
+import { dirname as dirname8, join as join15, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 var activeCodexModels = /* @__PURE__ */ new Map();
 function recordCodexModels(models) {
@@ -20497,15 +19878,15 @@ async function findPackageRoot(startDirectory, packageName) {
   const packageParts = packageName.split("/");
   let current = resolve(startDirectory);
   while (true) {
-    const candidate2 = join16(current, "node_modules", ...packageParts);
-    if (await isFile2(join16(candidate2, "package.json"))) return candidate2;
+    const candidate2 = join15(current, "node_modules", ...packageParts);
+    if (await isFile2(join15(candidate2, "package.json"))) return candidate2;
     const parent = dirname8(current);
     if (parent === current) return null;
     current = parent;
   }
 }
 async function packageImportUrl(packageRoot, subpath = null) {
-  const packageJson = JSON.parse(await readFile7(join16(packageRoot, "package.json"), "utf8"));
+  const packageJson = JSON.parse(await readFile7(join15(packageRoot, "package.json"), "utf8"));
   const exports = packageJson.exports;
   let target = null;
   if (!subpath) {
@@ -20527,7 +19908,7 @@ async function packageImportUrl(packageRoot, subpath = null) {
   if (typeof target !== "string") {
     throw new Error(`Cannot resolve ${subpath ?? "."} from ${packageRoot}`);
   }
-  return pathToFileURL(join16(packageRoot, target)).href;
+  return pathToFileURL(join15(packageRoot, target)).href;
 }
 async function importFromDshInstall(moduleAnchor) {
   const anchor = moduleAnchor ?? process.env.DOCKYARD_DSH_CLI_PATH ?? process.argv[1] ?? import.meta.url;
@@ -21301,9 +20682,9 @@ var dockyardDshConstants = Object.freeze({
 });
 
 // packages/dsh-plugin/src/dockyard-credential-store.mjs
-import { createHash as createHash13 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 function dshCredentialRef(ref) {
-  const digest = createHash13("sha256").update(String(ref)).digest("hex");
+  const digest = createHash12("sha256").update(String(ref)).digest("hex");
   return `DOCKYARD_DSH_${digest}`;
 }
 function parseCredential(value) {
@@ -21343,7 +20724,7 @@ function createDockyardCredentialStore(credentials, fallback = null) {
 // packages/dsh-plugin/src/native-key-pool-host.mjs
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAgentLoopRequest, markAgentLoopRequest } from "@deepseek-ai/dsh-llm";
-import { join as join17 } from "node:path";
+import { join as join16 } from "node:path";
 
 // packages/dsh-plugin/src/native-usage.mjs
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -21641,7 +21022,7 @@ var NativeKeyPoolHost = class {
     this.logger = logger ?? console;
     this.contextWindowOverrides = contextWindowOverrides;
     this.stateStore = stateStore ?? new JsonStateStore({
-      filePath: join17(defaultDockyardHome(), "native-key-pools.json")
+      filePath: join16(defaultDockyardHome(), "native-key-pools.json")
     });
     this.readyPromise = this.loadState();
   }
@@ -22008,7 +21389,7 @@ var NativeKeyPoolHost = class {
 // packages/dsh-plugin/src/vpn-ssrf-patch.mjs
 var import_ipaddr = __toESM(require_ipaddr(), 1);
 import { createRequire as createRequire2 } from "node:module";
-import { dirname as dirname9, join as join18 } from "node:path";
+import { dirname as dirname9, join as join17 } from "node:path";
 var isPatched = false;
 function patchFakeIpVpnSupport() {
   if (isPatched) return true;
@@ -22034,7 +21415,7 @@ function patchFakeIpVpnSupport() {
   ];
   if (typeof process?.execPath === "string") {
     try {
-      candidates.push(join18(dirname9(dirname9(process.execPath)), "Resources/app.asar/dsh/node_modules/ipaddr.js"));
+      candidates.push(join17(dirname9(dirname9(process.execPath)), "Resources/app.asar/dsh/node_modules/ipaddr.js"));
     } catch {
     }
   }
@@ -22093,8 +21474,7 @@ function apply(ctx, config = {}) {
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
       commandcode: runtimeOptions.requestExecutors?.commandcode ?? createCommandCodeNativeExecutor(runtimeOptions.commandcode ?? {}),
       hermes: runtimeOptions.requestExecutors?.hermes ?? createHermesNativeExecutor(runtimeOptions.hermes ?? {}),
-      "openrouter-free": runtimeOptions.requestExecutors?.["openrouter-free"] ?? createOpenRouterFreeNativeExecutor(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {}),
-      "nvidia-nim": runtimeOptions.requestExecutors?.["nvidia-nim"] ?? createNvidiaNativeExecutor(runtimeOptions.nvidia ?? {})
+      "openrouter-free": runtimeOptions.requestExecutors?.["openrouter-free"] ?? createOpenRouterFreeNativeExecutor(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {})
     };
     runtimeOptions.catalogLoaders = {
       ...runtimeOptions.catalogLoaders ?? {},
@@ -22109,11 +21489,7 @@ function apply(ctx, config = {}) {
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
       commandcode: runtimeOptions.catalogLoaders?.commandcode ?? createCommandCodeCatalogLoader(runtimeOptions.commandcode ?? {}),
       hermes: runtimeOptions.catalogLoaders?.hermes ?? createHermesCatalogLoader(runtimeOptions.hermes ?? {}),
-      "openrouter-free": runtimeOptions.catalogLoaders?.["openrouter-free"] ?? createOpenRouterFreeCatalogLoader(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {}),
-      "nvidia-nim": runtimeOptions.catalogLoaders?.["nvidia-nim"] ?? createNvidiaCatalogLoader({
-        ...runtimeOptions.nvidia ?? {},
-        registryLoader: modelRegistryLoader
-      })
+      "openrouter-free": runtimeOptions.catalogLoaders?.["openrouter-free"] ?? createOpenRouterFreeCatalogLoader(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {})
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders).filter(([, loader]) => typeof loader === "function");
@@ -22240,8 +21616,8 @@ function apply(ctx, config = {}) {
                   res.end("Forbidden");
                   return;
                 }
-                const filePath = join19(process.cwd(), "artifacts", cleanPath);
-                if (!existsSync8(filePath)) {
+                const filePath = join18(process.cwd(), "artifacts", cleanPath);
+                if (!existsSync7(filePath)) {
                   res.writeHead(404);
                   res.end("Not Found");
                   return;
@@ -22256,7 +21632,7 @@ function apply(ctx, config = {}) {
                   svg: "image/svg+xml"
                 };
                 const contentType = mimeTypes[ext] ?? "application/octet-stream";
-                const content = readFileSync7(filePath);
+                const content = readFileSync6(filePath);
                 res.writeHead(200, {
                   "Content-Type": contentType,
                   "Content-Length": content.length,
