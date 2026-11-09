@@ -99,8 +99,8 @@ test("only nvapi- keys are accepted from the panel", async () => {
 
   const secretStore = memorySecretStore();
   const [account] = await driver.importSource({ apiKey: "nvapi-test-key-1234567890" }, { secretStore });
-  assert.match(account.accountId, /^nvidia-[0-9a-f]{16}$/u);
-  assert.equal(account.providerId, "nvidia");
+  assert.match(account.accountId, /^nvidia-nim-[0-9a-f]{16}$/u);
+  assert.equal(account.providerId, "nvidia-nim");
   const stored = await secretStore.read(account.auth.credentialRef);
   assert.equal(stored.apiKey, "nvapi-test-key-1234567890");
 });
@@ -213,4 +213,15 @@ test("an empty environment and no credentials file reports why nothing was found
   const discovered = await driver.discover();
   assert.deepEqual(discovered.candidates, []);
   assert.match(discovered.diagnostics[0], /nvapi-/u);
+});
+
+test("the provider id does not collide with the host's own NVIDIA provider", async () => {
+  // DSH registers a built-in provider whose id is "nvidia"; registering the
+  // same id twice took the whole provider service down (the panel showed zero
+  // providers and the host reported an unavailable service). Our module must
+  // therefore use its own id.
+  const { createNvidiaModule } = await import("../modules/provider-nvidia/src/index.mjs");
+  const module = createNvidiaModule({ driver: {} });
+  assert.equal(module.manifest.id, "nvidia-nim");
+  assert.notEqual(module.manifest.id, "nvidia");
 });

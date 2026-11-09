@@ -11,7 +11,7 @@ import {
   validateNativeEndpoint,
 } from "../../../packages/providers/src/native-transport.mjs";
 
-const PROVIDER_ID = "nvidia";
+const PROVIDER_ID = "nvidia-nim";
 
 /** NVIDIA's NIM endpoints speak the OpenAI chat-completions dialect. */
 export const DEFAULT_NVIDIA_CHAT_ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions";

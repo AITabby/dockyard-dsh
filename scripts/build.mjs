@@ -58,7 +58,7 @@ await runtime.register(createTraeCnModule());
 await runtime.register(createNvidiaModule());
 
 const ids = runtime.list().map((module) => module.id);
-if (!ids.includes("openai-codex") || !ids.includes("antigravity") || !ids.includes("grok") || !ids.includes("claude") || !ids.includes("cursor") || !ids.includes("opencode") || !ids.includes("kilo") || !ids.includes("commandcode") || !ids.includes("hermes") || !ids.includes("openrouter-free") || !ids.includes("trae-cn") || !ids.includes("nvidia")) {
+if (!ids.includes("openai-codex") || !ids.includes("antigravity") || !ids.includes("grok") || !ids.includes("claude") || !ids.includes("cursor") || !ids.includes("opencode") || !ids.includes("kilo") || !ids.includes("commandcode") || !ids.includes("hermes") || !ids.includes("openrouter-free") || !ids.includes("trae-cn") || !ids.includes("nvidia-nim")) {
   throw new Error("Initial provider modules are not registered");
 }
 

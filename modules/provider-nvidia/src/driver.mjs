@@ -19,7 +19,7 @@ import {
   createNvidiaNativeExecutor,
 } from "./native-transport.mjs";
 
-const PROVIDER_ID = "nvidia";
+const PROVIDER_ID = "nvidia-nim";
 
 /** NVIDIA hosts a free tier; usage is rate limited rather than metered. */
 const NVIDIA_FREE_NOTE = "NVIDIA NIM 免费额度：按速率限制，不按金额计量";
@@ -176,7 +176,7 @@ export class NvidiaDriver {
       source: envKey ? "nvidia_env" : "dsh_credentials",
       candidates: [{
         candidateId: `nvidia:${fingerprintApiKey(key)}`,
-        accountId: `nvidia-${fingerprintApiKey(key)}`,
+        accountId: `nvidia-nim-${fingerprintApiKey(key)}`,
         providerId: PROVIDER_ID,
         displayName: `NVIDIA Key (${maskApiKey(key)})`,
         apiKey: key,
@@ -187,7 +187,7 @@ export class NvidiaDriver {
 
   async importAccount(candidate, context = {}) {
     const apiKey = String(candidate?.apiKey ?? "").trim();
-    const accountId = candidate?.accountId || `nvidia-${fingerprintApiKey(apiKey)}`;
+    const accountId = candidate?.accountId || `nvidia-nim-${fingerprintApiKey(apiKey)}`;
     const ref = createCredentialRef(PROVIDER_ID, accountId);
 
     if (context.secretStore) {

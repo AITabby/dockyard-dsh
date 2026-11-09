@@ -18885,7 +18885,7 @@ import { homedir as homedir14 } from "node:os";
 import { join as join15 } from "node:path";
 
 // modules/provider-nvidia/src/native-transport.mjs
-var PROVIDER_ID17 = "nvidia";
+var PROVIDER_ID17 = "nvidia-nim";
 var DEFAULT_NVIDIA_CHAT_ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions";
 var DEFAULT_NVIDIA_MODELS_ENDPOINT = "https://integrate.api.nvidia.com/v1/models";
 function firstString11(...values) {
@@ -19129,7 +19129,7 @@ var nvidiaNativeTransportConstants = Object.freeze({
 });
 
 // modules/provider-nvidia/src/driver.mjs
-var PROVIDER_ID18 = "nvidia";
+var PROVIDER_ID18 = "nvidia-nim";
 var NVIDIA_FREE_NOTE = "NVIDIA NIM \u514D\u8D39\u989D\u5EA6\uFF1A\u6309\u901F\u7387\u9650\u5236\uFF0C\u4E0D\u6309\u91D1\u989D\u8BA1\u91CF";
 function fingerprintApiKey3(apiKey) {
   return createHash12("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
@@ -19254,7 +19254,7 @@ var NvidiaDriver = class {
       source: envKey ? "nvidia_env" : "dsh_credentials",
       candidates: [{
         candidateId: `nvidia:${fingerprintApiKey3(key)}`,
-        accountId: `nvidia-${fingerprintApiKey3(key)}`,
+        accountId: `nvidia-nim-${fingerprintApiKey3(key)}`,
         providerId: PROVIDER_ID18,
         displayName: `NVIDIA Key (${maskApiKey4(key)})`,
         apiKey: key,
@@ -19264,7 +19264,7 @@ var NvidiaDriver = class {
   }
   async importAccount(candidate2, context = {}) {
     const apiKey = String(candidate2?.apiKey ?? "").trim();
-    const accountId = candidate2?.accountId || `nvidia-${fingerprintApiKey3(apiKey)}`;
+    const accountId = candidate2?.accountId || `nvidia-nim-${fingerprintApiKey3(apiKey)}`;
     const ref = createCredentialRef(PROVIDER_ID18, accountId);
     if (context.secretStore) {
       await context.secretStore.write(ref, {
@@ -19374,7 +19374,7 @@ function createNvidiaDriver(options = {}) {
 // modules/provider-nvidia/src/index.mjs
 function createNvidiaModule({ driver = {} } = {}) {
   return defineProviderModule({
-    id: "nvidia",
+    id: "nvidia-nim",
     displayName: "NVIDIA NIM",
     capabilities: [
       "api_key_auth",
@@ -19400,7 +19400,7 @@ var candidateSummarizers = /* @__PURE__ */ new Map([
   ["hermes", summarizeHermesCandidate],
   ["openrouter-free", summarizeOpenRouterFreeCandidate],
   ["trae-cn", summarizeTraeCnCandidate],
-  ["nvidia", summarizeNvidiaCandidate]
+  ["nvidia-nim", summarizeNvidiaCandidate]
 ]);
 var DEFAULT_REFRESH_TIMEOUT_MS = 3e4;
 function numericOption(value, fallback) {
@@ -19588,8 +19588,8 @@ function createDefaultProviderEntries(options = {}) {
     {
       module: createNvidiaModule({
         driver: options.nvidiaDriver ?? createNvidiaDriver({
-          ...withRequestExecutor("nvidia", options.nvidia, requestExecutors),
-          ...catalogLoaders.nvidia ? { catalogLoader: catalogLoaders.nvidia } : {}
+          ...withRequestExecutor("nvidia-nim", options.nvidia, requestExecutors),
+          ...catalogLoaders["nvidia-nim"] ? { catalogLoader: catalogLoaders["nvidia-nim"] } : {}
         })
       }),
       driver: options.nvidiaDriver

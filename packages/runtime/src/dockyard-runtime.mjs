@@ -48,7 +48,7 @@ const candidateSummarizers = new Map([
   ["hermes", summarizeHermesCandidate],
   ["openrouter-free", summarizeOpenRouterFreeCandidate],
   ["trae-cn", summarizeTraeCnCandidate],
-  ["nvidia", summarizeNvidiaCandidate],
+  ["nvidia-nim", summarizeNvidiaCandidate],
 ]);
 
 // Official provider CLIs may need a network round-trip to rotate OAuth
@@ -279,8 +279,8 @@ export function createDefaultProviderEntries(options = {}) {
     {
       module: createNvidiaModule({
         driver: options.nvidiaDriver ?? createNvidiaDriver({
-          ...withRequestExecutor("nvidia", options.nvidia, requestExecutors),
-          ...(catalogLoaders.nvidia ? { catalogLoader: catalogLoaders.nvidia } : {}),
+          ...withRequestExecutor("nvidia-nim", options.nvidia, requestExecutors),
+          ...(catalogLoaders["nvidia-nim"] ? { catalogLoader: catalogLoaders["nvidia-nim"] } : {}),
         }),
       }),
       driver: options.nvidiaDriver,

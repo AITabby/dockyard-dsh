@@ -2,7 +2,7 @@ import { defineProviderModule } from "../../../packages/core/src/provider-module
 
 export function createNvidiaModule({ driver = {} } = {}) {
   return defineProviderModule({
-    id: "nvidia",
+    id: "nvidia-nim",
     displayName: "NVIDIA NIM",
     capabilities: [
       "api_key_auth",
