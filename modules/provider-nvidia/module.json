@@ -1,0 +1,12 @@
+{
+  "id": "nvidia",
+  "kind": "provider",
+  "dataSource": "live_catalog",
+  "capabilities": [
+    "api_key_auth",
+    "catalog",
+    "quota",
+    "invoke",
+    "stream"
+  ]
+}
