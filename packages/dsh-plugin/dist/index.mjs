@@ -19179,43 +19179,118 @@ function parseNvidiaCatalog(data, { registry = null } = {}) {
   }
   return { models, source: "nvidia_live_catalog" };
 }
+function createNvidiaAvailabilityProber({
+  endpoint: endpoint2 = DEFAULT_NVIDIA_CHAT_ENDPOINT,
+  fetchImpl = fetch,
+  timeoutMs = 12e3,
+  concurrency = 8
+} = {}) {
+  return async function probeNvidiaModels(ids, { token } = {}) {
+    const verdicts = /* @__PURE__ */ new Map();
+    const queue = Array.isArray(ids) ? [...ids] : [];
+    if (!token || queue.length === 0) return verdicts;
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < queue.length) {
+        const id = queue[cursor];
+        cursor += 1;
+        if (typeof id !== "string" || id.length === 0) continue;
+        try {
+          const response = await fetchImpl(endpoint2, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "content-type": "application/json"
+            },
+            body: JSON.stringify({ model: id, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+            signal: AbortSignal.timeout(timeoutMs)
+          });
+          await response.text().catch(() => "");
+          verdicts.set(id, !(response.status === 404 || response.status === 410));
+        } catch {
+          verdicts.set(id, true);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => worker()));
+    return verdicts;
+  };
+}
 function createNvidiaCatalogLoader({
   modelsUrl = DEFAULT_NVIDIA_MODELS_ENDPOINT,
   fetchImpl = fetch,
   cacheTtlMs = 3e5,
-  registryLoader = null
+  registryLoader = null,
+  prober = null,
+  probeTtlMs = 6e5
 } = {}) {
   let cached = null;
   let cachedAt = 0;
+  let probeState = { verdicts: null, at: 0 };
+  let probing = null;
+  function applyProbe(catalog) {
+    const verdicts = probeState.verdicts;
+    if (!verdicts || !catalog?.models) return catalog;
+    const models = catalog.models.filter((model) => verdicts.get(model.id) !== false);
+    const hidden = catalog.models.length - models.length;
+    return {
+      ...catalog,
+      models,
+      ...hidden > 0 ? { diagnostics: [`\u5DF2\u9690\u85CF ${hidden} \u4E2A\u5F53\u524D\u8D26\u53F7\u4E0D\u53EF\u7528\u7684\u6A21\u578B`] } : {}
+    };
+  }
+  async function runProbe(ids, token) {
+    if (probing) return probing;
+    probing = (async () => {
+      try {
+        const verdicts = await prober(ids, { token });
+        probeState = { verdicts, at: Date.now() };
+        cachedAt = 0;
+        return verdicts;
+      } catch {
+        return null;
+      } finally {
+        probing = null;
+      }
+    })();
+    return probing;
+  }
   return async function nvidiaCatalogLoader({ force = false, credential = null, accounts = null } = {}) {
     const now = Date.now();
-    if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
+    if (!force && cached && cachedAt > 0 && now - cachedAt < cacheTtlMs) return applyProbe(cached);
     let token = credential?.apiKey ?? credential?.access ?? null;
     if (!token && Array.isArray(accounts) && accounts.length > 0) token = accounts[0]?.auth?.apiKey ?? null;
-    try {
-      assertSecureEndpointUrl(modelsUrl, { providerId: PROVIDER_ID18 });
-      const { body } = await fetchJson(
-        modelsUrl,
-        { headers: { Accept: "application/json", ...token ? { Authorization: `Bearer ${token}` } : {} } },
-        { fetchImpl, timeoutMs: 2e4 }
-      );
-      let registry = null;
-      if (typeof registryLoader === "function") {
-        registry = await registryLoader().catch(() => null);
+    if (!cached || force) {
+      try {
+        assertSecureEndpointUrl(modelsUrl, { providerId: PROVIDER_ID18 });
+        const { body } = await fetchJson(
+          modelsUrl,
+          { headers: { Accept: "application/json", ...token ? { Authorization: `Bearer ${token}` } : {} } },
+          { fetchImpl, timeoutMs: 2e4 }
+        );
+        const registry = typeof registryLoader === "function" ? await registryLoader().catch(() => null) : null;
+        const parsed = parseNvidiaCatalog(body, { registry });
+        if (parsed.models.length > 0) {
+          cached = parsed;
+          cachedAt = now;
+        }
+      } catch {
       }
-      const parsed = parseNvidiaCatalog(body, { registry });
-      if (parsed.models.length > 0) {
-        cached = parsed;
-        cachedAt = now;
-        return cached;
-      }
-    } catch {
     }
-    return {
-      models: cached?.models ?? [],
-      source: "nvidia_live_catalog",
-      diagnostics: ["\u672A\u80FD\u8BFB\u53D6 NVIDIA \u6A21\u578B\u5217\u8868\uFF08https://integrate.api.nvidia.com/v1/models\uFF09\uFF0C\u7A0D\u540E\u91CD\u8BD5"]
-    };
+    if (!cached) {
+      return {
+        models: [],
+        source: "nvidia_live_catalog",
+        diagnostics: ["\u672A\u80FD\u8BFB\u53D6 NVIDIA \u6A21\u578B\u5217\u8868\uFF08https://integrate.api.nvidia.com/v1/models\uFF09\uFF0C\u7A0D\u540E\u91CD\u8BD5"]
+      };
+    }
+    const stale = !probeState.verdicts || now - probeState.at > probeTtlMs;
+    if (prober && token && stale) {
+      const ids = cached.models.map((model) => model.id);
+      if (force) await runProbe(ids, token);
+      else void runProbe(ids, token);
+    }
+    return applyProbe(cached);
   };
 }
 function discoverDshCredentialKey({ home = homedir14() } = {}) {
@@ -19250,12 +19325,18 @@ var NvidiaDriver = class {
     fetchImpl = fetch,
     env = process.env,
     home = homedir14(),
-    registryLoader = null
+    registryLoader = null,
+    prober = null
   } = {}) {
     this.fetchImpl = fetchImpl;
     this.env = env;
     this.home = home;
-    this.catalogLoader = catalogLoader ?? createNvidiaCatalogLoader({ fetchImpl, registryLoader });
+    this.prober = prober === null ? createNvidiaAvailabilityProber({ fetchImpl }) : prober ?? createNvidiaAvailabilityProber({ fetchImpl });
+    this.catalogLoader = catalogLoader ?? createNvidiaCatalogLoader({
+      fetchImpl,
+      registryLoader,
+      prober: this.prober
+    });
     this.requestExecutor = requestExecutor ?? createNvidiaNativeExecutor({ fetchImpl, env });
   }
   /** NVIDIA has no OAuth: a key comes from build.nvidia.com, or the environment. */

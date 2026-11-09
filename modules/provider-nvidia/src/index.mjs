@@ -17,6 +17,7 @@ export function createNvidiaModule({ driver = {} } = {}) {
 
 export {
   NvidiaDriver,
+  createNvidiaAvailabilityProber,
   createNvidiaCatalogLoader,
   createNvidiaDriver,
   parseNvidiaCatalog,

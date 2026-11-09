@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createNvidiaAvailabilityProber,
   createNvidiaCatalogLoader,
   createNvidiaDriver,
   createNvidiaNativeExecutor,
@@ -251,4 +252,54 @@ test("context windows come from the host registry when it knows the model", asyn
   assert.deepEqual(byId.get("moonshotai/kimi-k2.6").inputModalities, ["text", "image"]);
   // An unknown model keeps the conservative floor rather than borrowing a value.
   assert.equal(byId.get("01-ai/yi-large").contextWindow, 128_000);
+});
+
+test("the prober only drops models that answer 404 or 410", async () => {
+  const statuses = { "a/ok": 200, "a/gone": 410, "a/missing": 404, "a/cold": 503, "a/slow": 0 };
+  const prober = createNvidiaAvailabilityProber({
+    fetchImpl: async (_url, init) => {
+      const id = JSON.parse(init.body).model;
+      if (statuses[id] === 0) throw new Error("timeout");
+      return new Response("{}", { status: statuses[id] });
+    },
+  });
+  const verdicts = await prober(Object.keys(statuses), { token: "nvapi-x" });
+  assert.equal(verdicts.get("a/ok"), true);
+  assert.equal(verdicts.get("a/gone"), false);
+  assert.equal(verdicts.get("a/missing"), false);
+  // Cold starts and timeouts are not dead models; dropping them would hide
+  // perfectly good endpoints that were merely scaled to zero.
+  assert.equal(verdicts.get("a/cold"), true);
+  assert.equal(verdicts.get("a/slow"), true);
+});
+
+test("an explicit refresh hides the models this account cannot use", async () => {
+  let probed = 0;
+  const loader = createNvidiaCatalogLoader({
+    fetchImpl: async () => new Response(JSON.stringify({
+      data: [{ id: "good/model" }, { id: "dead/model" }],
+    }), { status: 200 }),
+    prober: async (ids) => {
+      probed += ids.length;
+      return new Map([["good/model", true], ["dead/model", false]]);
+    },
+  });
+
+  const catalog = await loader({ force: true, credential: { apiKey: "nvapi-test" } });
+  assert.equal(probed, 2, "every id is probed on a refresh");
+  assert.deepEqual(catalog.models.map((model) => model.id), ["good/model"]);
+  assert.match(catalog.diagnostics?.[0] ?? "", /隐藏 1 个/u);
+});
+
+test("without a key the catalog is returned whole, since nothing can be verified", async () => {
+  let probed = 0;
+  const loader = createNvidiaCatalogLoader({
+    fetchImpl: async () => new Response(JSON.stringify({
+      data: [{ id: "one/model" }, { id: "two/model" }],
+    }), { status: 200 }),
+    prober: async () => { probed += 1; return new Map(); },
+  });
+  const catalog = await loader({ force: true, credential: null });
+  assert.equal(probed, 0);
+  assert.equal(catalog.models.length, 2);
 });

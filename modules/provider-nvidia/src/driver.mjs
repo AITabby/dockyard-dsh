@@ -15,6 +15,7 @@ import {
   resolveMaxTokensFromModel,
 } from "../../../packages/providers/src/provider-utils.mjs";
 import {
+  DEFAULT_NVIDIA_CHAT_ENDPOINT,
   DEFAULT_NVIDIA_MODELS_ENDPOINT,
   createNvidiaNativeExecutor,
 } from "./native-transport.mjs";
@@ -96,49 +97,147 @@ export function parseNvidiaCatalog(data, { registry = null } = {}) {
   return { models, source: "nvidia_live_catalog" };
 }
 
+/**
+ * NVIDIA lists models it will not serve: the catalog is a global registry, so a
+ * given account sees ~59 entries answering 404/410. This probes each id with a
+ * one-token request and remembers the verdict, so the panel only offers models
+ * that actually answer.
+ *
+ * Only 404/410 count as unusable. Timeouts and 5xx are NIM's cold start, not a
+ * dead model, so those stay available.
+ */
+export function createNvidiaAvailabilityProber({
+  endpoint = DEFAULT_NVIDIA_CHAT_ENDPOINT,
+  fetchImpl = fetch,
+  timeoutMs = 12_000,
+  concurrency = 8,
+} = {}) {
+  return async function probeNvidiaModels(ids, { token } = {}) {
+    const verdicts = new Map();
+    const queue = Array.isArray(ids) ? [...ids] : [];
+    if (!token || queue.length === 0) return verdicts;
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < queue.length) {
+        const id = queue[cursor];
+        cursor += 1;
+        if (typeof id !== "string" || id.length === 0) continue;
+        try {
+          const response = await fetchImpl(endpoint, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({ model: id, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+            signal: AbortSignal.timeout(timeoutMs),
+          });
+          await response.text().catch(() => "");
+          // A dead or unentitled model answers 404/410; anything else is alive
+          // enough (a 400 means the model exists but disliked the tiny payload).
+          verdicts.set(id, !(response.status === 404 || response.status === 410));
+        } catch {
+          verdicts.set(id, true);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => worker()));
+    return verdicts;
+  };
+}
+
 export function createNvidiaCatalogLoader({
   modelsUrl = DEFAULT_NVIDIA_MODELS_ENDPOINT,
   fetchImpl = fetch,
   cacheTtlMs = 300_000,
   registryLoader = null,
+  prober = null,
+  probeTtlMs = 600_000,
 } = {}) {
   let cached = null;
   let cachedAt = 0;
+  let probeState = { verdicts: null, at: 0 };
+  let probing = null;
+
+  function applyProbe(catalog) {
+    const verdicts = probeState.verdicts;
+    if (!verdicts || !catalog?.models) return catalog;
+    const models = catalog.models.filter((model) => verdicts.get(model.id) !== false);
+    const hidden = catalog.models.length - models.length;
+    return {
+      ...catalog,
+      models,
+      ...(hidden > 0 ? { diagnostics: [`已隐藏 ${hidden} 个当前账号不可用的模型`] } : {}),
+    };
+  }
+
+  async function runProbe(ids, token) {
+    if (probing) return probing;
+    probing = (async () => {
+      try {
+        const verdicts = await prober(ids, { token });
+        probeState = { verdicts, at: Date.now() };
+        // The catalog itself did not change, so drop the memoised timestamp to
+        // make the next reader apply the verdicts instead of returning early.
+        cachedAt = 0;
+        return verdicts;
+      } catch {
+        return null;
+      } finally {
+        probing = null;
+      }
+    })();
+    return probing;
+  }
 
   return async function nvidiaCatalogLoader({ force = false, credential = null, accounts = null } = {}) {
     const now = Date.now();
-    if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
+    if (!force && cached && cachedAt > 0 && now - cachedAt < cacheTtlMs) return applyProbe(cached);
 
     let token = credential?.apiKey ?? credential?.access ?? null;
     if (!token && Array.isArray(accounts) && accounts.length > 0) token = accounts[0]?.auth?.apiKey ?? null;
 
-    try {
-      assertSecureEndpointUrl(modelsUrl, { providerId: PROVIDER_ID });
-      const { body } = await fetchJson(
-        modelsUrl,
-        { headers: { Accept: "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) } },
-        { fetchImpl, timeoutMs: 20_000 },
-      );
-      let registry = null;
-      if (typeof registryLoader === "function") {
-        registry = await registryLoader().catch(() => null);
+    if (!cached || force) {
+      try {
+        assertSecureEndpointUrl(modelsUrl, { providerId: PROVIDER_ID });
+        const { body } = await fetchJson(
+          modelsUrl,
+          { headers: { Accept: "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) } },
+          { fetchImpl, timeoutMs: 20_000 },
+        );
+        const registry = typeof registryLoader === "function"
+          ? await registryLoader().catch(() => null)
+          : null;
+        const parsed = parseNvidiaCatalog(body, { registry });
+        if (parsed.models.length > 0) {
+          cached = parsed;
+          cachedAt = now;
+        }
+      } catch {
+        // Fall through to whatever was cached rather than pretending the
+        // catalog is empty because of a network blip.
       }
-      const parsed = parseNvidiaCatalog(body, { registry });
-      if (parsed.models.length > 0) {
-        cached = parsed;
-        cachedAt = now;
-        return cached;
-      }
-    } catch {
-      // Fall through to the diagnostic below rather than pretending the
-      // catalog is empty because of a network blip.
     }
 
-    return {
-      models: cached?.models ?? [],
-      source: "nvidia_live_catalog",
-      diagnostics: ["未能读取 NVIDIA 模型列表（https://integrate.api.nvidia.com/v1/models），稍后重试"],
-    };
+    if (!cached) {
+      return {
+        models: [],
+        source: "nvidia_live_catalog",
+        diagnostics: ["未能读取 NVIDIA 模型列表（https://integrate.api.nvidia.com/v1/models），稍后重试"],
+      };
+    }
+
+    // Probe on every refresh: models get retired and entitlements change, so a
+    // one-off check would go stale. An explicit refresh waits for it; a passive
+    // read keeps the previous verdicts and updates them in the background.
+    const stale = !probeState.verdicts || now - probeState.at > probeTtlMs;
+    if (prober && token && stale) {
+      const ids = cached.models.map((model) => model.id);
+      if (force) await runProbe(ids, token);
+      else void runProbe(ids, token);
+    }
+
+    return applyProbe(cached);
   };
 }
 
@@ -183,11 +282,21 @@ export class NvidiaDriver {
     env = process.env,
     home = homedir(),
     registryLoader = null,
+    prober = null,
   } = {}) {
     this.fetchImpl = fetchImpl;
     this.env = env;
     this.home = home;
-    this.catalogLoader = catalogLoader ?? createNvidiaCatalogLoader({ fetchImpl, registryLoader });
+    // Probing is on by default: NVIDIA's list includes models this account may
+    // not use, and hiding them is the whole point of the provider's catalog.
+    this.prober = prober === null
+      ? createNvidiaAvailabilityProber({ fetchImpl })
+      : (prober ?? createNvidiaAvailabilityProber({ fetchImpl }));
+    this.catalogLoader = catalogLoader ?? createNvidiaCatalogLoader({
+      fetchImpl,
+      registryLoader,
+      prober: this.prober,
+    });
     this.requestExecutor = requestExecutor ?? createNvidiaNativeExecutor({ fetchImpl, env });
   }
 
