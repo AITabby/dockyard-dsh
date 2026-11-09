@@ -225,3 +225,30 @@ test("the provider id does not collide with the host's own NVIDIA provider", asy
   assert.equal(module.manifest.id, "nvidia-nim");
   assert.notEqual(module.manifest.id, "nvidia");
 });
+
+test("context windows come from the host registry when it knows the model", async () => {
+  // NVIDIA's own list publishes no capability metadata, so without the registry
+  // every model would claim the same conservative 128k.
+  const loader = createNvidiaCatalogLoader({
+    fetchImpl: async () => new Response(JSON.stringify({
+      data: [
+        { id: "nvidia/nemotron-3-ultra-550b-a55b" },
+        { id: "moonshotai/kimi-k2.6" },
+        { id: "01-ai/yi-large" },
+      ],
+    }), { status: 200 }),
+    registryLoader: async () => [
+      { id: "nvidia/nemotron-3-ultra-550b-a55b", provider: "nvidia", contextWindow: 1_000_000, maxTokens: 128_000 },
+      { id: "moonshotai/kimi-k2.6", provider: "nvidia", contextWindow: 262_144, input: ["text", "image"] },
+      { id: "not-nvidia/x", provider: "openai", contextWindow: 5 },
+    ],
+  });
+
+  const catalog = await loader({});
+  const byId = new Map(catalog.models.map((model) => [model.id, model]));
+  assert.equal(byId.get("nvidia/nemotron-3-ultra-550b-a55b").contextWindow, 1_000_000);
+  assert.equal(byId.get("moonshotai/kimi-k2.6").contextWindow, 262_144);
+  assert.deepEqual(byId.get("moonshotai/kimi-k2.6").inputModalities, ["text", "image"]);
+  // An unknown model keeps the conservative floor rather than borrowing a value.
+  assert.equal(byId.get("01-ai/yi-large").contextWindow, 128_000);
+});

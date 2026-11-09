@@ -21,6 +21,9 @@ import {
 
 const PROVIDER_ID = "nvidia-nim";
 
+/** NIM does not publish context sizes; 128k is the common floor, not a claim. */
+const NVIDIA_CONTEXT_FALLBACK = 128_000;
+
 /** NVIDIA hosts a free tier; usage is rate limited rather than metered. */
 const NVIDIA_FREE_NOTE = "NVIDIA NIM 免费额度：按速率限制，不按金额计量";
 
@@ -48,20 +51,43 @@ function modelLabel(id) {
   return id;
 }
 
-export function parseNvidiaCatalog(data) {
+/**
+ * NVIDIA's own endpoints publish no capability metadata, so context windows and
+ * output limits are filled in from whatever the host registry knows about the
+ * same model id. Unknown models keep a conservative default instead of a
+ * fabricated exact number.
+ */
+function registryMetadata(registry) {
+  const byId = new Map();
+  for (const raw of Array.isArray(registry) ? registry : []) {
+    if (!raw || raw.provider !== "nvidia") continue;
+    const id = typeof raw.id === "string" ? raw.id : null;
+    if (!id) continue;
+    byId.set(id, raw);
+  }
+  return byId;
+}
+
+export function parseNvidiaCatalog(data, { registry = null } = {}) {
   const list = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : []);
+  const metadataById = registryMetadata(registry);
   const models = [];
   const seen = new Set();
   for (const item of list) {
     const id = typeof item?.id === "string" ? item.id.trim() : "";
     if (!id || seen.has(id)) continue;
     seen.add(id);
+    const known = metadataById.get(id) ?? null;
     models.push({
       id,
       name: modelLabel(id),
-      contextWindow: resolveContextWindowFromModel(item, 128_000),
-      maxTokens: resolveMaxTokensFromModel(item, 16_384),
-      inputModalities: ["text"],
+      contextWindow: known
+        ? resolveContextWindowFromModel(known, NVIDIA_CONTEXT_FALLBACK)
+        : NVIDIA_CONTEXT_FALLBACK,
+      maxTokens: known
+        ? resolveMaxTokensFromModel(known, 16_384)
+        : 16_384,
+      inputModalities: Array.isArray(known?.input) ? [...known.input] : ["text"],
       // Everything NVIDIA hosts here is on the free tier; the panel groups by
       // this flag, and a model that is not free would need its own pricing.
       free: true,
@@ -74,6 +100,7 @@ export function createNvidiaCatalogLoader({
   modelsUrl = DEFAULT_NVIDIA_MODELS_ENDPOINT,
   fetchImpl = fetch,
   cacheTtlMs = 300_000,
+  registryLoader = null,
 } = {}) {
   let cached = null;
   let cachedAt = 0;
@@ -92,7 +119,11 @@ export function createNvidiaCatalogLoader({
         { headers: { Accept: "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) } },
         { fetchImpl, timeoutMs: 20_000 },
       );
-      const parsed = parseNvidiaCatalog(body);
+      let registry = null;
+      if (typeof registryLoader === "function") {
+        registry = await registryLoader().catch(() => null);
+      }
+      const parsed = parseNvidiaCatalog(body, { registry });
       if (parsed.models.length > 0) {
         cached = parsed;
         cachedAt = now;
@@ -151,11 +182,12 @@ export class NvidiaDriver {
     fetchImpl = fetch,
     env = process.env,
     home = homedir(),
+    registryLoader = null,
   } = {}) {
     this.fetchImpl = fetchImpl;
     this.env = env;
     this.home = home;
-    this.catalogLoader = catalogLoader ?? createNvidiaCatalogLoader({ fetchImpl });
+    this.catalogLoader = catalogLoader ?? createNvidiaCatalogLoader({ fetchImpl, registryLoader });
     this.requestExecutor = requestExecutor ?? createNvidiaNativeExecutor({ fetchImpl, env });
   }
 

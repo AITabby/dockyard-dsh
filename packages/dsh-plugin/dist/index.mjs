@@ -19130,6 +19130,7 @@ var nvidiaNativeTransportConstants = Object.freeze({
 
 // modules/provider-nvidia/src/driver.mjs
 var PROVIDER_ID18 = "nvidia-nim";
+var NVIDIA_CONTEXT_FALLBACK = 128e3;
 var NVIDIA_FREE_NOTE = "NVIDIA NIM \u514D\u8D39\u989D\u5EA6\uFF1A\u6309\u901F\u7387\u9650\u5236\uFF0C\u4E0D\u6309\u91D1\u989D\u8BA1\u91CF";
 function fingerprintApiKey3(apiKey) {
   return createHash12("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
@@ -19145,20 +19146,32 @@ function isNvidiaKey(value) {
 function modelLabel(id) {
   return id;
 }
-function parseNvidiaCatalog(data) {
+function registryMetadata(registry) {
+  const byId = /* @__PURE__ */ new Map();
+  for (const raw of Array.isArray(registry) ? registry : []) {
+    if (!raw || raw.provider !== "nvidia") continue;
+    const id = typeof raw.id === "string" ? raw.id : null;
+    if (!id) continue;
+    byId.set(id, raw);
+  }
+  return byId;
+}
+function parseNvidiaCatalog(data, { registry = null } = {}) {
   const list = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
+  const metadataById = registryMetadata(registry);
   const models = [];
   const seen = /* @__PURE__ */ new Set();
   for (const item of list) {
     const id = typeof item?.id === "string" ? item.id.trim() : "";
     if (!id || seen.has(id)) continue;
     seen.add(id);
+    const known = metadataById.get(id) ?? null;
     models.push({
       id,
       name: modelLabel(id),
-      contextWindow: resolveContextWindowFromModel(item, 128e3),
-      maxTokens: resolveMaxTokensFromModel(item, 16384),
-      inputModalities: ["text"],
+      contextWindow: known ? resolveContextWindowFromModel(known, NVIDIA_CONTEXT_FALLBACK) : NVIDIA_CONTEXT_FALLBACK,
+      maxTokens: known ? resolveMaxTokensFromModel(known, 16384) : 16384,
+      inputModalities: Array.isArray(known?.input) ? [...known.input] : ["text"],
       // Everything NVIDIA hosts here is on the free tier; the panel groups by
       // this flag, and a model that is not free would need its own pricing.
       free: true
@@ -19169,7 +19182,8 @@ function parseNvidiaCatalog(data) {
 function createNvidiaCatalogLoader({
   modelsUrl = DEFAULT_NVIDIA_MODELS_ENDPOINT,
   fetchImpl = fetch,
-  cacheTtlMs = 3e5
+  cacheTtlMs = 3e5,
+  registryLoader = null
 } = {}) {
   let cached = null;
   let cachedAt = 0;
@@ -19185,7 +19199,11 @@ function createNvidiaCatalogLoader({
         { headers: { Accept: "application/json", ...token ? { Authorization: `Bearer ${token}` } : {} } },
         { fetchImpl, timeoutMs: 2e4 }
       );
-      const parsed = parseNvidiaCatalog(body);
+      let registry = null;
+      if (typeof registryLoader === "function") {
+        registry = await registryLoader().catch(() => null);
+      }
+      const parsed = parseNvidiaCatalog(body, { registry });
       if (parsed.models.length > 0) {
         cached = parsed;
         cachedAt = now;
@@ -19231,12 +19249,13 @@ var NvidiaDriver = class {
     requestExecutor = null,
     fetchImpl = fetch,
     env = process.env,
-    home = homedir14()
+    home = homedir14(),
+    registryLoader = null
   } = {}) {
     this.fetchImpl = fetchImpl;
     this.env = env;
     this.home = home;
-    this.catalogLoader = catalogLoader ?? createNvidiaCatalogLoader({ fetchImpl });
+    this.catalogLoader = catalogLoader ?? createNvidiaCatalogLoader({ fetchImpl, registryLoader });
     this.requestExecutor = requestExecutor ?? createNvidiaNativeExecutor({ fetchImpl, env });
   }
   /** NVIDIA has no OAuth: a key comes from build.nvidia.com, or the environment. */
@@ -21993,7 +22012,8 @@ function apply(ctx, config = {}) {
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
       commandcode: runtimeOptions.requestExecutors?.commandcode ?? createCommandCodeNativeExecutor(runtimeOptions.commandcode ?? {}),
       hermes: runtimeOptions.requestExecutors?.hermes ?? createHermesNativeExecutor(runtimeOptions.hermes ?? {}),
-      "openrouter-free": runtimeOptions.requestExecutors?.["openrouter-free"] ?? createOpenRouterFreeNativeExecutor(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {})
+      "openrouter-free": runtimeOptions.requestExecutors?.["openrouter-free"] ?? createOpenRouterFreeNativeExecutor(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {}),
+      "nvidia-nim": runtimeOptions.requestExecutors?.["nvidia-nim"] ?? createNvidiaNativeExecutor(runtimeOptions.nvidia ?? {})
     };
     runtimeOptions.catalogLoaders = {
       ...runtimeOptions.catalogLoaders ?? {},
@@ -22008,7 +22028,11 @@ function apply(ctx, config = {}) {
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
       commandcode: runtimeOptions.catalogLoaders?.commandcode ?? createCommandCodeCatalogLoader(runtimeOptions.commandcode ?? {}),
       hermes: runtimeOptions.catalogLoaders?.hermes ?? createHermesCatalogLoader(runtimeOptions.hermes ?? {}),
-      "openrouter-free": runtimeOptions.catalogLoaders?.["openrouter-free"] ?? createOpenRouterFreeCatalogLoader(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {})
+      "openrouter-free": runtimeOptions.catalogLoaders?.["openrouter-free"] ?? createOpenRouterFreeCatalogLoader(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {}),
+      "nvidia-nim": runtimeOptions.catalogLoaders?.["nvidia-nim"] ?? createNvidiaCatalogLoader({
+        ...runtimeOptions.nvidia ?? {},
+        registryLoader: modelRegistryLoader
+      })
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders).filter(([, loader]) => typeof loader === "function");
