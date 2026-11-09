@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { createCredentialRef } from "../../../packages/vault/src/index.mjs";
 import {
   createAccountRecord,
@@ -108,6 +111,28 @@ export function createNvidiaCatalogLoader({
   };
 }
 
+/**
+ * DSH keeps a plain `NVIDIA_API_KEY` entry for its own built-in provider. Reuse
+ * it so the panel can show NVIDIA without asking for the key a second time; the
+ * file is only read, never written.
+ */
+function discoverDshCredentialKey({ home = homedir() } = {}) {
+  try {
+    const path = join(home, ".dsh", ".credentials.yaml");
+    if (!existsSync(path)) return null;
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      const match = /^\s*NVIDIA_API_KEY:\s*(\S+)\s*$/u.exec(line);
+      if (match) {
+        const value = match[1].replace(/^["']|["']$/gu, "");
+        if (isNvidiaKey(value)) return value;
+      }
+    }
+  } catch {
+    // A missing or unreadable credentials file simply means no fallback.
+  }
+  return null;
+}
+
 export function summarizeNvidiaCandidate(candidate) {
   return {
     providerId: PROVIDER_ID,
@@ -125,9 +150,11 @@ export class NvidiaDriver {
     requestExecutor = null,
     fetchImpl = fetch,
     env = process.env,
+    home = homedir(),
   } = {}) {
     this.fetchImpl = fetchImpl;
     this.env = env;
+    this.home = home;
     this.catalogLoader = catalogLoader ?? createNvidiaCatalogLoader({ fetchImpl });
     this.requestExecutor = requestExecutor ?? createNvidiaNativeExecutor({ fetchImpl, env });
   }
@@ -137,21 +164,22 @@ export class NvidiaDriver {
     const envKey = typeof this.env.NVIDIA_API_KEY === "string" && this.env.NVIDIA_API_KEY.length > 0
       ? this.env.NVIDIA_API_KEY
       : null;
-    if (!envKey) {
+    const key = envKey ?? discoverDshCredentialKey({ home: this.home });
+    if (!key) {
       return {
         source: "nvidia_env",
         candidates: [],
-        diagnostics: ["未在环境变量中发现 NVIDIA_API_KEY；可在面板中直接粘贴 build.nvidia.com 生成的 nvapi- Key。"],
+        diagnostics: ["未发现 NVIDIA_API_KEY；可在面板中直接粘贴 build.nvidia.com 生成的 nvapi- Key。"],
       };
     }
     return {
-      source: "nvidia_env",
+      source: envKey ? "nvidia_env" : "dsh_credentials",
       candidates: [{
-        candidateId: `nvidia:${fingerprintApiKey(envKey)}`,
-        accountId: `nvidia-${fingerprintApiKey(envKey)}`,
+        candidateId: `nvidia:${fingerprintApiKey(key)}`,
+        accountId: `nvidia-${fingerprintApiKey(key)}`,
         providerId: PROVIDER_ID,
-        displayName: `NVIDIA Key (${maskApiKey(envKey)})`,
-        apiKey: envKey,
+        displayName: `NVIDIA Key (${maskApiKey(key)})`,
+        apiKey: key,
         subscription: { plan: "NVIDIA NIM 免费", status: "active" },
       }],
     };

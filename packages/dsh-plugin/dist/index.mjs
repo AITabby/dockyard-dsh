@@ -1018,8 +1018,8 @@ var init_dockyard_remote_host = __esm({
 });
 
 // packages/dsh-plugin/src/index.mjs
-import { existsSync as existsSync7, readFileSync as readFileSync6 } from "node:fs";
-import { join as join18 } from "node:path";
+import { existsSync as existsSync8, readFileSync as readFileSync7 } from "node:fs";
+import { join as join19 } from "node:path";
 
 // packages/core/src/errors.mjs
 var DockyardError = class extends Error {
@@ -18880,6 +18880,9 @@ function createTraeCnModule({ driver = {} } = {}) {
 
 // modules/provider-nvidia/src/driver.mjs
 import { createHash as createHash12 } from "node:crypto";
+import { existsSync as existsSync7, readFileSync as readFileSync6 } from "node:fs";
+import { homedir as homedir14 } from "node:os";
+import { join as join15 } from "node:path";
 
 // modules/provider-nvidia/src/native-transport.mjs
 var PROVIDER_ID17 = "nvidia";
@@ -19197,6 +19200,21 @@ function createNvidiaCatalogLoader({
     };
   };
 }
+function discoverDshCredentialKey({ home = homedir14() } = {}) {
+  try {
+    const path2 = join15(home, ".dsh", ".credentials.yaml");
+    if (!existsSync7(path2)) return null;
+    for (const line of readFileSync6(path2, "utf8").split("\n")) {
+      const match = /^\s*NVIDIA_API_KEY:\s*(\S+)\s*$/u.exec(line);
+      if (match) {
+        const value = match[1].replace(/^["']|["']$/gu, "");
+        if (isNvidiaKey(value)) return value;
+      }
+    }
+  } catch {
+  }
+  return null;
+}
 function summarizeNvidiaCandidate(candidate2) {
   return {
     providerId: PROVIDER_ID18,
@@ -19212,31 +19230,34 @@ var NvidiaDriver = class {
     catalogLoader = null,
     requestExecutor = null,
     fetchImpl = fetch,
-    env = process.env
+    env = process.env,
+    home = homedir14()
   } = {}) {
     this.fetchImpl = fetchImpl;
     this.env = env;
+    this.home = home;
     this.catalogLoader = catalogLoader ?? createNvidiaCatalogLoader({ fetchImpl });
     this.requestExecutor = requestExecutor ?? createNvidiaNativeExecutor({ fetchImpl, env });
   }
   /** NVIDIA has no OAuth: a key comes from build.nvidia.com, or the environment. */
   async discover() {
     const envKey = typeof this.env.NVIDIA_API_KEY === "string" && this.env.NVIDIA_API_KEY.length > 0 ? this.env.NVIDIA_API_KEY : null;
-    if (!envKey) {
+    const key = envKey ?? discoverDshCredentialKey({ home: this.home });
+    if (!key) {
       return {
         source: "nvidia_env",
         candidates: [],
-        diagnostics: ["\u672A\u5728\u73AF\u5883\u53D8\u91CF\u4E2D\u53D1\u73B0 NVIDIA_API_KEY\uFF1B\u53EF\u5728\u9762\u677F\u4E2D\u76F4\u63A5\u7C98\u8D34 build.nvidia.com \u751F\u6210\u7684 nvapi- Key\u3002"]
+        diagnostics: ["\u672A\u53D1\u73B0 NVIDIA_API_KEY\uFF1B\u53EF\u5728\u9762\u677F\u4E2D\u76F4\u63A5\u7C98\u8D34 build.nvidia.com \u751F\u6210\u7684 nvapi- Key\u3002"]
       };
     }
     return {
-      source: "nvidia_env",
+      source: envKey ? "nvidia_env" : "dsh_credentials",
       candidates: [{
-        candidateId: `nvidia:${fingerprintApiKey3(envKey)}`,
-        accountId: `nvidia-${fingerprintApiKey3(envKey)}`,
+        candidateId: `nvidia:${fingerprintApiKey3(key)}`,
+        accountId: `nvidia-${fingerprintApiKey3(key)}`,
         providerId: PROVIDER_ID18,
-        displayName: `NVIDIA Key (${maskApiKey4(envKey)})`,
-        apiKey: envKey,
+        displayName: `NVIDIA Key (${maskApiKey4(key)})`,
+        apiKey: key,
         subscription: { plan: "NVIDIA NIM \u514D\u8D39", status: "active" }
       }]
     };
@@ -20330,7 +20351,7 @@ var DockyardRuntime = class {
 // packages/dsh-plugin/src/codex-transport.mjs
 import { access, readFile as readFile7 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname as dirname8, join as join15, resolve } from "node:path";
+import { dirname as dirname8, join as join16, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 var activeCodexModels = /* @__PURE__ */ new Map();
 function recordCodexModels(models) {
@@ -20376,15 +20397,15 @@ async function findPackageRoot(startDirectory, packageName) {
   const packageParts = packageName.split("/");
   let current = resolve(startDirectory);
   while (true) {
-    const candidate2 = join15(current, "node_modules", ...packageParts);
-    if (await isFile2(join15(candidate2, "package.json"))) return candidate2;
+    const candidate2 = join16(current, "node_modules", ...packageParts);
+    if (await isFile2(join16(candidate2, "package.json"))) return candidate2;
     const parent = dirname8(current);
     if (parent === current) return null;
     current = parent;
   }
 }
 async function packageImportUrl(packageRoot, subpath = null) {
-  const packageJson = JSON.parse(await readFile7(join15(packageRoot, "package.json"), "utf8"));
+  const packageJson = JSON.parse(await readFile7(join16(packageRoot, "package.json"), "utf8"));
   const exports = packageJson.exports;
   let target = null;
   if (!subpath) {
@@ -20406,7 +20427,7 @@ async function packageImportUrl(packageRoot, subpath = null) {
   if (typeof target !== "string") {
     throw new Error(`Cannot resolve ${subpath ?? "."} from ${packageRoot}`);
   }
-  return pathToFileURL(join15(packageRoot, target)).href;
+  return pathToFileURL(join16(packageRoot, target)).href;
 }
 async function importFromDshInstall(moduleAnchor) {
   const anchor = moduleAnchor ?? process.env.DOCKYARD_DSH_CLI_PATH ?? process.argv[1] ?? import.meta.url;
@@ -21222,7 +21243,7 @@ function createDockyardCredentialStore(credentials, fallback = null) {
 // packages/dsh-plugin/src/native-key-pool-host.mjs
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAgentLoopRequest, markAgentLoopRequest } from "@deepseek-ai/dsh-llm";
-import { join as join16 } from "node:path";
+import { join as join17 } from "node:path";
 
 // packages/dsh-plugin/src/native-usage.mjs
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -21520,7 +21541,7 @@ var NativeKeyPoolHost = class {
     this.logger = logger ?? console;
     this.contextWindowOverrides = contextWindowOverrides;
     this.stateStore = stateStore ?? new JsonStateStore({
-      filePath: join16(defaultDockyardHome(), "native-key-pools.json")
+      filePath: join17(defaultDockyardHome(), "native-key-pools.json")
     });
     this.readyPromise = this.loadState();
   }
@@ -21887,7 +21908,7 @@ var NativeKeyPoolHost = class {
 // packages/dsh-plugin/src/vpn-ssrf-patch.mjs
 var import_ipaddr = __toESM(require_ipaddr(), 1);
 import { createRequire as createRequire2 } from "node:module";
-import { dirname as dirname9, join as join17 } from "node:path";
+import { dirname as dirname9, join as join18 } from "node:path";
 var isPatched = false;
 function patchFakeIpVpnSupport() {
   if (isPatched) return true;
@@ -21913,7 +21934,7 @@ function patchFakeIpVpnSupport() {
   ];
   if (typeof process?.execPath === "string") {
     try {
-      candidates.push(join17(dirname9(dirname9(process.execPath)), "Resources/app.asar/dsh/node_modules/ipaddr.js"));
+      candidates.push(join18(dirname9(dirname9(process.execPath)), "Resources/app.asar/dsh/node_modules/ipaddr.js"));
     } catch {
     }
   }
@@ -22114,8 +22135,8 @@ function apply(ctx, config = {}) {
                   res.end("Forbidden");
                   return;
                 }
-                const filePath = join18(process.cwd(), "artifacts", cleanPath);
-                if (!existsSync7(filePath)) {
+                const filePath = join19(process.cwd(), "artifacts", cleanPath);
+                if (!existsSync8(filePath)) {
                   res.writeHead(404);
                   res.end("Not Found");
                   return;
@@ -22130,7 +22151,7 @@ function apply(ctx, config = {}) {
                   svg: "image/svg+xml"
                 };
                 const contentType = mimeTypes[ext] ?? "application/octet-stream";
-                const content = readFileSync6(filePath);
+                const content = readFileSync7(filePath);
                 res.writeHead(200, {
                   "Content-Type": contentType,
                   "Content-Length": content.length,

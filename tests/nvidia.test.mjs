@@ -180,3 +180,37 @@ test("a stream cut before its terminator fails instead of reporting a stop", asy
     return true;
   });
 });
+
+test("a key already stored in DSH's credentials file is reused", async () => {
+  const { mkdtempSync, writeFileSync, mkdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+
+  const home = mkdtempSync(join(tmpdir(), "nvidia-home-"));
+  mkdirSync(join(home, ".dsh"), { recursive: true });
+  writeFileSync(join(home, ".dsh", ".credentials.yaml"), [
+    "# DSH credentials",
+    "NVIDIA_API_KEY: nvapi-from-dsh-file-1234567890",
+    "OTHER_KEY: sk-something",
+  ].join("\n"));
+
+  const driver = createNvidiaDriver({ fetchImpl: async () => new Response("{}", { status: 200 }), env: {}, home });
+  const discovered = await driver.discover();
+  assert.equal(discovered.source, "dsh_credentials");
+  assert.equal(discovered.candidates.length, 1);
+  assert.equal(discovered.candidates[0].apiKey, "nvapi-from-dsh-file-1234567890");
+});
+
+test("an empty environment and no credentials file reports why nothing was found", async () => {
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const driver = createNvidiaDriver({
+    fetchImpl: async () => new Response("{}", { status: 200 }),
+    env: {},
+    home: mkdtempSync(join(tmpdir(), "nvidia-empty-")),
+  });
+  const discovered = await driver.discover();
+  assert.deepEqual(discovered.candidates, []);
+  assert.match(discovered.diagnostics[0], /nvapi-/u);
+});
