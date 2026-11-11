@@ -262,3 +262,33 @@ test("the responses request maps tool results and calls back", async () => {
   assert.deepEqual(body.input[2], { type: "function_call_output", call_id: "call_9", output: "done" });
   assert.equal(body.stream, true);
 });
+
+test("a model that needed Responses is remembered and skips the doomed call", async () => {
+  const calls = [];
+  const executor = createAgentRouterNativeExecutor({
+    env: {},
+    fetchImpl: async (url) => {
+      calls.push(String(url).endsWith("/v1/responses") ? "responses" : "chat");
+      if (String(url).endsWith("/v1/chat/completions")) {
+        return new Response(JSON.stringify({ error: { message: "模型 X 不支持 /v1/chat/completions 接口，请改用 /v1/responses" } }), { status: 400 });
+      }
+      return new Response(sseBody([
+        `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.completed", response: {} })}\n\n`,
+      ]), { status: 200 });
+    },
+  });
+
+  const ask = async () => {
+    for await (const event of executor({
+      request: { model: "gpt-6.1-sol", messages: [{ role: "user", content: "hi" }] },
+      credential: { apiKey: "sk-test" },
+    })) void event;
+  };
+
+  await ask();
+  assert.deepEqual(calls, ["chat", "responses"]);
+  await ask();
+  // The second turn goes straight to Responses: no wasted 400 round trip.
+  assert.deepEqual(calls, ["chat", "responses", "responses"]);
+});

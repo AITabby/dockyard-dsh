@@ -447,12 +447,26 @@ export function createAgentRouterNativeExecutor({
     return response;
   };
 
+  // Models that already told us they refuse chat-completions skip the doomed
+  // round trip from then on; it costs ~1.7s every step otherwise.
+  const responsesOnly = new Set();
+
   const executor = async ({ request = {}, credential, context = {} } = {}) => {
     const token = firstString(credential?.apiKey, credential?.access, env.AGENTROUTER_API_KEY);
     if (!token) {
       const error = nativeProviderError(PROVIDER_ID, "AgentRouter API Key 未配置，请在面板中粘贴 sk- 开头的 Key");
       error.code = "AUTH_REQUIRED";
       throw error;
+    }
+
+    const modelKey = String(request.model ?? "");
+    if (responsesOnly.has(modelKey)) {
+      const response = await send(safeResponses, await buildAgentRouterResponsesRequest(request, context), token, context.signal);
+      if (response.ok) return streamAgentRouterResponses(response);
+      const detail = await response.text().catch(() => "");
+      throw nativeProviderError(PROVIDER_ID, `AgentRouter 拒绝了请求（${response.status}）：${detail.slice(0, 200)}`, {
+        status: response.status,
+      });
     }
 
     const chatResponse = await send(safeEndpoint, await buildAgentRouterRequest(request, context), token, context.signal);
@@ -462,6 +476,7 @@ export function createAgentRouterNativeExecutor({
     // want; follow that instead of surfacing a dead end to the user.
     const detail = await chatResponse.text().catch(() => "");
     if (/\/v1\/responses/u.test(detail) || /does not support/iu.test(detail)) {
+      responsesOnly.add(modelKey);
       const responsesResponse = await send(safeResponses, await buildAgentRouterResponsesRequest(request, context), token, context.signal);
       if (responsesResponse.ok) return streamAgentRouterResponses(responsesResponse);
       const responsesDetail = await responsesResponse.text().catch(() => "");

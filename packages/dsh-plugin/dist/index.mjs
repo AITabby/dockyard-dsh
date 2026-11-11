@@ -19273,6 +19273,7 @@ function createAgentRouterNativeExecutor({
     });
     return response;
   };
+  const responsesOnly = /* @__PURE__ */ new Set();
   const executor = async ({ request = {}, credential, context = {} } = {}) => {
     const token = firstString11(credential?.apiKey, credential?.access, env.AGENTROUTER_API_KEY);
     if (!token) {
@@ -19280,10 +19281,20 @@ function createAgentRouterNativeExecutor({
       error.code = "AUTH_REQUIRED";
       throw error;
     }
+    const modelKey = String(request.model ?? "");
+    if (responsesOnly.has(modelKey)) {
+      const response = await send(safeResponses, await buildAgentRouterResponsesRequest(request, context), token, context.signal);
+      if (response.ok) return streamAgentRouterResponses(response);
+      const detail2 = await response.text().catch(() => "");
+      throw nativeProviderError(PROVIDER_ID17, `AgentRouter \u62D2\u7EDD\u4E86\u8BF7\u6C42\uFF08${response.status}\uFF09\uFF1A${detail2.slice(0, 200)}`, {
+        status: response.status
+      });
+    }
     const chatResponse = await send(safeEndpoint, await buildAgentRouterRequest(request, context), token, context.signal);
     if (chatResponse.ok) return streamAgentRouterResponse(chatResponse);
     const detail = await chatResponse.text().catch(() => "");
     if (/\/v1\/responses/u.test(detail) || /does not support/iu.test(detail)) {
+      responsesOnly.add(modelKey);
       const responsesResponse = await send(safeResponses, await buildAgentRouterResponsesRequest(request, context), token, context.signal);
       if (responsesResponse.ok) return streamAgentRouterResponses(responsesResponse);
       const responsesDetail = await responsesResponse.text().catch(() => "");
