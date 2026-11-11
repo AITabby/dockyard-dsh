@@ -33,6 +33,7 @@ import {
   summarizeOpenRouterFreeCandidate,
 } from "../../../modules/provider-openrouter-free/src/index.mjs";
 import { createTraeCnDriver, createTraeCnModule, summarizeTraeCnCandidate } from "../../../modules/provider-trae-cn/src/index.mjs";
+import { createAgentRouterDriver, createAgentRouterModule, summarizeAgentRouterCandidate } from "../../../modules/provider-agentrouter/src/index.mjs";
 import { redactError } from "../../providers/src/provider-utils.mjs";
 
 const candidateSummarizers = new Map([
@@ -47,6 +48,7 @@ const candidateSummarizers = new Map([
   ["hermes", summarizeHermesCandidate],
   ["openrouter-free", summarizeOpenRouterFreeCandidate],
   ["trae-cn", summarizeTraeCnCandidate],
+  ["agentrouter", summarizeAgentRouterCandidate],
 ]);
 
 // Official provider CLIs may need a network round-trip to rotate OAuth
@@ -273,6 +275,15 @@ export function createDefaultProviderEntries(options = {}) {
         }),
       }),
       driver: options.openrouterFreeDriver,
+    },
+    {
+      module: createAgentRouterModule({
+        driver: options.agentrouterDriver ?? createAgentRouterDriver({
+          ...withRequestExecutor("agentrouter", options.agentrouter, requestExecutors),
+          ...(catalogLoaders.agentrouter ? { catalogLoader: catalogLoaders.agentrouter } : {}),
+        }),
+      }),
+      driver: options.agentrouterDriver,
     },
     {
       module: createTraeCnModule({

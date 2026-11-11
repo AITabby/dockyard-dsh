@@ -24,6 +24,7 @@ Dockyard DSH 把多个官方 OAuth 授权和官方客户端会话接入 DeepSeek
 | **Claude** | 官方浏览器 OAuth，支持带 `state` 的手动回调地址 | 原生请求适配 |
 | **Cursor** | 官方登录轮询（`loginDeepControl` + `/auth/poll`） | 原生请求适配 |
 | **Command Code** | 本地认证文件，或在面板里粘贴 API Key | 官方网关，原生流式 + tool calling |
+| **AgentRouter** | 面板粘贴 `sk-` Key；服务按客户端白名单放行，插件会声明受认可的 User-Agent | 官方 OpenAI 兼容端点，实时模型目录 |
 | **Hermes** | 本地会话文件，或在面板里粘贴 API Key | 原生流式 |
 | **OpenRouter Free** | 从 DSH 凭据或环境变量发现 API Key | 官方端点，`:free` 目录动态拉取 |
 
@@ -208,6 +209,7 @@ Dockyard DSH connects official OAuth authorizations and official client sessions
 | **Claude** | Official browser OAuth, plus state-bound manual callback entry | Native request adapter |
 | **Cursor** | Official login polling (`loginDeepControl` + `/auth/poll`) | Native request adapter |
 | **Command Code** | Local auth file, or paste an API key in the panel | Official gateway, streaming with tool calling |
+| **AgentRouter** | Paste an `sk-` key; the service allows only known clients, so the plugin sends an accepted User-Agent | Official OpenAI-compatible endpoint, live model catalog |
 | **Hermes** | Local session file, or paste an API key in the panel | Native streaming |
 | **OpenRouter Free** | Discovers an API key from DSH credentials or the environment | Official endpoint, live `:free` catalog |
 

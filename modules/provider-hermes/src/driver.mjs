@@ -218,11 +218,15 @@ export function createHermesCatalogLoader({
         Accept: "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       };
-      const data = await fetchJson(modelsUrl, {
-        headers,
-        fetchImpl,
-        timeoutMs: 15_000,
-      });
+      // fetchJson(url, init, options): the injectable fetch and the timeout
+      // belong in the third argument. Passing them inside `init` silently used
+      // the global fetch, so the loader always hit the network and tests could
+      // not stub it.
+      const { body: data } = await fetchJson(
+        modelsUrl,
+        { headers },
+        { fetchImpl, timeoutMs: 15_000 },
+      );
 
       const parsed = parseHermesCatalog(data);
       if (parsed.models.length > 0) {

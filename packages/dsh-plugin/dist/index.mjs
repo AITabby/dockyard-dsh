@@ -15889,11 +15889,11 @@ function createHermesCatalogLoader({
         Accept: "application/json",
         ...token ? { Authorization: `Bearer ${token}` } : {}
       };
-      const data = await fetchJson(modelsUrl, {
-        headers,
-        fetchImpl,
-        timeoutMs: 15e3
-      });
+      const { body: data } = await fetchJson(
+        modelsUrl,
+        { headers },
+        { fetchImpl, timeoutMs: 15e3 }
+      );
       const parsed = parseHermesCatalog(data);
       if (parsed.models.length > 0) {
         cached = parsed;
@@ -18878,6 +18878,503 @@ function createTraeCnModule({ driver = {} } = {}) {
   });
 }
 
+// modules/provider-agentrouter/src/driver.mjs
+import { createHash as createHash12 } from "node:crypto";
+
+// modules/provider-agentrouter/src/native-transport.mjs
+var PROVIDER_ID17 = "agentrouter";
+var DEFAULT_AGENTROUTER_ENDPOINT = "https://agentrouter.org/v1/chat/completions";
+var DEFAULT_AGENTROUTER_MODELS_ENDPOINT = "https://agentrouter.org/v1/models";
+var DEFAULT_AGENTROUTER_USER_AGENT = "Cline/3.2.0";
+function firstString11(...values) {
+  return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
+}
+function toolCallPart3(part) {
+  const type = String(part?.type ?? "").toLowerCase().replace(/[_-]/g, "");
+  return type === "toolcall" || type === "functioncall" || type === "tooluse" ? part : null;
+}
+async function openAiContent3(content, attachments) {
+  const values = Array.isArray(content) ? content : [content];
+  const blocks = [];
+  for (const part of values) {
+    if (typeof part === "string") {
+      if (part) blocks.push({ type: "text", text: part });
+      continue;
+    }
+    if (!part || typeof part !== "object") continue;
+    if (part.type === "image") {
+      const image = await resolveImageData(part, attachments);
+      if (!image) throw nativeProviderError(PROVIDER_ID17, "image attachment could not be resolved");
+      blocks.push({ type: "image_url", image_url: { url: `data:${image.mediaType};base64,${image.data}` } });
+      continue;
+    }
+    if (part.type === "tool-result" || part.type === "tool_result") {
+      blocks.push({
+        type: "text",
+        text: `[Tool Result ${part.toolCallId ?? part.id ?? ""}]
+${textFromContent(part.content ?? part.output ?? part.result ?? part.text)}`
+      });
+      continue;
+    }
+    if (toolCallPart3(part)) continue;
+    const text3 = textFromContent(part);
+    if (text3) blocks.push({ type: "text", text: text3 });
+  }
+  return blocks;
+}
+async function buildAgentRouterMessages(request, attachments) {
+  const result = [];
+  if (typeof request.system === "string" && request.system.length > 0) {
+    result.push({ role: "system", content: request.system });
+  }
+  for (const message of Array.isArray(request.messages) ? request.messages : []) {
+    const role = message?.role === "assistant" ? "assistant" : message?.role === "tool" ? "tool" : "user";
+    if (role === "tool") {
+      result.push({
+        role: "tool",
+        tool_call_id: sanitizeToolCallId(firstString11(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
+        content: textFromContent(message.content ?? message.text ?? message.output ?? message.result)
+      });
+      continue;
+    }
+    const content = await openAiContent3(message?.content ?? message?.text, attachments);
+    const calls = (Array.isArray(message?.content) ? message.content : [message?.content]).map(toolCallPart3).filter(Boolean).map((call, index) => ({
+      id: sanitizeToolCallId(firstString11(call.id, call.toolCallId, call.tool_call_id, `tool-${index}`)),
+      type: "function",
+      function: {
+        name: firstString11(call.name, call.function?.name, "tool"),
+        arguments: typeof (call.arguments ?? call.function?.arguments) === "string" ? call.arguments ?? call.function.arguments : JSON.stringify(call.arguments ?? call.input ?? call.function?.arguments ?? {})
+      }
+    }));
+    const value = {
+      role,
+      content: content.length === 0 ? "" : content.length === 1 && content[0].type === "text" ? content[0].text : content
+    };
+    if (role === "assistant" && calls.length > 0) value.tool_calls = calls;
+    result.push(value);
+  }
+  if (!result.some((message) => message.role === "user")) result.push({ role: "user", content: "Continue the conversation." });
+  return result;
+}
+function buildAgentRouterTools(tools) {
+  if (!Array.isArray(tools)) return void 0;
+  const result = tools.map((tool) => ({
+    type: "function",
+    function: {
+      name: tool?.name ?? tool?.function?.name ?? "tool",
+      ...tool?.description ? { description: String(tool.description) } : {},
+      parameters: tool?.parameters ?? tool?.input_schema ?? tool?.function?.parameters ?? { type: "object" }
+    }
+  }));
+  return result.length > 0 ? result : void 0;
+}
+async function buildAgentRouterRequest(request = {}, context = {}) {
+  const body = {
+    model: request.model,
+    messages: await buildAgentRouterMessages(request, context.attachments),
+    stream: true,
+    stream_options: { include_usage: true }
+  };
+  if (request.temperature !== void 0) body.temperature = request.temperature;
+  const maxTokens = request.maxTokens ?? request.modelContext?.maxTokens;
+  if (Number.isInteger(maxTokens) && maxTokens > 0) body.max_tokens = maxTokens;
+  const tools = buildAgentRouterTools(request.tools);
+  if (tools) body.tools = tools;
+  return body;
+}
+async function* streamAgentRouterResponse(response) {
+  let text3 = "";
+  let textIndex = 0;
+  let textOpen = true;
+  let nextIndex = 1;
+  let usage = null;
+  let stop = "stop";
+  let reasoning = null;
+  const tools = /* @__PURE__ */ new Map();
+  let terminated = false;
+  yield { type: "block-start", index: textIndex, blockType: "text" };
+  for await (const event of readSseEvents(response)) {
+    if (event?.done) {
+      terminated = true;
+      continue;
+    }
+    const payload = event.data;
+    if (!payload || typeof payload !== "object") continue;
+    if (payload.error) {
+      throw nativeProviderError(PROVIDER_ID17, payload.error.message ?? "AgentRouter returned an error", {
+        status: payload.error.code ?? payload.error.status,
+        body: payload.error
+      });
+    }
+    usage = normalizeUsage(payload.usage) ?? usage;
+    const choice = payload.choices?.[0];
+    if (!choice) continue;
+    stop = choice.finish_reason ?? stop;
+    if (typeof choice.finish_reason === "string" && choice.finish_reason.trim()) terminated = true;
+    const delta = choice.delta ?? {};
+    const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
+    if (content) {
+      if (reasoning) {
+        yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+        reasoning = null;
+      }
+      if (!textOpen) {
+        textIndex = nextIndex++;
+        text3 = "";
+        textOpen = true;
+        yield { type: "block-start", index: textIndex, blockType: "text" };
+      }
+      text3 += content;
+      yield { type: "text-delta", index: textIndex, text: content };
+    }
+    const reasoningDelta = delta.reasoning_content ?? delta.reasoningContent;
+    if (reasoningDelta) {
+      if (textOpen) {
+        yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+        textOpen = false;
+      }
+      if (!reasoning) {
+        reasoning = { index: nextIndex++, text: "" };
+        yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+      }
+      const value = String(reasoningDelta);
+      reasoning.text += value;
+      yield { type: "reasoning-delta", index: reasoning.index, text: value };
+    }
+    for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
+      const key = Number(call.index ?? tools.size);
+      if (!tools.has(key)) {
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        if (textOpen) {
+          yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+          textOpen = false;
+        }
+        const state2 = {
+          index: nextIndex++,
+          id: firstString11(call.id, `tool-${key}`),
+          name: firstString11(call.function?.name, call.name, "tool"),
+          arguments: ""
+        };
+        tools.set(key, state2);
+        yield { type: "block-start", index: state2.index, blockType: "tool-call" };
+      }
+      const state = tools.get(key);
+      const argumentDelta = call.function?.arguments ?? call.arguments ?? "";
+      if (call.id) state.id = call.id;
+      if (call.function?.name) state.name = call.function.name;
+      state.arguments += argumentDelta;
+      if (argumentDelta) {
+        yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: argumentDelta };
+      }
+    }
+  }
+  if (!terminated) {
+    throw nativeProviderError(
+      PROVIDER_ID17,
+      "AgentRouter \u6D41\u5728\u6CA1\u6709 finish_reason \u6216 [DONE] \u7684\u60C5\u51B5\u4E0B\u7ED3\u675F\uFF0C\u54CD\u5E94\u53EF\u80FD\u88AB\u622A\u65AD",
+      { code: "AGENTROUTER_TRUNCATED_STREAM" }
+    );
+  }
+  if (reasoning) yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+  if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+  for (const state of tools.values()) {
+    yield { type: "block-end", index: state.index, block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments || "{}" } };
+  }
+  if (usage) yield { type: "usage", usage };
+  yield { type: "finish", reason: finishReason(stop) };
+}
+function createAgentRouterNativeExecutor({
+  endpoint: endpoint2 = process.env.DOCKYARD_AGENTROUTER_ENDPOINT || DEFAULT_AGENTROUTER_ENDPOINT,
+  env = process.env,
+  timeoutMs = 3e5,
+  fetchImpl = fetch,
+  userAgent = process.env.DOCKYARD_AGENTROUTER_USER_AGENT || DEFAULT_AGENTROUTER_USER_AGENT
+} = {}) {
+  const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID17 });
+  const executor = async ({ request = {}, credential, context = {} } = {}) => {
+    const token = firstString11(credential?.apiKey, credential?.access, env.AGENTROUTER_API_KEY);
+    if (!token) {
+      const error = nativeProviderError(PROVIDER_ID17, "AgentRouter API Key \u672A\u914D\u7F6E\uFF0C\u8BF7\u5728\u9762\u677F\u4E2D\u7C98\u8D34 sk- \u5F00\u5934\u7684 Key");
+      error.code = "AUTH_REQUIRED";
+      throw error;
+    }
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      accept: "text/event-stream",
+      // Without an allow-listed client string the endpoint rejects the request
+      // before it ever checks the key.
+      "user-agent": userAgent
+    };
+    const response = await fetchNativeResponse(safeEndpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(await buildAgentRouterRequest(request, context)),
+      signal: context.signal
+    }, { providerId: PROVIDER_ID17, timeoutMs, fetchImpl });
+    return streamAgentRouterResponse(response);
+  };
+  executor.nativeTransport = "agentrouter-openai-completions";
+  return guardEmptyCompletion(executor, { providerId: PROVIDER_ID17 });
+}
+var agentRouterNativeTransportConstants = Object.freeze({
+  providerId: PROVIDER_ID17,
+  endpoint: DEFAULT_AGENTROUTER_ENDPOINT,
+  modelsEndpoint: DEFAULT_AGENTROUTER_MODELS_ENDPOINT,
+  userAgent: DEFAULT_AGENTROUTER_USER_AGENT
+});
+
+// modules/provider-agentrouter/src/driver.mjs
+var PROVIDER_ID18 = "agentrouter";
+var BUILTIN_AGENTROUTER_MODELS = Object.freeze([
+  { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", contextWindow: 1e6, maxTokens: 128e3, inputModalities: ["text"] },
+  { id: "gpt-6-astra", name: "GPT-6 Astra", contextWindow: 4e5, maxTokens: 128e3, inputModalities: ["text"] },
+  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", contextWindow: 4e5, maxTokens: 128e3, inputModalities: ["text"] }
+]);
+function fingerprintApiKey3(apiKey) {
+  return createHash12("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
+}
+function maskApiKey4(apiKey) {
+  const value = String(apiKey ?? "");
+  if (value.length <= 10) return "****";
+  return `${value.slice(0, 6)}\u2026${value.slice(-4)}`;
+}
+function parseAgentRouterCatalog(data) {
+  const list = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
+  const builtinById = new Map(BUILTIN_AGENTROUTER_MODELS.map((model) => [model.id, model]));
+  const models = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const item of list) {
+    const id = typeof item?.id === "string" ? item.id.trim() : "";
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const known = builtinById.get(id) ?? null;
+    models.push({
+      id,
+      name: typeof item?.name === "string" && item.name.length > 0 ? item.name : id,
+      contextWindow: known?.contextWindow ?? resolveContextWindowFromModel(item, 128e3),
+      maxTokens: known?.maxTokens ?? resolveMaxTokensFromModel(item, 32768),
+      inputModalities: ["text"]
+    });
+  }
+  return models.length > 0 ? { models, source: "agentrouter_live_catalog" } : null;
+}
+function createAgentRouterCatalogLoader({
+  modelsUrl = DEFAULT_AGENTROUTER_MODELS_ENDPOINT,
+  fetchImpl = fetch,
+  userAgent = DEFAULT_AGENTROUTER_USER_AGENT,
+  cacheTtlMs = 3e5
+} = {}) {
+  let cached = null;
+  let cachedAt = 0;
+  return async function agentRouterCatalogLoader({ force = false, credential = null, accounts = null } = {}) {
+    const now = Date.now();
+    if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
+    let token = credential?.apiKey ?? credential?.access ?? null;
+    if (!token && Array.isArray(accounts) && accounts.length > 0) token = accounts[0]?.auth?.apiKey ?? null;
+    if (token) {
+      try {
+        assertSecureEndpointUrl(modelsUrl, { providerId: PROVIDER_ID18 });
+        const { body } = await fetchJson(
+          modelsUrl,
+          {
+            headers: {
+              Accept: "application/json",
+              // The allow-list is enforced on the client string, even for reads.
+              "user-agent": userAgent,
+              ...token ? { Authorization: `Bearer ${token}` } : {}
+            }
+          },
+          { fetchImpl, timeoutMs: 2e4 }
+        );
+        const parsed = parseAgentRouterCatalog(body);
+        if (parsed) {
+          cached = parsed;
+          cachedAt = now;
+          return cached;
+        }
+      } catch {
+      }
+    }
+    cached = {
+      models: BUILTIN_AGENTROUTER_MODELS.map((model) => ({ ...model })),
+      source: "agentrouter_builtin_catalog",
+      ...token ? {} : { diagnostics: ["\u5C1A\u672A\u914D\u7F6E API Key\uFF0C\u4EE5\u4E0B\u4E3A\u9ED8\u8BA4\u6A21\u578B\uFF1B\u6DFB\u52A0\u8D26\u53F7\u540E\u53EF\u8BFB\u53D6\u5B9E\u65F6\u76EE\u5F55"] }
+    };
+    cachedAt = now;
+    return cached;
+  };
+}
+function summarizeAgentRouterCandidate(candidate2) {
+  return {
+    providerId: PROVIDER_ID18,
+    candidateId: candidate2?.candidateId ?? "agentrouter-default",
+    displayName: candidate2?.displayName ?? "AgentRouter",
+    email: candidate2?.email ?? null,
+    plan: candidate2?.subscription?.plan ?? "AgentRouter \u4F59\u989D\u8D26\u6237",
+    quota: candidate2?.quota ?? null
+  };
+}
+var AgentRouterDriver = class {
+  constructor({
+    catalogLoader = null,
+    requestExecutor = null,
+    fetchImpl = fetch,
+    env = process.env,
+    userAgent = env.DOCKYARD_AGENTROUTER_USER_AGENT || DEFAULT_AGENTROUTER_USER_AGENT
+  } = {}) {
+    this.fetchImpl = fetchImpl;
+    this.env = env;
+    this.userAgent = userAgent;
+    this.catalogLoader = catalogLoader ?? createAgentRouterCatalogLoader({ fetchImpl, userAgent });
+    this.requestExecutor = requestExecutor ?? createAgentRouterNativeExecutor({ fetchImpl, env, userAgent });
+  }
+  async discover() {
+    const envKey = typeof this.env.AGENTROUTER_API_KEY === "string" && this.env.AGENTROUTER_API_KEY.length > 0 ? this.env.AGENTROUTER_API_KEY : null;
+    if (!envKey) {
+      return {
+        source: "agentrouter_env",
+        candidates: [],
+        diagnostics: ["\u672A\u5728\u73AF\u5883\u53D8\u91CF\u4E2D\u53D1\u73B0 AGENTROUTER_API_KEY\uFF1B\u53EF\u5728\u9762\u677F\u4E2D\u76F4\u63A5\u7C98\u8D34 AgentRouter \u7684 sk- Key\u3002"]
+      };
+    }
+    return {
+      source: "agentrouter_env",
+      candidates: [{
+        candidateId: `agentrouter:${fingerprintApiKey3(envKey)}`,
+        accountId: `agentrouter-${fingerprintApiKey3(envKey)}`,
+        providerId: PROVIDER_ID18,
+        displayName: `AgentRouter Key (${maskApiKey4(envKey)})`,
+        apiKey: envKey,
+        subscription: { plan: "AgentRouter \u4F59\u989D\u8D26\u6237", status: "active" }
+      }]
+    };
+  }
+  async importAccount(candidate2, context = {}) {
+    const apiKey = String(candidate2?.apiKey ?? "").trim();
+    const accountId = candidate2?.accountId || `agentrouter-${fingerprintApiKey3(apiKey)}`;
+    const ref = createCredentialRef(PROVIDER_ID18, accountId);
+    if (context.secretStore) {
+      await context.secretStore.write(ref, {
+        type: "agentrouter_api_key",
+        providerId: PROVIDER_ID18,
+        apiKey,
+        displayName: candidate2?.displayName || "AgentRouter"
+      }).catch(() => {
+      });
+    }
+    return createAccountRecord({
+      accountId,
+      providerId: PROVIDER_ID18,
+      displayName: candidate2?.displayName || `AgentRouter Key (${maskApiKey4(apiKey)})`,
+      email: candidate2?.email ?? null,
+      auth: { kind: "api_key", credentialRef: ref },
+      subscription: { plan: "AgentRouter \u4F59\u989D\u8D26\u6237", status: "active", expiresAt: null },
+      resources: {
+        quotaSource: "agentrouter_balance",
+        quotaAvailable: false,
+        quotaDiagnostic: "\u4F59\u989D\u5728 AgentRouter \u63A7\u5236\u53F0\u7684\u300C\u94B1\u5305\u300D\u67E5\u770B\uFF1B\u63A5\u53E3\u672A\u63D0\u4F9B\u4F59\u989D\u67E5\u8BE2",
+        quotaUrl: "https://agentrouter.org"
+      },
+      health: { status: "healthy" }
+    });
+  }
+  async importSource(source, context = {}) {
+    const raw = typeof source === "string" ? source : source?.apiKey ?? source?.key ?? source?.token ?? "";
+    const apiKey = String(raw ?? "").trim();
+    if (!apiKey) throw new ValidationError("\u8BF7\u8F93\u5165 AgentRouter API Key");
+    const label = typeof source === "object" && typeof source?.label === "string" ? source.label.trim() : "";
+    return [await this.importAccount({
+      apiKey,
+      source: "manual_api_key",
+      displayName: label || `AgentRouter Key (${maskApiKey4(apiKey)})`,
+      email: maskApiKey4(apiKey)
+    }, context)];
+  }
+  async refreshAccount(account, context = {}) {
+    let apiKey = null;
+    if (context.secretStore && account?.auth?.credentialRef) {
+      try {
+        const stored = await context.secretStore.read(account.auth.credentialRef);
+        apiKey = stored?.apiKey ?? null;
+      } catch {
+      }
+    }
+    return {
+      health: {
+        status: apiKey || account?.auth?.credentialRef ? "healthy" : "expired",
+        lastCheckedAt: (/* @__PURE__ */ new Date()).toISOString()
+      },
+      quota: await this.getQuota(account, context)
+    };
+  }
+  async getQuota(account, context = {}) {
+    return {
+      quota: createQuotaSnapshot({}),
+      resources: {
+        quotaSource: "agentrouter_balance",
+        quotaDiagnostic: "\u4F59\u989D\u5728 AgentRouter \u63A7\u5236\u53F0\u7684\u300C\u94B1\u5305\u300D\u67E5\u770B\uFF1B\u63A5\u53E3\u672A\u63D0\u4F9B\u4F59\u989D\u67E5\u8BE2",
+        quotaUrl: "https://agentrouter.org"
+      }
+    };
+  }
+  async getCatalog(context = {}) {
+    let credential = null;
+    if (context.secretStore && context.accounts?.[0]?.auth?.credentialRef) {
+      try {
+        credential = await context.secretStore.read(context.accounts[0].auth.credentialRef);
+      } catch {
+      }
+    }
+    return this.catalogLoader({
+      force: Boolean(context?.force),
+      credential,
+      accounts: context?.accounts ?? null
+    });
+  }
+  async invoke(request, invocation, context = {}) {
+    return this.stream(request, invocation, context);
+  }
+  async stream(request, invocation, context = {}) {
+    let credential = null;
+    if (context.secretStore && invocation?.account?.auth?.credentialRef) {
+      try {
+        credential = await context.secretStore.read(invocation.account.auth.credentialRef);
+      } catch {
+      }
+    }
+    return this.requestExecutor({
+      request,
+      account: invocation?.account ?? null,
+      credential,
+      signal: context.signal ?? null,
+      attachments: context.attachments ?? invocation?.attachments ?? null
+    });
+  }
+};
+function createAgentRouterDriver(options = {}) {
+  return new AgentRouterDriver(options);
+}
+
+// modules/provider-agentrouter/src/index.mjs
+function createAgentRouterModule({ driver = {} } = {}) {
+  return defineProviderModule({
+    id: "agentrouter",
+    displayName: "AgentRouter",
+    capabilities: [
+      "api_key_auth",
+      "catalog",
+      "quota",
+      "invoke",
+      "stream"
+    ],
+    driver
+  });
+}
+
 // packages/runtime/src/dockyard-runtime.mjs
 var candidateSummarizers = /* @__PURE__ */ new Map([
   ["openai-codex", summarizeCodexCandidate],
@@ -18890,7 +19387,8 @@ var candidateSummarizers = /* @__PURE__ */ new Map([
   ["commandcode", summarizeCommandCodeCandidate],
   ["hermes", summarizeHermesCandidate],
   ["openrouter-free", summarizeOpenRouterFreeCandidate],
-  ["trae-cn", summarizeTraeCnCandidate]
+  ["trae-cn", summarizeTraeCnCandidate],
+  ["agentrouter", summarizeAgentRouterCandidate]
 ]);
 var DEFAULT_REFRESH_TIMEOUT_MS = 3e4;
 function numericOption(value, fallback) {
@@ -19074,6 +19572,15 @@ function createDefaultProviderEntries(options = {}) {
         })
       }),
       driver: options.openrouterFreeDriver
+    },
+    {
+      module: createAgentRouterModule({
+        driver: options.agentrouterDriver ?? createAgentRouterDriver({
+          ...withRequestExecutor("agentrouter", options.agentrouter, requestExecutors),
+          ...catalogLoaders.agentrouter ? { catalogLoader: catalogLoaders.agentrouter } : {}
+        })
+      }),
+      driver: options.agentrouterDriver
     },
     {
       module: createTraeCnModule({
@@ -20682,9 +21189,9 @@ var dockyardDshConstants = Object.freeze({
 });
 
 // packages/dsh-plugin/src/dockyard-credential-store.mjs
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 function dshCredentialRef(ref) {
-  const digest = createHash12("sha256").update(String(ref)).digest("hex");
+  const digest = createHash13("sha256").update(String(ref)).digest("hex");
   return `DOCKYARD_DSH_${digest}`;
 }
 function parseCredential(value) {
@@ -21474,7 +21981,8 @@ function apply(ctx, config = {}) {
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
       commandcode: runtimeOptions.requestExecutors?.commandcode ?? createCommandCodeNativeExecutor(runtimeOptions.commandcode ?? {}),
       hermes: runtimeOptions.requestExecutors?.hermes ?? createHermesNativeExecutor(runtimeOptions.hermes ?? {}),
-      "openrouter-free": runtimeOptions.requestExecutors?.["openrouter-free"] ?? createOpenRouterFreeNativeExecutor(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {})
+      "openrouter-free": runtimeOptions.requestExecutors?.["openrouter-free"] ?? createOpenRouterFreeNativeExecutor(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {}),
+      agentrouter: runtimeOptions.requestExecutors?.agentrouter ?? createAgentRouterNativeExecutor(runtimeOptions.agentrouter ?? {})
     };
     runtimeOptions.catalogLoaders = {
       ...runtimeOptions.catalogLoaders ?? {},
@@ -21489,7 +21997,8 @@ function apply(ctx, config = {}) {
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
       commandcode: runtimeOptions.catalogLoaders?.commandcode ?? createCommandCodeCatalogLoader(runtimeOptions.commandcode ?? {}),
       hermes: runtimeOptions.catalogLoaders?.hermes ?? createHermesCatalogLoader(runtimeOptions.hermes ?? {}),
-      "openrouter-free": runtimeOptions.catalogLoaders?.["openrouter-free"] ?? createOpenRouterFreeCatalogLoader(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {})
+      "openrouter-free": runtimeOptions.catalogLoaders?.["openrouter-free"] ?? createOpenRouterFreeCatalogLoader(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {}),
+      agentrouter: runtimeOptions.catalogLoaders?.agentrouter ?? createAgentRouterCatalogLoader(runtimeOptions.agentrouter ?? {})
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders).filter(([, loader]) => typeof loader === "function");
