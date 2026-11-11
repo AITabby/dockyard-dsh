@@ -16,6 +16,9 @@ const PROVIDER_ID = "agentrouter";
 export const DEFAULT_AGENTROUTER_ENDPOINT = "https://agentrouter.org/v1/chat/completions";
 export const DEFAULT_AGENTROUTER_MODELS_ENDPOINT = "https://agentrouter.org/v1/models";
 
+/** GPT-6-class models on this service answer only through the Responses API. */
+export const DEFAULT_AGENTROUTER_RESPONSES_ENDPOINT = "https://agentrouter.org/v1/responses";
+
 /**
  * AgentRouter only answers clients on an allow-list, and it decides that from
  * the User-Agent: `curl`, `python-requests` and DSH's own client all get
@@ -237,14 +240,213 @@ async function* streamAgentRouterResponse(response) {
   yield { type: "finish", reason: finishReason(stop) };
 }
 
+/** Map a reasoning effort onto the values the Responses API accepts. */
+function responsesEffort(raw) {
+  const value = String(raw ?? "").toLowerCase();
+  if (!value) return null;
+  if (value === "minimal" || value === "low") return "low";
+  if (value === "medium") return "medium";
+  // xhigh/max are DSH's names for "as much as possible".
+  if (value === "high" || value === "xhigh" || value === "max") return "high";
+  return null;
+}
+
+/** Convert DSH messages into Responses API input items. */
+export async function buildAgentRouterResponsesInput(request, attachments) {
+  const items = [];
+  for (const message of Array.isArray(request.messages) ? request.messages : []) {
+    const role = message?.role;
+    if (role === "tool") {
+      items.push({
+        type: "function_call_output",
+        call_id: sanitizeToolCallId(firstString(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
+        output: textFromContent(message.content ?? message.text ?? message.output ?? message.result),
+      });
+      continue;
+    }
+    const calls = (Array.isArray(message?.content) ? message.content : [message?.content])
+      .map(toolCallPart)
+      .filter(Boolean)
+      .map((call, index) => ({
+        type: "function_call",
+        call_id: sanitizeToolCallId(firstString(call.id, call.toolCallId, call.tool_call_id, `tool-${index}`)),
+        name: firstString(call.name, call.function?.name, "tool"),
+        arguments: typeof (call.arguments ?? call.function?.arguments) === "string"
+          ? (call.arguments ?? call.function.arguments)
+          : JSON.stringify(call.arguments ?? call.input ?? call.function?.arguments ?? {}),
+      }));
+    items.push(...calls);
+    const content = await openAiContent(message?.content ?? message?.text, attachments);
+    if (content.length > 0) {
+      const mapped = content.map((part) => (part.type === "image_url"
+        ? { type: "input_image", image_url: part.image_url.url }
+        : { type: role === "assistant" ? "output_text" : "input_text", text: part.text }));
+      items.push({ role: role === "assistant" ? "assistant" : "user", content: mapped });
+    }
+  }
+  return items;
+}
+
+export async function buildAgentRouterResponsesRequest(request = {}, context = {}) {
+  const body = {
+    model: request.model,
+    input: await buildAgentRouterResponsesInput(request, context.attachments),
+    stream: true,
+  };
+  if (typeof request.system === "string" && request.system.length > 0) body.instructions = request.system;
+  if (request.temperature !== undefined) body.temperature = request.temperature;
+  const maxTokens = request.maxTokens ?? request.modelContext?.maxTokens;
+  if (Number.isInteger(maxTokens) && maxTokens > 0) body.max_output_tokens = maxTokens;
+  const effort = responsesEffort(request.reasoningEffort ?? request.reasoning_effort);
+  if (effort) body.reasoning = { effort };
+  const tools = buildAgentRouterTools(request.tools);
+  if (tools) {
+    body.tools = tools.map((tool) => ({
+      type: "function",
+      name: tool.function.name,
+      ...(tool.function.description ? { description: tool.function.description } : {}),
+      parameters: tool.function.parameters,
+    }));
+  }
+  return body;
+}
+
+async function* streamAgentRouterResponses(response) {
+  let text = "";
+  let textIndex = 0;
+  let textOpen = true;
+  let nextIndex = 1;
+  let usage = null;
+  let stop = "stop";
+  let reasoning = null;
+  let terminated = false;
+  const tools = new Map();
+  yield { type: "block-start", index: textIndex, blockType: "text" };
+
+  const ensureReasoning = function* (delta) {
+    if (textOpen) {
+      yield { type: "block-end", index: textIndex, block: { type: "text", text } };
+      textOpen = false;
+    }
+    if (!reasoning) {
+      reasoning = { index: nextIndex++, text: "" };
+      yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+    }
+    reasoning.text += delta;
+    yield { type: "reasoning-delta", index: reasoning.index, text: delta };
+  };
+
+  for await (const event of readSseEvents(response)) {
+    if (event?.done) {
+      terminated = true;
+      continue;
+    }
+    const payload = event.data;
+    if (!payload || typeof payload !== "object") continue;
+    const type = typeof payload.type === "string" ? payload.type : (event.event ?? "");
+    if (type === "response.error" || type === "response.failed" || payload.error) {
+      const detail = payload.error?.message ?? payload.response?.error?.message ?? "AgentRouter returned an error";
+      throw nativeProviderError(PROVIDER_ID, detail, { body: payload });
+    }
+    if (payload.response?.usage) usage = normalizeUsage(payload.response.usage) ?? usage;
+    if (payload.usage) usage = normalizeUsage(payload.usage) ?? usage;
+
+    if (type === "response.output_text.delta" && typeof payload.delta === "string" && payload.delta) {
+      if (reasoning) {
+        yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+        reasoning = null;
+      }
+      if (!textOpen) {
+        textIndex = nextIndex++;
+        text = "";
+        textOpen = true;
+        yield { type: "block-start", index: textIndex, blockType: "text" };
+      }
+      text += payload.delta;
+      yield { type: "text-delta", index: textIndex, text: payload.delta };
+      continue;
+    }
+    if ((type === "response.reasoning_summary_text.delta" || type === "response.reasoning_text.delta")
+      && typeof payload.delta === "string" && payload.delta) {
+      yield* ensureReasoning(payload.delta);
+      continue;
+    }
+    if (type === "response.output_item.added" && payload.item?.type === "function_call") {
+      const item = payload.item;
+      const key = firstString(item.call_id, item.id, `tool-${tools.size}`);
+      const state = { index: nextIndex++, id: key, name: firstString(item.name, "tool"), arguments: "" };
+      if (reasoning) {
+        yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+        reasoning = null;
+      }
+      if (textOpen) {
+        yield { type: "block-end", index: textIndex, block: { type: "text", text } };
+        textOpen = false;
+      }
+      tools.set(key, state);
+      yield { type: "block-start", index: state.index, blockType: "tool-call" };
+      continue;
+    }
+    if (type === "response.function_call_arguments.delta") {
+      const state = tools.get(payload.item_id) ?? [...tools.values()].at(-1);
+      const delta = typeof payload.delta === "string" ? payload.delta : "";
+      if (state && delta) {
+        state.arguments += delta;
+        yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: delta };
+      }
+      continue;
+    }
+    if (type === "response.completed" || type === "response.done") {
+      terminated = true;
+      stop = tools.size > 0 ? "tool_calls" : "stop";
+      continue;
+    }
+  }
+
+  if (!terminated) {
+    throw nativeProviderError(
+      PROVIDER_ID,
+      "AgentRouter（Responses）流在没有完成事件的情况下结束，响应可能被截断",
+      { code: "AGENTROUTER_TRUNCATED_STREAM" },
+    );
+  }
+  if (reasoning) yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+  if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text } };
+  for (const state of tools.values()) {
+    yield { type: "block-end", index: state.index, block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments || "{}" } };
+  }
+  if (usage) yield { type: "usage", usage };
+  yield { type: "finish", reason: tools.size > 0 ? { kind: "tool-calls" } : finishReason(stop) };
+}
+
 export function createAgentRouterNativeExecutor({
   endpoint = process.env.DOCKYARD_AGENTROUTER_ENDPOINT || DEFAULT_AGENTROUTER_ENDPOINT,
+  responsesEndpoint = process.env.DOCKYARD_AGENTROUTER_RESPONSES_ENDPOINT || DEFAULT_AGENTROUTER_RESPONSES_ENDPOINT,
   env = process.env,
   timeoutMs = 300_000,
   fetchImpl = fetch,
   userAgent = process.env.DOCKYARD_AGENTROUTER_USER_AGENT || DEFAULT_AGENTROUTER_USER_AGENT,
 } = {}) {
   const safeEndpoint = validateNativeEndpoint(endpoint, { providerId: PROVIDER_ID });
+  const safeResponses = validateNativeEndpoint(responsesEndpoint, { providerId: PROVIDER_ID });
+
+  const send = async (url, body, token, signal) => {
+    const response = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        // Without an allow-listed client string the endpoint rejects the request
+        // before it ever checks the key.
+        "user-agent": userAgent,
+      },
+      body: JSON.stringify(body),
+      signal: signal ?? AbortSignal.timeout(timeoutMs),
+    });
+    return response;
+  };
+
   const executor = async ({ request = {}, credential, context = {} } = {}) => {
     const token = firstString(credential?.apiKey, credential?.access, env.AGENTROUTER_API_KEY);
     if (!token) {
@@ -252,21 +454,24 @@ export function createAgentRouterNativeExecutor({
       error.code = "AUTH_REQUIRED";
       throw error;
     }
-    const headers = {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      accept: "text/event-stream",
-      // Without an allow-listed client string the endpoint rejects the request
-      // before it ever checks the key.
-      "user-agent": userAgent,
-    };
-    const response = await fetchNativeResponse(safeEndpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(await buildAgentRouterRequest(request, context)),
-      signal: context.signal,
-    }, { providerId: PROVIDER_ID, timeoutMs, fetchImpl });
-    return streamAgentRouterResponse(response);
+
+    const chatResponse = await send(safeEndpoint, await buildAgentRouterRequest(request, context), token, context.signal);
+    if (chatResponse.ok) return streamAgentRouterResponse(chatResponse);
+
+    // GPT-6-class models refuse chat-completions outright and name the API they
+    // want; follow that instead of surfacing a dead end to the user.
+    const detail = await chatResponse.text().catch(() => "");
+    if (/\/v1\/responses/u.test(detail) || /does not support/iu.test(detail)) {
+      const responsesResponse = await send(safeResponses, await buildAgentRouterResponsesRequest(request, context), token, context.signal);
+      if (responsesResponse.ok) return streamAgentRouterResponses(responsesResponse);
+      const responsesDetail = await responsesResponse.text().catch(() => "");
+      throw nativeProviderError(PROVIDER_ID, `AgentRouter 拒绝了请求（${responsesResponse.status}）：${responsesDetail.slice(0, 200)}`, {
+        status: responsesResponse.status,
+      });
+    }
+    throw nativeProviderError(PROVIDER_ID, `AgentRouter 拒绝了请求（${chatResponse.status}）：${detail.slice(0, 200)}`, {
+      status: chatResponse.status,
+    });
   };
   executor.nativeTransport = "agentrouter-openai-completions";
   return guardEmptyCompletion(executor, { providerId: PROVIDER_ID });
@@ -276,5 +481,6 @@ export const agentRouterNativeTransportConstants = Object.freeze({
   providerId: PROVIDER_ID,
   endpoint: DEFAULT_AGENTROUTER_ENDPOINT,
   modelsEndpoint: DEFAULT_AGENTROUTER_MODELS_ENDPOINT,
+  responsesEndpoint: DEFAULT_AGENTROUTER_RESPONSES_ENDPOINT,
   userAgent: DEFAULT_AGENTROUTER_USER_AGENT,
 });

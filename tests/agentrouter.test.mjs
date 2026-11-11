@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   BUILTIN_AGENTROUTER_MODELS,
+  buildAgentRouterResponsesRequest,
   DEFAULT_AGENTROUTER_USER_AGENT,
   createAgentRouterCatalogLoader,
   createAgentRouterDriver,
@@ -153,4 +154,111 @@ test("a cut stream fails instead of pretending the answer finished", async () =>
     assert.equal(error.code, "AGENTROUTER_TRUNCATED_STREAM");
     return true;
   });
+});
+
+test("a model that refuses chat-completions is retried on the Responses API", async () => {
+  // GPT-6-class models answer exactly this, and the message names the API they
+  // want; following it is cheaper than failing the turn.
+  const calls = [];
+  const executor = createAgentRouterNativeExecutor({
+    env: {},
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), body: JSON.parse(init.body) });
+      if (String(url).endsWith("/v1/chat/completions")) {
+        return new Response(JSON.stringify({
+          error: { message: "模型 gpt-6.1-sol 不支持 /v1/chat/completions 接口，请改用 /v1/responses（OpenAI Responses API）" },
+        }), { status: 400 });
+      }
+      return new Response(sseBody([
+        `event: response.output_text.delta\ndata: ${JSON.stringify({ type: "response.output_text.delta", delta: "你好" })}\n\n`,
+        `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { usage: { input_tokens: 3, output_tokens: 2 } } })}\n\n`,
+      ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+    },
+  });
+
+  const events = await collect(await executor({
+    request: { model: "gpt-6.1-sol", messages: [{ role: "user", content: "hi" }], system: "be brief", reasoningEffort: "xhigh" },
+    credential: { apiKey: "sk-test" },
+  }));
+
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].url, /\/v1\/responses$/u);
+  // The Responses body uses input/instructions and maps xhigh down to high.
+  assert.equal(calls[1].body.instructions, "be brief");
+  assert.deepEqual(calls[1].body.input[0], { role: "user", content: [{ type: "input_text", text: "hi" }] });
+  assert.deepEqual(calls[1].body.reasoning, { effort: "high" });
+
+  assert.equal(events.filter((event) => event.type === "text-delta").map((event) => event.text).join(""), "你好");
+  assert.deepEqual(events.at(-1), { type: "finish", reason: { kind: "stop" } });
+});
+
+test("Responses tool calls become DSH tool-call blocks", async () => {
+  const executor = createAgentRouterNativeExecutor({
+    env: {},
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/v1/chat/completions")) {
+        return new Response(JSON.stringify({ error: { message: "does not support /v1/chat/completions, use /v1/responses" } }), { status: 400 });
+      }
+      return new Response(sseBody([
+        `data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "function_call", call_id: "call_1", name: "bash", arguments: "" } })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "call_1", delta: "{\"cmd\":\"ls\"}" })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.completed", response: {} })}\n\n`,
+      ]), { status: 200 });
+    },
+  });
+
+  const events = await collect(await executor({
+    request: { model: "gpt-6.1-sol", messages: [{ role: "user", content: "go" }] },
+    credential: { apiKey: "sk-test" },
+  }));
+  const call = events.find((event) => event.type === "block-end" && event.block?.type === "tool-call");
+  assert.equal(call.block.name, "bash");
+  assert.equal(call.block.arguments, '{"cmd":"ls"}');
+  assert.deepEqual(events.at(-1), { type: "finish", reason: { kind: "tool-calls" } });
+});
+
+test("reasoning output from the Responses API is streamed as a reasoning block", async () => {
+  const executor = createAgentRouterNativeExecutor({
+    env: {},
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/v1/chat/completions")) {
+        return new Response(JSON.stringify({ error: { message: "use /v1/responses" } }), { status: 400 });
+      }
+      return new Response(sseBody([
+        `data: ${JSON.stringify({ type: "response.reasoning_summary_text.delta", delta: "想一想" })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "答案" })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.completed", response: {} })}\n\n`,
+      ]), { status: 200 });
+    },
+  });
+  const events = await collect(await executor({
+    request: { model: "gpt-6.1-sol", messages: [{ role: "user", content: "hi" }] },
+    credential: { apiKey: "sk-test" },
+  }));
+  assert.equal(events.filter((event) => event.type === "reasoning-delta").map((event) => event.text).join(""), "想一想");
+  assert.equal(events.filter((event) => event.type === "text-delta").map((event) => event.text).join(""), "答案");
+});
+
+test("the catalog offers reasoning levels so the panel shows a tier picker", async () => {
+  const loader = createAgentRouterCatalogLoader({ fetchImpl: async () => { throw new Error("offline"); } });
+  const catalog = await loader({ credential: null });
+  for (const model of catalog.models) {
+    assert.ok(model.reasoning, `${model.id} should declare reasoning`);
+    assert.deepEqual(model.reasoning.efforts.map((e) => e.id), ["low", "medium", "high"]);
+    assert.equal(model.reasoning.defaultEffort, "medium");
+  }
+});
+
+test("the responses request maps tool results and calls back", async () => {
+  const body = await buildAgentRouterResponsesRequest({
+    model: "gpt-6.1-sol",
+    messages: [
+      { role: "user", content: "read" },
+      { role: "assistant", content: [{ type: "tool-call", id: "call_9", name: "read_file", arguments: "{\"p\":1}" }] },
+      { role: "tool", toolCallId: "call_9", content: [{ type: "text", text: "done" }] },
+    ],
+  });
+  assert.deepEqual(body.input[1], { type: "function_call", call_id: "call_9", name: "read_file", arguments: '{"p":1}' });
+  assert.deepEqual(body.input[2], { type: "function_call_output", call_id: "call_9", output: "done" });
+  assert.equal(body.stream, true);
 });

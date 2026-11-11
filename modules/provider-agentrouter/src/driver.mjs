@@ -17,10 +17,24 @@ import {
 const PROVIDER_ID = "agentrouter";
 
 /** The three models the service advertises; the live list wins when reachable. */
+/**
+ * These are GPT-6-class reasoning models, so the panel offers the standard
+ * three levels. The transport maps DSH's extra levels (xhigh/max) down to high
+ * and drops the parameter entirely if a model happens to refuse it.
+ */
+const AGENTROUTER_REASONING = Object.freeze({
+  efforts: [
+    { id: "low", name: "Low" },
+    { id: "medium", name: "Medium", default: true },
+    { id: "high", name: "High" },
+  ],
+  defaultEffort: "medium",
+});
+
 export const BUILTIN_AGENTROUTER_MODELS = Object.freeze([
-  { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", contextWindow: 1_000_000, maxTokens: 128_000, inputModalities: ["text"] },
-  { id: "gpt-6-astra", name: "GPT-6 Astra", contextWindow: 400_000, maxTokens: 128_000, inputModalities: ["text"] },
-  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", contextWindow: 400_000, maxTokens: 128_000, inputModalities: ["text"] },
+  { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", contextWindow: 1_000_000, maxTokens: 128_000, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
+  { id: "gpt-6-astra", name: "GPT-6 Astra", contextWindow: 400_000, maxTokens: 128_000, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
+  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", contextWindow: 272_000, maxTokens: 128_000, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
 ]);
 
 function fingerprintApiKey(apiKey) {
@@ -49,6 +63,7 @@ export function parseAgentRouterCatalog(data) {
       contextWindow: known?.contextWindow ?? resolveContextWindowFromModel(item, 128_000),
       maxTokens: known?.maxTokens ?? resolveMaxTokensFromModel(item, 32_768),
       inputModalities: ["text"],
+      ...(known?.reasoning ? { reasoning: known.reasoning } : {}),
     });
   }
   return models.length > 0 ? { models, source: "agentrouter_live_catalog" } : null;

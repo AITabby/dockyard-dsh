@@ -18885,6 +18885,7 @@ import { createHash as createHash12 } from "node:crypto";
 var PROVIDER_ID17 = "agentrouter";
 var DEFAULT_AGENTROUTER_ENDPOINT = "https://agentrouter.org/v1/chat/completions";
 var DEFAULT_AGENTROUTER_MODELS_ENDPOINT = "https://agentrouter.org/v1/models";
+var DEFAULT_AGENTROUTER_RESPONSES_ENDPOINT = "https://agentrouter.org/v1/responses";
 var DEFAULT_AGENTROUTER_USER_AGENT = "Cline/3.2.0";
 function firstString11(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
@@ -19086,14 +19087,192 @@ async function* streamAgentRouterResponse(response) {
   if (usage) yield { type: "usage", usage };
   yield { type: "finish", reason: finishReason(stop) };
 }
+function responsesEffort(raw) {
+  const value = String(raw ?? "").toLowerCase();
+  if (!value) return null;
+  if (value === "minimal" || value === "low") return "low";
+  if (value === "medium") return "medium";
+  if (value === "high" || value === "xhigh" || value === "max") return "high";
+  return null;
+}
+async function buildAgentRouterResponsesInput(request, attachments) {
+  const items = [];
+  for (const message of Array.isArray(request.messages) ? request.messages : []) {
+    const role = message?.role;
+    if (role === "tool") {
+      items.push({
+        type: "function_call_output",
+        call_id: sanitizeToolCallId(firstString11(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
+        output: textFromContent(message.content ?? message.text ?? message.output ?? message.result)
+      });
+      continue;
+    }
+    const calls = (Array.isArray(message?.content) ? message.content : [message?.content]).map(toolCallPart3).filter(Boolean).map((call, index) => ({
+      type: "function_call",
+      call_id: sanitizeToolCallId(firstString11(call.id, call.toolCallId, call.tool_call_id, `tool-${index}`)),
+      name: firstString11(call.name, call.function?.name, "tool"),
+      arguments: typeof (call.arguments ?? call.function?.arguments) === "string" ? call.arguments ?? call.function.arguments : JSON.stringify(call.arguments ?? call.input ?? call.function?.arguments ?? {})
+    }));
+    items.push(...calls);
+    const content = await openAiContent3(message?.content ?? message?.text, attachments);
+    if (content.length > 0) {
+      const mapped = content.map((part) => part.type === "image_url" ? { type: "input_image", image_url: part.image_url.url } : { type: role === "assistant" ? "output_text" : "input_text", text: part.text });
+      items.push({ role: role === "assistant" ? "assistant" : "user", content: mapped });
+    }
+  }
+  return items;
+}
+async function buildAgentRouterResponsesRequest(request = {}, context = {}) {
+  const body = {
+    model: request.model,
+    input: await buildAgentRouterResponsesInput(request, context.attachments),
+    stream: true
+  };
+  if (typeof request.system === "string" && request.system.length > 0) body.instructions = request.system;
+  if (request.temperature !== void 0) body.temperature = request.temperature;
+  const maxTokens = request.maxTokens ?? request.modelContext?.maxTokens;
+  if (Number.isInteger(maxTokens) && maxTokens > 0) body.max_output_tokens = maxTokens;
+  const effort = responsesEffort(request.reasoningEffort ?? request.reasoning_effort);
+  if (effort) body.reasoning = { effort };
+  const tools = buildAgentRouterTools(request.tools);
+  if (tools) {
+    body.tools = tools.map((tool) => ({
+      type: "function",
+      name: tool.function.name,
+      ...tool.function.description ? { description: tool.function.description } : {},
+      parameters: tool.function.parameters
+    }));
+  }
+  return body;
+}
+async function* streamAgentRouterResponses(response) {
+  let text3 = "";
+  let textIndex = 0;
+  let textOpen = true;
+  let nextIndex = 1;
+  let usage = null;
+  let stop = "stop";
+  let reasoning = null;
+  let terminated = false;
+  const tools = /* @__PURE__ */ new Map();
+  yield { type: "block-start", index: textIndex, blockType: "text" };
+  const ensureReasoning = function* (delta) {
+    if (textOpen) {
+      yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+      textOpen = false;
+    }
+    if (!reasoning) {
+      reasoning = { index: nextIndex++, text: "" };
+      yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+    }
+    reasoning.text += delta;
+    yield { type: "reasoning-delta", index: reasoning.index, text: delta };
+  };
+  for await (const event of readSseEvents(response)) {
+    if (event?.done) {
+      terminated = true;
+      continue;
+    }
+    const payload = event.data;
+    if (!payload || typeof payload !== "object") continue;
+    const type = typeof payload.type === "string" ? payload.type : event.event ?? "";
+    if (type === "response.error" || type === "response.failed" || payload.error) {
+      const detail = payload.error?.message ?? payload.response?.error?.message ?? "AgentRouter returned an error";
+      throw nativeProviderError(PROVIDER_ID17, detail, { body: payload });
+    }
+    if (payload.response?.usage) usage = normalizeUsage(payload.response.usage) ?? usage;
+    if (payload.usage) usage = normalizeUsage(payload.usage) ?? usage;
+    if (type === "response.output_text.delta" && typeof payload.delta === "string" && payload.delta) {
+      if (reasoning) {
+        yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+        reasoning = null;
+      }
+      if (!textOpen) {
+        textIndex = nextIndex++;
+        text3 = "";
+        textOpen = true;
+        yield { type: "block-start", index: textIndex, blockType: "text" };
+      }
+      text3 += payload.delta;
+      yield { type: "text-delta", index: textIndex, text: payload.delta };
+      continue;
+    }
+    if ((type === "response.reasoning_summary_text.delta" || type === "response.reasoning_text.delta") && typeof payload.delta === "string" && payload.delta) {
+      yield* ensureReasoning(payload.delta);
+      continue;
+    }
+    if (type === "response.output_item.added" && payload.item?.type === "function_call") {
+      const item = payload.item;
+      const key = firstString11(item.call_id, item.id, `tool-${tools.size}`);
+      const state = { index: nextIndex++, id: key, name: firstString11(item.name, "tool"), arguments: "" };
+      if (reasoning) {
+        yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+        reasoning = null;
+      }
+      if (textOpen) {
+        yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+        textOpen = false;
+      }
+      tools.set(key, state);
+      yield { type: "block-start", index: state.index, blockType: "tool-call" };
+      continue;
+    }
+    if (type === "response.function_call_arguments.delta") {
+      const state = tools.get(payload.item_id) ?? [...tools.values()].at(-1);
+      const delta = typeof payload.delta === "string" ? payload.delta : "";
+      if (state && delta) {
+        state.arguments += delta;
+        yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: delta };
+      }
+      continue;
+    }
+    if (type === "response.completed" || type === "response.done") {
+      terminated = true;
+      stop = tools.size > 0 ? "tool_calls" : "stop";
+      continue;
+    }
+  }
+  if (!terminated) {
+    throw nativeProviderError(
+      PROVIDER_ID17,
+      "AgentRouter\uFF08Responses\uFF09\u6D41\u5728\u6CA1\u6709\u5B8C\u6210\u4E8B\u4EF6\u7684\u60C5\u51B5\u4E0B\u7ED3\u675F\uFF0C\u54CD\u5E94\u53EF\u80FD\u88AB\u622A\u65AD",
+      { code: "AGENTROUTER_TRUNCATED_STREAM" }
+    );
+  }
+  if (reasoning) yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+  if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+  for (const state of tools.values()) {
+    yield { type: "block-end", index: state.index, block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments || "{}" } };
+  }
+  if (usage) yield { type: "usage", usage };
+  yield { type: "finish", reason: tools.size > 0 ? { kind: "tool-calls" } : finishReason(stop) };
+}
 function createAgentRouterNativeExecutor({
   endpoint: endpoint2 = process.env.DOCKYARD_AGENTROUTER_ENDPOINT || DEFAULT_AGENTROUTER_ENDPOINT,
+  responsesEndpoint = process.env.DOCKYARD_AGENTROUTER_RESPONSES_ENDPOINT || DEFAULT_AGENTROUTER_RESPONSES_ENDPOINT,
   env = process.env,
   timeoutMs = 3e5,
   fetchImpl = fetch,
   userAgent = process.env.DOCKYARD_AGENTROUTER_USER_AGENT || DEFAULT_AGENTROUTER_USER_AGENT
 } = {}) {
   const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID17 });
+  const safeResponses = validateNativeEndpoint(responsesEndpoint, { providerId: PROVIDER_ID17 });
+  const send = async (url, body, token, signal) => {
+    const response = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        // Without an allow-listed client string the endpoint rejects the request
+        // before it ever checks the key.
+        "user-agent": userAgent
+      },
+      body: JSON.stringify(body),
+      signal: signal ?? AbortSignal.timeout(timeoutMs)
+    });
+    return response;
+  };
   const executor = async ({ request = {}, credential, context = {} } = {}) => {
     const token = firstString11(credential?.apiKey, credential?.access, env.AGENTROUTER_API_KEY);
     if (!token) {
@@ -19101,21 +19280,20 @@ function createAgentRouterNativeExecutor({
       error.code = "AUTH_REQUIRED";
       throw error;
     }
-    const headers = {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      accept: "text/event-stream",
-      // Without an allow-listed client string the endpoint rejects the request
-      // before it ever checks the key.
-      "user-agent": userAgent
-    };
-    const response = await fetchNativeResponse(safeEndpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(await buildAgentRouterRequest(request, context)),
-      signal: context.signal
-    }, { providerId: PROVIDER_ID17, timeoutMs, fetchImpl });
-    return streamAgentRouterResponse(response);
+    const chatResponse = await send(safeEndpoint, await buildAgentRouterRequest(request, context), token, context.signal);
+    if (chatResponse.ok) return streamAgentRouterResponse(chatResponse);
+    const detail = await chatResponse.text().catch(() => "");
+    if (/\/v1\/responses/u.test(detail) || /does not support/iu.test(detail)) {
+      const responsesResponse = await send(safeResponses, await buildAgentRouterResponsesRequest(request, context), token, context.signal);
+      if (responsesResponse.ok) return streamAgentRouterResponses(responsesResponse);
+      const responsesDetail = await responsesResponse.text().catch(() => "");
+      throw nativeProviderError(PROVIDER_ID17, `AgentRouter \u62D2\u7EDD\u4E86\u8BF7\u6C42\uFF08${responsesResponse.status}\uFF09\uFF1A${responsesDetail.slice(0, 200)}`, {
+        status: responsesResponse.status
+      });
+    }
+    throw nativeProviderError(PROVIDER_ID17, `AgentRouter \u62D2\u7EDD\u4E86\u8BF7\u6C42\uFF08${chatResponse.status}\uFF09\uFF1A${detail.slice(0, 200)}`, {
+      status: chatResponse.status
+    });
   };
   executor.nativeTransport = "agentrouter-openai-completions";
   return guardEmptyCompletion(executor, { providerId: PROVIDER_ID17 });
@@ -19124,15 +19302,24 @@ var agentRouterNativeTransportConstants = Object.freeze({
   providerId: PROVIDER_ID17,
   endpoint: DEFAULT_AGENTROUTER_ENDPOINT,
   modelsEndpoint: DEFAULT_AGENTROUTER_MODELS_ENDPOINT,
+  responsesEndpoint: DEFAULT_AGENTROUTER_RESPONSES_ENDPOINT,
   userAgent: DEFAULT_AGENTROUTER_USER_AGENT
 });
 
 // modules/provider-agentrouter/src/driver.mjs
 var PROVIDER_ID18 = "agentrouter";
+var AGENTROUTER_REASONING = Object.freeze({
+  efforts: [
+    { id: "low", name: "Low" },
+    { id: "medium", name: "Medium", default: true },
+    { id: "high", name: "High" }
+  ],
+  defaultEffort: "medium"
+});
 var BUILTIN_AGENTROUTER_MODELS = Object.freeze([
-  { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", contextWindow: 1e6, maxTokens: 128e3, inputModalities: ["text"] },
-  { id: "gpt-6-astra", name: "GPT-6 Astra", contextWindow: 4e5, maxTokens: 128e3, inputModalities: ["text"] },
-  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", contextWindow: 4e5, maxTokens: 128e3, inputModalities: ["text"] }
+  { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", contextWindow: 1e6, maxTokens: 128e3, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
+  { id: "gpt-6-astra", name: "GPT-6 Astra", contextWindow: 4e5, maxTokens: 128e3, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
+  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", contextWindow: 272e3, maxTokens: 128e3, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING }
 ]);
 function fingerprintApiKey3(apiKey) {
   return createHash12("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
@@ -19157,7 +19344,8 @@ function parseAgentRouterCatalog(data) {
       name: typeof item?.name === "string" && item.name.length > 0 ? item.name : id,
       contextWindow: known?.contextWindow ?? resolveContextWindowFromModel(item, 128e3),
       maxTokens: known?.maxTokens ?? resolveMaxTokensFromModel(item, 32768),
-      inputModalities: ["text"]
+      inputModalities: ["text"],
+      ...known?.reasoning ? { reasoning: known.reasoning } : {}
     });
   }
   return models.length > 0 ? { models, source: "agentrouter_live_catalog" } : null;

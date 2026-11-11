@@ -27,8 +27,10 @@ export {
 export {
   DEFAULT_AGENTROUTER_ENDPOINT,
   DEFAULT_AGENTROUTER_MODELS_ENDPOINT,
+  DEFAULT_AGENTROUTER_RESPONSES_ENDPOINT,
   DEFAULT_AGENTROUTER_USER_AGENT,
   agentRouterNativeTransportConstants,
   buildAgentRouterRequest,
+  buildAgentRouterResponsesRequest,
   createAgentRouterNativeExecutor,
 } from "./native-transport.mjs";
