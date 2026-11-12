@@ -292,3 +292,39 @@ test("a model that needed Responses is remembered and skips the doomed call", as
   // The second turn goes straight to Responses: no wasted 400 round trip.
   assert.deepEqual(calls, ["chat", "responses", "responses"]);
 });
+
+test("two parallel tool calls keep their own arguments", async () => {
+  // The stream names a call by item id (`fc_...`) but DSH stores the call id
+  // (`call_...`). Keying on the wrong one made every delta fall back to "the
+  // most recent call", so two parallel calls traded arguments.
+  const executor = createAgentRouterNativeExecutor({
+    env: {},
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/v1/chat/completions")) {
+        return new Response(JSON.stringify({ error: { message: "use /v1/responses" } }), { status: 400 });
+      }
+      return new Response(sseBody([
+        `data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "function_call", id: "fc_a", call_id: "call_a", name: "bash", arguments: "" } })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "function_call", id: "fc_b", call_id: "call_b", name: "read", arguments: "" } })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_a", delta: "{\"n\":1}" })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_b", delta: "{\"n\":2}" })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.completed", response: {} })}\n\n`,
+      ]), { status: 200 });
+    },
+  });
+
+  const events = await collect(await executor({
+    request: { model: "gpt-6.1-sol", messages: [{ role: "user", content: "go" }] },
+    credential: { apiKey: "sk-test" },
+  }));
+
+  const calls = events
+    .filter((event) => event.type === "block-end" && event.block?.type === "tool-call")
+    .map((event) => event.block);
+  assert.equal(calls.length, 2);
+  const byId = new Map(calls.map((call) => [call.id, call]));
+  assert.equal(byId.get("call_a").name, "bash");
+  assert.equal(byId.get("call_a").arguments, '{"n":1}');
+  assert.equal(byId.get("call_b").name, "read");
+  assert.equal(byId.get("call_b").arguments, '{"n":2}');
+});
