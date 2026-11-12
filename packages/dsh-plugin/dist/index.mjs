@@ -19201,20 +19201,33 @@ async function* streamAgentRouterResponses(response) {
       yield* ensureReasoning(payload.delta);
       continue;
     }
-    if (type === "response.output_item.added" && payload.item?.type === "function_call") {
+    const isFunctionCall = payload.item?.type === "function_call";
+    if ((type === "response.output_item.added" || type === "response.output_item.done") && isFunctionCall) {
       const item = payload.item;
-      const key = firstString11(item.call_id, item.id, `tool-${tools.size}`);
-      const state = { index: nextIndex++, id: key, name: firstString11(item.name, "tool"), arguments: "" };
-      if (reasoning) {
-        yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-        reasoning = null;
+      const itemKey = firstString11(item.id, item.call_id, `tool-${tools.size}`);
+      let state = tools.get(itemKey);
+      if (!state) {
+        state = {
+          index: nextIndex++,
+          itemId: itemKey,
+          id: firstString11(item.call_id, item.id, itemKey),
+          name: firstString11(item.name, "tool"),
+          arguments: ""
+        };
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        if (textOpen) {
+          yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+          textOpen = false;
+        }
+        tools.set(itemKey, state);
+        yield { type: "block-start", index: state.index, blockType: "tool-call" };
       }
-      if (textOpen) {
-        yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
-        textOpen = false;
-      }
-      tools.set(key, state);
-      yield { type: "block-start", index: state.index, blockType: "tool-call" };
+      if (typeof item.call_id === "string" && item.call_id) state.id = item.call_id;
+      if (typeof item.name === "string" && item.name) state.name = item.name;
+      if (typeof item.arguments === "string" && item.arguments) state.arguments = item.arguments;
       continue;
     }
     if (type === "response.function_call_arguments.delta") {
