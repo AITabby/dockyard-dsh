@@ -655,10 +655,22 @@ function withEmptyCompletionNudge(envelope, nudge) {
   return { ...base, request: { ...request, system } };
 }
 
+function isReasoningEvent(event) {
+  if (event?.type === "reasoning-delta") return true;
+  if (event?.type === "block-start" && event.blockType === "reasoning") return true;
+  if (event?.type === "block-end" && event.block?.type === "reasoning") return true;
+  return false;
+}
+
 export function guardEmptyCompletion(executor, {
   providerId = "provider",
   nudge = EMPTY_COMPLETION_NUDGE,
   maxEmptyAttempts = 2,
+  // Holding reasoning back until an answer arrives hides the whole thinking
+  // phase from the user, which reads as dead air on slow thinking models.
+  // Streaming it live means an attempt can no longer be retried once its
+  // reasoning reached the host, so an empty finish then fails loudly instead.
+  streamReasoning = false,
 } = {}) {
   // Transports are called either with a single envelope object or with
   // positional arguments; forward whatever came in so both keep working.
@@ -682,6 +694,7 @@ export function guardEmptyCompletion(executor, {
         : [withEmptyCompletionNudge(envelope, nudge), ...args.slice(1)];
       const buffered = [];
       let sawOutput = false;
+      let streamedReasoning = false;
 
       // Some transports are generator functions, others are async functions
       // that resolve to an async iterable. Accept both.
@@ -697,6 +710,11 @@ export function guardEmptyCompletion(executor, {
           yield event;
           continue;
         }
+        if (streamReasoning && isReasoningEvent(event)) {
+          streamedReasoning = true;
+          yield event;
+          continue;
+        }
         buffered.push(event);
         if (isEmptyCompletionOutput(event)) {
           sawOutput = true;
@@ -706,6 +724,15 @@ export function guardEmptyCompletion(executor, {
       }
 
       if (sawOutput) return;
+      // Reasoning already reached the host, so a retry would duplicate it and
+      // leave orphaned thinking blocks behind.
+      if (streamedReasoning) {
+        throw nativeProviderError(
+          providerId,
+          "模型只输出了思考内容，没有给出回答或工具调用；请重试或换一个模型",
+          { code: "EMPTY_COMPLETION" },
+        );
+      }
       if (attempt >= maxEmptyAttempts) {
         throw nativeProviderError(
           providerId,

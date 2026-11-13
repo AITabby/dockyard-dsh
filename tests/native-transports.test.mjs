@@ -1331,3 +1331,44 @@ test("Antigravity sends a long Claude tool history with nothing Anthropic can re
   assert.equal(serialized.includes("functionResponse"), false, "no tool_result-equivalent parts");
   assert.equal(serialized.includes("thoughtSignature"), false, "no signatures are echoed");
 });
+
+test("streamReasoning releases thinking immediately instead of holding it", async () => {
+  // A thinking model that spends 20s before answering looks hung when the
+  // reasoning is buffered. With the option on, the host sees it as it arrives.
+  const order = [];
+  const guarded = guardEmptyCompletion(async function* () {
+    yield { type: "block-start", index: 0, blockType: "reasoning" };
+    yield { type: "reasoning-delta", index: 0, text: "想一想" };
+    yield { type: "block-end", index: 0, block: { type: "reasoning", text: "想一想" } };
+    yield { type: "block-start", index: 1, blockType: "text" };
+    yield { type: "text-delta", index: 1, text: "答案" };
+    yield { type: "block-end", index: 1, block: { type: "text", text: "答案" } };
+    yield { type: "finish", reason: { kind: "stop" } };
+  }, { providerId: "fixture", streamReasoning: true });
+
+  for await (const event of guarded({ request: { messages: [{ role: "user", content: "hi" }] } })) {
+    if (event.type === "reasoning-delta" || event.type === "text-delta") order.push(event.type);
+  }
+  assert.deepEqual(order, ["reasoning-delta", "text-delta"]);
+});
+
+test("a thinking-only attempt fails instead of retrying once reasoning was shown", async () => {
+  // Retrying after the reasoning already reached the host would duplicate the
+  // thinking blocks, so this path fails loudly rather than recovering.
+  let attempts = 0;
+  const guarded = guardEmptyCompletion(async function* () {
+    attempts += 1;
+    yield { type: "block-start", index: 0, blockType: "reasoning" };
+    yield { type: "reasoning-delta", index: 0, text: "只有思考" };
+    yield { type: "block-end", index: 0, block: { type: "reasoning", text: "只有思考" } };
+    yield { type: "finish", reason: { kind: "stop" } };
+  }, { providerId: "fixture", streamReasoning: true });
+
+  await assert.rejects(async () => {
+    for await (const event of guarded({ request: { messages: [{ role: "user", content: "hi" }] } })) void event;
+  }, (error) => {
+    assert.equal(error.code, "EMPTY_COMPLETION");
+    return true;
+  });
+  assert.equal(attempts, 1, "no retry once reasoning was streamed");
+});

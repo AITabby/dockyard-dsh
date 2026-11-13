@@ -1687,7 +1687,13 @@ export function createAntigravityNativeExecutor({
     return streamAntigravityResponse(response, context);
   };
   executor.nativeTransport = "gemini-stream-generate-content";
-  return guardEmptyCompletion(executor, { providerId: PROVIDER_ID });
+  // Gemini thinking is streamed: buffering it makes a 20s think look like a
+  // hung request. DOCKYARD_STREAM_REASONING=0 restores the old behaviour where
+  // a thinking-only attempt could be retried instead.
+  return guardEmptyCompletion(executor, {
+    providerId: PROVIDER_ID,
+    streamReasoning: process.env.DOCKYARD_STREAM_REASONING !== "0",
+  });
 }
 
 /**

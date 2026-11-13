@@ -5892,10 +5892,21 @@ function withEmptyCompletionNudge(envelope2, nudge) {
 ${nudge}` : nudge;
   return { ...base, request: { ...request, system } };
 }
+function isReasoningEvent(event) {
+  if (event?.type === "reasoning-delta") return true;
+  if (event?.type === "block-start" && event.blockType === "reasoning") return true;
+  if (event?.type === "block-end" && event.block?.type === "reasoning") return true;
+  return false;
+}
 function guardEmptyCompletion(executor, {
   providerId = "provider",
   nudge = EMPTY_COMPLETION_NUDGE,
-  maxEmptyAttempts = 2
+  maxEmptyAttempts = 2,
+  // Holding reasoning back until an answer arrives hides the whole thinking
+  // phase from the user, which reads as dead air on slow thinking models.
+  // Streaming it live means an attempt can no longer be retried once its
+  // reasoning reached the host, so an empty finish then fails loudly instead.
+  streamReasoning = false
 } = {}) {
   return async function* guardedExecutor(...args) {
     const envelope2 = args[0] ?? {};
@@ -5910,6 +5921,7 @@ function guardEmptyCompletion(executor, {
       const attemptArgs = attempt === 0 || !canNudge ? args : [withEmptyCompletionNudge(envelope2, nudge), ...args.slice(1)];
       const buffered = [];
       let sawOutput = false;
+      let streamedReasoning = false;
       const attemptResult = executor(...attemptArgs);
       const attemptStream = attemptResult && typeof attemptResult[Symbol.asyncIterator] === "function" ? attemptResult : await attemptResult;
       if (!attemptStream || typeof attemptStream[Symbol.asyncIterator] !== "function") {
@@ -5917,6 +5929,11 @@ function guardEmptyCompletion(executor, {
       }
       for await (const event of attemptStream) {
         if (sawOutput) {
+          yield event;
+          continue;
+        }
+        if (streamReasoning && isReasoningEvent(event)) {
+          streamedReasoning = true;
           yield event;
           continue;
         }
@@ -5928,6 +5945,13 @@ function guardEmptyCompletion(executor, {
         }
       }
       if (sawOutput) return;
+      if (streamedReasoning) {
+        throw nativeProviderError(
+          providerId,
+          "\u6A21\u578B\u53EA\u8F93\u51FA\u4E86\u601D\u8003\u5185\u5BB9\uFF0C\u6CA1\u6709\u7ED9\u51FA\u56DE\u7B54\u6216\u5DE5\u5177\u8C03\u7528\uFF1B\u8BF7\u91CD\u8BD5\u6216\u6362\u4E00\u4E2A\u6A21\u578B",
+          { code: "EMPTY_COMPLETION" }
+        );
+      }
       if (attempt >= maxEmptyAttempts) {
         throw nativeProviderError(
           providerId,
@@ -7492,7 +7516,10 @@ function createAntigravityNativeExecutor({
     return streamAntigravityResponse(response, context);
   };
   executor.nativeTransport = "gemini-stream-generate-content";
-  return guardEmptyCompletion(executor, { providerId: PROVIDER_ID2 });
+  return guardEmptyCompletion(executor, {
+    providerId: PROVIDER_ID2,
+    streamReasoning: process.env.DOCKYARD_STREAM_REASONING !== "0"
+  });
 }
 function createAntigravityNativeQuotaReader({
   endpoint: endpoint2 = process.env.DOCKYARD_ANTIGRAVITY_QUOTA_ENDPOINT || DEFAULT_QUOTA_ENDPOINT,
