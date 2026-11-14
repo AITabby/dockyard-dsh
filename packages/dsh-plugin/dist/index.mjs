@@ -9473,7 +9473,7 @@ function createAntigravityModule({ driver = {} } = {}) {
 
 // modules/provider-grok/src/driver.mjs
 import { createHash as createHash5 } from "node:crypto";
-import { mkdtemp as mkdtemp3, readFile as readFile5, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
+import { mkdtemp as mkdtemp3, readFile as readFile5, rename as rename3, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
 import { homedir as homedir6 } from "node:os";
 import { tmpdir as tmpdir3 } from "node:os";
 import { join as join9 } from "node:path";
@@ -10050,6 +10050,7 @@ var GrokOAuthDriver = class {
     this.authFilePath = authFilePath ?? join9(this.grokHome, "auth.json");
     this.cliPath = cliPath;
     this.commandRunner = commandRunner;
+    this.tokenExchanges = /* @__PURE__ */ new Map();
     this.requestExecutor = requestExecutor;
     this.fetchImpl = fetchImpl;
     this.creditsUrl = validateNativeEndpoint(creditsUrl, { providerId: PROVIDER_ID4 });
@@ -10259,11 +10260,33 @@ var GrokOAuthDriver = class {
     const credentialRef = account.auth?.credentialRef ?? account.credentialRef;
     const credential = await context.secretStore.read(credentialRef);
     if (!credential?.access) {
+      const healed = await this.#healCredentialFromCliAuth(account, context).catch(() => null);
+      if (healed?.access) return { ...healed, accountId: healed.accountId ?? account.accountId };
       const error = new Error("Grok OAuth credential is missing from secure storage");
       error.authExpired = true;
       throw error;
     }
     return { ...credential, accountId: credential.accountId ?? account.accountId };
+  }
+  /** Re-import the official CLI's auth file when our stored copy is gone. */
+  async #healCredentialFromCliAuth(account, context = {}) {
+    const raw = await readJsonFile(this.authFilePath);
+    if (!raw) return null;
+    const tokens = parseGrokAuth(raw);
+    if (!tokens.length) return null;
+    const wanted = account.accountId ?? account.auth?.credentialRef;
+    const target = tokens.find((value) => value.accountId === wanted) ?? tokens[0];
+    await this.importAccount(candidateFromTokens2(target, {
+      source: "official_grok_oauth",
+      now: context.now instanceof Date ? context.now : /* @__PURE__ */ new Date()
+    }), context);
+    const refs = [account.auth?.credentialRef, account.credentialRef, createCredentialRef(PROVIDER_ID4, target.accountId)];
+    for (const ref of refs) {
+      if (!ref) continue;
+      const stored = await context.secretStore.read(ref).catch(() => null);
+      if (stored?.access) return stored;
+    }
+    return null;
   }
   async #refreshOAuthCredential(account, context = {}, { strict = false } = {}) {
     const credential = await this.#readCredential(account, context);
@@ -10275,6 +10298,30 @@ var GrokOAuthDriver = class {
       error.authExpired = true;
       throw error;
     }
+    const credentialRef = account.auth?.credentialRef ?? account.credentialRef;
+    try {
+      return await this.#exchangeRefreshToken(credentialRef, credential, context, now);
+    } catch (error) {
+      const latest = await context.secretStore.read(credentialRef).catch(() => null);
+      if (!latest?.refresh || latest.refresh === credential.refresh) throw error;
+      return this.#exchangeRefreshToken(
+        credentialRef,
+        { ...latest, accountId: latest.accountId ?? credential.accountId },
+        context,
+        now
+      );
+    }
+  }
+  /** Share one token exchange per refresh token so concurrent turns cannot race. */
+  #exchangeRefreshToken(credentialRef, credential, context, now) {
+    const key = `${credentialRef}::${hash3(String(credential.refresh ?? ""))}`;
+    const inflight = this.tokenExchanges.get(key);
+    if (inflight) return inflight;
+    const promise = this.#performTokenExchange(credentialRef, credential, context, now).finally(() => this.tokenExchanges.delete(key));
+    this.tokenExchanges.set(key, promise);
+    return promise;
+  }
+  async #performTokenExchange(credentialRef, credential, context, now) {
     let response;
     try {
       response = await this.fetchImpl(this.tokenUrl, {
@@ -10298,7 +10345,7 @@ var GrokOAuthDriver = class {
     if (!response.ok || !access2) {
       const error = new Error("Grok OAuth refresh failed; authorize again");
       error.status = response.status;
-      error.authExpired = response.status === 401 || response.status === 400;
+      error.authExpired = response.status === 401 || response.status === 400 || response.status === 403;
       throw error;
     }
     const updated = {
@@ -10308,8 +10355,31 @@ var GrokOAuthDriver = class {
       expiresAt: grokTokenExpiresAt(body, decodeJwtPayload(access2) ?? {}, now) ?? credential.expiresAt,
       lastRefreshedAt: now.toISOString()
     };
-    await context.secretStore.write(account.auth?.credentialRef ?? account.credentialRef, updated);
+    await context.secretStore.write(credentialRef, updated);
+    await this.#mirrorCredentialToCliAuth(updated).catch(() => {
+    });
     return updated;
+  }
+  /**
+   * Keep the official CLI's auth file on the same rotation chain as ours.
+   * Only ever updates an existing file: creating the CLI's store is its job.
+   */
+  async #mirrorCredentialToCliAuth(credential) {
+    const raw = await readJsonFile(this.authFilePath).catch(() => null);
+    if (!raw || typeof raw !== "object") return;
+    let changed = false;
+    for (const { scopeKey, value } of authRecords(raw)) {
+      const parsed = parseGrokAuth({ [scopeKey]: value })[0];
+      if (!parsed || parsed.accountId !== credential.accountId) continue;
+      if (credential.access) value.key = credential.access;
+      if (credential.refresh) value.refresh_token = credential.refresh;
+      if (credential.expiresAt) value.expires_at = credential.expiresAt;
+      changed = true;
+    }
+    if (!changed) return;
+    const temp = `${this.authFilePath}.dockyard-${process.pid}.tmp`;
+    await writeFile3(temp, JSON.stringify(raw), { mode: 384 });
+    await rename3(temp, this.authFilePath);
   }
   async #prepareCredentialEnvironment(account, context = {}) {
     const credential = await this.#readCredential(account, context);

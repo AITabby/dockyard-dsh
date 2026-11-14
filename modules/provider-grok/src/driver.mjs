@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -770,6 +770,9 @@ export class GrokOAuthDriver {
     this.authFilePath = authFilePath ?? join(this.grokHome, "auth.json");
     this.cliPath = cliPath;
     this.commandRunner = commandRunner;
+    // xAI rotates the refresh token on every exchange, so two concurrent
+    // refreshes with the same token would make the loser fail with invalid_grant.
+    this.tokenExchanges = new Map();
     this.requestExecutor = requestExecutor;
     this.fetchImpl = fetchImpl;
     this.creditsUrl = validateNativeEndpoint(creditsUrl, { providerId: PROVIDER_ID });
@@ -1004,11 +1007,37 @@ export class GrokOAuthDriver {
     const credentialRef = account.auth?.credentialRef ?? account.credentialRef;
     const credential = await context.secretStore.read(credentialRef);
     if (!credential?.access) {
+      // Rotation makes a lost write fatal: once the old refresh token was
+      // spent there is nothing to rebuild from. The CLI's own auth file is the
+      // only other surviving copy, so try it before declaring the account dead.
+      const healed = await this.#healCredentialFromCliAuth(account, context).catch(() => null);
+      if (healed?.access) return { ...healed, accountId: healed.accountId ?? account.accountId };
       const error = new Error("Grok OAuth credential is missing from secure storage");
       error.authExpired = true;
       throw error;
     }
     return { ...credential, accountId: credential.accountId ?? account.accountId };
+  }
+
+  /** Re-import the official CLI's auth file when our stored copy is gone. */
+  async #healCredentialFromCliAuth(account, context = {}) {
+    const raw = await readJsonFile(this.authFilePath);
+    if (!raw) return null;
+    const tokens = parseGrokAuth(raw);
+    if (!tokens.length) return null;
+    const wanted = account.accountId ?? account.auth?.credentialRef;
+    const target = tokens.find((value) => value.accountId === wanted) ?? tokens[0];
+    await this.importAccount(candidateFromTokens(target, {
+      source: "official_grok_oauth",
+      now: context.now instanceof Date ? context.now : new Date(),
+    }), context);
+    const refs = [account.auth?.credentialRef, account.credentialRef, createCredentialRef(PROVIDER_ID, target.accountId)];
+    for (const ref of refs) {
+      if (!ref) continue;
+      const stored = await context.secretStore.read(ref).catch(() => null);
+      if (stored?.access) return stored;
+    }
+    return null;
   }
 
   async #refreshOAuthCredential(account, context = {}, { strict = false } = {}) {
@@ -1022,6 +1051,36 @@ export class GrokOAuthDriver {
       throw error;
     }
 
+    const credentialRef = account.auth?.credentialRef ?? account.credentialRef;
+    try {
+      return await this.#exchangeRefreshToken(credentialRef, credential, context, now);
+    } catch (error) {
+      // Our token may have been spent by another writer (the CLI, or a
+      // concurrent turn) between the read above and the exchange. The store's
+      // copy is newer then, and it is the one that still works.
+      const latest = await context.secretStore.read(credentialRef).catch(() => null);
+      if (!latest?.refresh || latest.refresh === credential.refresh) throw error;
+      return this.#exchangeRefreshToken(
+        credentialRef,
+        { ...latest, accountId: latest.accountId ?? credential.accountId },
+        context,
+        now,
+      );
+    }
+  }
+
+  /** Share one token exchange per refresh token so concurrent turns cannot race. */
+  #exchangeRefreshToken(credentialRef, credential, context, now) {
+    const key = `${credentialRef}::${hash(String(credential.refresh ?? ""))}`;
+    const inflight = this.tokenExchanges.get(key);
+    if (inflight) return inflight;
+    const promise = this.#performTokenExchange(credentialRef, credential, context, now)
+      .finally(() => this.tokenExchanges.delete(key));
+    this.tokenExchanges.set(key, promise);
+    return promise;
+  }
+
+  async #performTokenExchange(credentialRef, credential, context, now) {
     let response;
     try {
       response = await this.fetchImpl(this.tokenUrl, {
@@ -1045,7 +1104,7 @@ export class GrokOAuthDriver {
     if (!response.ok || !access) {
       const error = new Error("Grok OAuth refresh failed; authorize again");
       error.status = response.status;
-      error.authExpired = response.status === 401 || response.status === 400;
+      error.authExpired = response.status === 401 || response.status === 400 || response.status === 403;
       throw error;
     }
     const updated = {
@@ -1055,8 +1114,32 @@ export class GrokOAuthDriver {
       expiresAt: grokTokenExpiresAt(body, decodeJwtPayload(access) ?? {}, now) ?? credential.expiresAt,
       lastRefreshedAt: now.toISOString(),
     };
-    await context.secretStore.write(account.auth?.credentialRef ?? account.credentialRef, updated);
+    await context.secretStore.write(credentialRef, updated);
+    // Mirror into the CLI's file so both sides hold the same rotated token.
+    await this.#mirrorCredentialToCliAuth(updated).catch(() => {});
     return updated;
+  }
+
+  /**
+   * Keep the official CLI's auth file on the same rotation chain as ours.
+   * Only ever updates an existing file: creating the CLI's store is its job.
+   */
+  async #mirrorCredentialToCliAuth(credential) {
+    const raw = await readJsonFile(this.authFilePath).catch(() => null);
+    if (!raw || typeof raw !== "object") return;
+    let changed = false;
+    for (const { scopeKey, value } of authRecords(raw)) {
+      const parsed = parseGrokAuth({ [scopeKey]: value })[0];
+      if (!parsed || parsed.accountId !== credential.accountId) continue;
+      if (credential.access) value.key = credential.access;
+      if (credential.refresh) value.refresh_token = credential.refresh;
+      if (credential.expiresAt) value.expires_at = credential.expiresAt;
+      changed = true;
+    }
+    if (!changed) return;
+    const temp = `${this.authFilePath}.dockyard-${process.pid}.tmp`;
+    await writeFile(temp, JSON.stringify(raw), { mode: 0o600 });
+    await rename(temp, this.authFilePath);
   }
 
   async #prepareCredentialEnvironment(account, context = {}) {
