@@ -1335,11 +1335,9 @@ export class GrokOAuthDriver {
     const executor = context.requestExecutor ?? this.requestExecutor;
     if (typeof executor !== "function") throw new Error("Grok native invocation transport is not mounted");
     const account = invocation?.account;
-    // Native xAI transport receives the selected account's OAuth token
-    // directly. Only the legacy CLI path needs a temporary GROK_HOME profile;
-    // creating that profile on every request would reintroduce the startup
-    // latency this transport is meant to remove.
-    if (executor.nativeTransport === "xai-chat-completions") {
+    // A wrapper can lose the transport tag; fall back to the mounted executor's.
+    const nativeTransport = executor?.nativeTransport ?? this.requestExecutor?.nativeTransport ?? null;
+    if (nativeTransport === "xai-chat-completions") {
       const credential = account && context.secretStore
         ? await this.#refreshOAuthCredential(account, context, { strict: true })
         : null;

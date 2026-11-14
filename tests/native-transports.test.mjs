@@ -1372,3 +1372,14 @@ test("a thinking-only attempt fails instead of retrying once reasoning was shown
   });
   assert.equal(attempts, 1, "no retry once reasoning was streamed");
 });
+
+test("the empty-completion guard keeps transport metadata on the wrapper", async () => {
+  // Drivers branch on executor.nativeTransport to decide whether to attach a
+  // credential. Dropping it here sent Grok down the CLI path with no token.
+  const executor = async function* () {
+    yield { type: "finish", reason: { kind: "stop" } };
+  };
+  executor.nativeTransport = "xai-chat-completions";
+  const guarded = guardEmptyCompletion(executor, { providerId: "fixture" });
+  assert.equal(guarded.nativeTransport, "xai-chat-completions");
+});

@@ -5908,7 +5908,7 @@ function guardEmptyCompletion(executor, {
   // reasoning reached the host, so an empty finish then fails loudly instead.
   streamReasoning = false
 } = {}) {
-  return async function* guardedExecutor(...args) {
+  const guardedExecutor = async function* runGuardedExecutor(...args) {
     const envelope2 = args[0] ?? {};
     const signal = envelope2?.signal ?? envelope2?.request?.signal;
     const canNudge = Boolean(nudge) && envelope2 && typeof envelope2 === "object" && ("request" in envelope2 || "credential" in envelope2);
@@ -5961,6 +5961,10 @@ function guardEmptyCompletion(executor, {
       }
     }
   };
+  for (const key of Object.keys(executor)) {
+    if (!(key in guardedExecutor)) guardedExecutor[key] = executor[key];
+  }
+  return guardedExecutor;
 }
 function buildOpenAiTools(tools) {
   if (!Array.isArray(tools)) return void 0;
@@ -10557,7 +10561,8 @@ var GrokOAuthDriver = class {
     const executor = context.requestExecutor ?? this.requestExecutor;
     if (typeof executor !== "function") throw new Error("Grok native invocation transport is not mounted");
     const account = invocation?.account;
-    if (executor.nativeTransport === "xai-chat-completions") {
+    const nativeTransport = executor?.nativeTransport ?? this.requestExecutor?.nativeTransport ?? null;
+    if (nativeTransport === "xai-chat-completions") {
       const credential = account && context.secretStore ? await this.#refreshOAuthCredential(account, context, { strict: true }) : null;
       return executor({ request, invocation, credential, context });
     }

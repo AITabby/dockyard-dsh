@@ -674,7 +674,7 @@ export function guardEmptyCompletion(executor, {
 } = {}) {
   // Transports are called either with a single envelope object or with
   // positional arguments; forward whatever came in so both keep working.
-  return async function* guardedExecutor(...args) {
+  const guardedExecutor = async function* runGuardedExecutor(...args) {
     const envelope = args[0] ?? {};
     const signal = envelope?.signal ?? envelope?.request?.signal;
     // Only a wrapped envelope can carry the nudge; a bare request is retried
@@ -742,6 +742,14 @@ export function guardEmptyCompletion(executor, {
       }
     }
   };
+  // Transport metadata lives on the executor (drivers branch on
+  // executor.nativeTransport to decide whether a credential must be attached).
+  // Returning a bare wrapper used to drop it, which silently sent Grok down the
+  // CLI path without a token.
+  for (const key of Object.keys(executor)) {
+    if (!(key in guardedExecutor)) guardedExecutor[key] = executor[key];
+  }
+  return guardedExecutor;
 }
 
 export function buildOpenAiTools(tools) {
