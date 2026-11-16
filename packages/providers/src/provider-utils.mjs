@@ -277,7 +277,12 @@ export function redactError(error) {
   const message = error instanceof Error ? error.message : String(error);
   const detail = error?.detail ? ` ${String(error.detail)}` : "";
   const code = error?.code !== undefined && error?.code !== null ? ` [code ${String(error.code)}]` : "";
-  return `${message}${detail}${code}`
+  const cause = error?.cause;
+  const causeMessage = cause instanceof Error ? cause.message : (typeof cause === "string" ? cause : "");
+  const causeCode = cause?.code !== undefined && cause?.code !== null ? String(cause.code) : "";
+  const causeParts = [causeCode, causeMessage && causeMessage !== message ? causeMessage : ""].filter(Boolean);
+  const causeSuffix = causeParts.length > 0 ? ` (${causeParts.join(": ")})` : "";
+  return `${message}${detail}${code}${causeSuffix}`
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]")
     .replace(/(access|refresh|id)[_-]?token["'=:\s]+[^,\s}]+/gi, "$1_token=[redacted]")
     // Vendor API key shapes: sk-…/sk-ant-…, xai-…, ghp_…, etc. Require a

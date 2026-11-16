@@ -58,7 +58,7 @@ import {
   parseCursorAuthStatus,
 } from "../modules/provider-cursor/src/index.mjs";
 import { frameConnectMessage, decodeCursorConnectTrailer } from "../modules/provider-cursor/src/native-protocol.mjs";
-import { codexModelToDshCatalog } from "../packages/dsh-plugin/src/codex-transport.mjs";
+import { codexModelToDshCatalog, createCodexDshRequestExecutor } from "../packages/dsh-plugin/src/codex-transport.mjs";
 import { cliEventText } from "../packages/providers/src/cli-agent-transport.mjs";
 
 function jwt(payload) {
@@ -172,6 +172,157 @@ test("Codex PiAI transport forwards DSH durable attachments", async () => {
   assert.equal(adapterOptions.resolveAttachments(), attachments);
 });
 
+test("Codex PiAI transport supplies image request budgets so history images do not fail with INVALID_ATTACHMENT_REF", async () => {
+  const { PiAiAdapter } = await import("@deepseek-ai/dsh-llm-pi-ai");
+  const { createProvider } = await import("@earendil-works/pi-ai");
+  const seenTargets = [];
+  const executor = createCodexPiAiExecutor({
+    PiAiAdapter,
+    createProvider,
+    openAICodexResponsesApi: () => ({
+      async *streamSimple() {
+        yield { type: "start" };
+        yield { type: "text_delta", contentIndex: 0, delta: "ok" };
+        yield {
+          type: "done",
+          reason: "stop",
+          message: { role: "assistant", content: [{ type: "text", text: "ok" }], usage: { input: 1, output: 1 } },
+        };
+      },
+      stream() {
+        throw new Error("unexpected stream() call");
+      },
+    }),
+    modelResolver: () => ({
+      id: "gpt-6-luna",
+      name: "GPT-6-Luna",
+      inputModalities: ["text", "image"],
+      contextWindow: 272_000,
+      maxTokens: 8192,
+    }),
+  });
+
+  const attachments = {
+    async readImageRequest(_ref, target) {
+      seenTargets.push(target);
+      for (const [field, value] of [["width", target.width], ["height", target.height], ["maxBytes", target.maxBytes]]) {
+        if (!Number.isSafeInteger(value) || value <= 0) {
+          const error = new Error(`Image request ${field} must be a positive integer.`);
+          error.code = "INVALID_ATTACHMENT_REF";
+          throw error;
+        }
+      }
+      return {
+        data: new Uint8Array([1, 2, 3]),
+        mediaType: "image/png",
+        width: target.width,
+        height: target.height,
+        bytes: 3,
+      };
+    },
+  };
+
+  const stream = await executor({
+    request: {
+      provider: "openai-codex",
+      model: "gpt-6-luna",
+      reasoningEffort: "high",
+      messages: [
+        {
+          role: "tool",
+          toolCallId: "call_img_1",
+          content: [
+            {
+              type: "image",
+              attachment: {
+                attachmentId: "sha256:52eb9ce00e4abea0d5cc463906dbc1b5d365a3feb18cd1ec9413553d39050292",
+                mediaType: "image/png",
+                width: 1200,
+                height: 2029,
+                bytes: 132944,
+              },
+            },
+          ],
+        },
+        { role: "user", content: [{ type: "text", text: "测试一条消息" }] },
+      ],
+    },
+    credential: { access: "oauth-access" },
+    context: { attachments },
+  });
+
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.deepEqual(seenTargets, [{ width: 1200, height: 2029, maxBytes: 1048576 }]);
+  assert.equal(chunks[0]?.type, "text-delta");
+  assert.equal(chunks[0]?.text, "ok");
+  assert.equal(chunks.at(-1)?.type, "finish");
+  assert.equal(chunks.at(-1)?.reason, undefined);
+});
+
+test("Codex DSH transport pairs dsh-llm-pi-ai with the co-located host pi-ai install", async () => {
+  const dshRoot = await mkdtemp(join(tmpdir(), "dockyard-codex-host-"));
+  try {
+    const dshLlmDir = join(dshRoot, "node_modules", "@deepseek-ai", "dsh-llm-pi-ai");
+    const piAiDir = join(dshRoot, "node_modules", "@earendil-works", "pi-ai");
+    await mkdir(join(dshLlmDir, "lib"), { recursive: true });
+    await mkdir(join(piAiDir, "dist", "api"), { recursive: true });
+    await mkdir(join(piAiDir, "dist", "providers"), { recursive: true });
+
+    await writeFile(join(dshLlmDir, "package.json"), JSON.stringify({
+      name: "@deepseek-ai/dsh-llm-pi-ai",
+      type: "module",
+      main: "./lib/index.js",
+    }));
+    await writeFile(join(dshLlmDir, "lib", "index.js"), `
+      export class PiAiAdapter {
+        constructor(config) { this.config = config; }
+        stream(request) {
+          const profile = this.config.profiles().get("openai-codex");
+          return (async function* () {
+            yield { type: "text-delta", index: 0, text: profile.piProvider.hostTag + ":" + request.model };
+          })();
+        }
+      }
+    `);
+
+    await writeFile(join(piAiDir, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-ai",
+      type: "module",
+      exports: {
+        ".": { import: "./dist/index.js" },
+        "./api/*": { import: "./dist/api/*.js" },
+        "./providers/*": { import: "./dist/providers/*.js" },
+      },
+    }));
+    await writeFile(join(piAiDir, "dist", "index.js"), `
+      export function createProvider(input) { return { ...input, hostTag: "host-pi-ai" }; }
+    `);
+    await writeFile(join(piAiDir, "dist", "api", "openai-codex-responses.lazy.js"), `
+      export function openAICodexResponsesApi() { return {}; }
+    `);
+    await writeFile(join(piAiDir, "dist", "providers", "openai-codex.js"), `
+      export function openaiCodexProvider() { return { getModels: () => [] }; }
+    `);
+    await writeFile(join(piAiDir, "dist", "providers", "all.js"), `
+      export function getBuiltinModels() { return []; }
+      export function getBuiltinProviders() { return []; }
+    `);
+
+    const executor = createCodexDshRequestExecutor({ moduleAnchor: join(dshRoot, "entry.mjs") });
+    const stream = await executor({
+      request: { model: "gpt-6-luna", messages: [] },
+      credential: { access: "oauth-token" },
+      context: {},
+    });
+    const chunks = [];
+    for await (const chunk of stream) chunks.push(chunk);
+    assert.deepEqual(chunks, [{ type: "text-delta", index: 0, text: "host-pi-ai:gpt-6-luna" }]);
+  } finally {
+    await rm(dshRoot, { recursive: true, force: true });
+  }
+});
+
 test("Codex preserves a 401 OAuth signal across quota endpoint fallback", async () => {
   const access = jwt({
     exp: Math.floor(Date.now() / 1000) + 3600,
@@ -198,6 +349,39 @@ test("Codex preserves a 401 OAuth signal across quota endpoint fallback", async 
       return true;
     },
   );
+});
+
+test("Codex quota sends Codex user-agent and surfaces network cause on fetch failure", async () => {
+  const access = jwt({
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    "https://api.openai.com/auth": { chatgpt_account_id: "acct-net", chatgpt_plan_type: "free" },
+  });
+  let seenHeaders = null;
+  const driver = createCodexDriver({
+    usageUrls: ["https://provider.test/usage"],
+    clientVersion: "0.163.0",
+    fetchImpl: async (_url, init) => {
+      seenHeaders = init?.headers;
+      const cause = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+      throw new TypeError("fetch failed", { cause });
+    },
+  });
+  const secretStore = new MemorySecretStore();
+  const [account] = await driver.importSource({
+    content: JSON.stringify({
+      tokens: { access_token: access, refresh_token: "refresh-net", account_id: "acct-net" },
+    }),
+  }, { secretStore });
+
+  await assert.rejects(
+    driver.getQuota(account, { secretStore }),
+    (error) => {
+      assert.match(error.message, /fetch failed \(ECONNRESET: read ECONNRESET\)/);
+      return true;
+    },
+  );
+  assert.equal(seenHeaders?.["user-agent"], "Codex/0.163.0");
+  assert.equal(seenHeaders?.accept, "application/json");
 });
 
 test("Codex does not classify an unrelated 400 refresh failure as expired OAuth", async () => {

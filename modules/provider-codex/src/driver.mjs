@@ -397,6 +397,7 @@ export class CodexOAuthDriver {
     assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_CODEX_AUTHORIZATION_URL");
     this.usageUrls = usageUrls.map((url) => assertSecureEndpointUrl(url, "DOCKYARD_CODEX_USAGE_URL"));
     this.clientId = clientId;
+    this.clientVersion = clientVersion;
     this.fetchImpl = fetchImpl;
     this.requestExecutor = requestExecutor;
     this.catalogLoader = catalogLoader ?? createCodexCatalogLoader({
@@ -683,6 +684,8 @@ export class CodexOAuthDriver {
           headers: {
             authorization: `Bearer ${credential.access}`,
             "chatgpt-account-id": credential.accountId ?? account.accountId,
+            "user-agent": `Codex/${this.clientVersion}`,
+            accept: "application/json",
           },
           ...(context.signal ? { signal: context.signal } : {}),
         }, { fetchImpl: this.fetchImpl });
@@ -771,6 +774,18 @@ export class CodexOAuthDriver {
   }
 }
 
+// Mirror @deepseek-ai/dsh-llm-pi-ai's resolveProfiles() image budget defaults.
+// Leaving these undefined on a synthetic profile causes PiAiAdapter's
+// requestImageTarget() to pass NaN/undefined to dsh-attachment-local, failing
+// any conversation with an image block in history with INVALID_ATTACHMENT_REF.
+const CODEX_PI_AI_IMAGE_DEFAULTS = Object.freeze({
+  maxRequestImageBytes: 20 * 1024 * 1024,
+  maxRequestImages: 50,
+  imageOffloadCountQuantum: 10,
+  requestImagePixelBudget: 2048 * 2048,
+  requestImageMaxBytes: 1024 * 1024,
+});
+
 export function createCodexPiAiExecutor({
   PiAiAdapter,
   createProvider,
@@ -844,6 +859,7 @@ export function createCodexPiAiExecutor({
     modelErrors: new Map(),
     configuredMaxTokens: new Map(),
     streamIdleTimeoutMs: 300_000,
+    ...CODEX_PI_AI_IMAGE_DEFAULTS,
   };
   const adapter = new PiAiAdapter({
     profiles: () => new Map([[PROVIDER_ID, profile]]),

@@ -1201,12 +1201,33 @@ async function buildGeminiContents(request, attachments) {
   return sanitizeContentsForThoughtSignatures(contents, requireThoughtSignatures);
 }
 
-function sanitizeSchema(value) {
+const UNSUPPORTED_GEMINI_SCHEMA_KEYS = new Set([
+  "$schema",
+  "additionalProperties",
+  "strict",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "patternProperties",
+  "unevaluatedProperties",
+  "dependentRequired",
+  "dependentSchemas",
+  "if",
+  "then",
+  "else",
+  "const",
+  "contentMediaType",
+  "examples",
+]);
+
+export function sanitizeSchema(value) {
   if (Array.isArray(value)) return value.map(sanitizeSchema);
   if (!value || typeof value !== "object") return value;
   const result = {};
   for (const [key, child] of Object.entries(value)) {
-    if (["$schema", "additionalProperties", "strict"].includes(key)) continue;
+    // Gemini's function-declaration schema is a JSON-Schema subset: numeric
+    // exclusion bounds and the other keywords below make the whole request fail
+    // with "Unknown name ... Cannot find field".
+    if (UNSUPPORTED_GEMINI_SCHEMA_KEYS.has(key)) continue;
     result[key] = sanitizeSchema(child);
   }
   return result;

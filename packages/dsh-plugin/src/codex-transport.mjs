@@ -1,7 +1,7 @@
 import { access, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 
 import {
   createCodexCatalogLoader,
@@ -96,14 +96,35 @@ async function packageImportUrl(packageRoot, subpath = null) {
   return pathToFileURL(join(packageRoot, target)).href;
 }
 
+function resolveDshLlmPath(moduleAnchor) {
+  const anchors = [
+    moduleAnchor,
+    process.env.DOCKYARD_DSH_CLI_PATH,
+    process.argv[1],
+    process.env.DSH_INSTALL_DIR ? join(process.env.DSH_INSTALL_DIR, "package.json") : null,
+  ].filter((value) => typeof value === "string" && value.length > 0);
+  for (const anchor of anchors) {
+    try {
+      const target = anchor.startsWith("file://") ? anchor : resolve(anchor);
+      return createRequire(target).resolve(DSH_LLM_PI_AI);
+    } catch {
+      // Try the next anchor if this entry point sits outside the DSH install.
+    }
+  }
+  if (typeof import.meta.resolve === "function") {
+    try {
+      const resolved = import.meta.resolve(DSH_LLM_PI_AI);
+      if (resolved.startsWith("file://")) return fileURLToPath(resolved);
+    } catch {
+      // Fall back to resolving relative to this plugin module below.
+    }
+  }
+  return createRequire(import.meta.url).resolve(DSH_LLM_PI_AI);
+}
+
 async function importFromDshInstall(moduleAnchor) {
-  const anchor = moduleAnchor
-    ?? process.env.DOCKYARD_DSH_CLI_PATH
-    ?? process.argv[1]
-    ?? import.meta.url;
-  const dshRequire = createRequire(anchor);
-  const dshLlmPath = dshRequire.resolve(DSH_LLM_PI_AI);
-  const dshPackageRoot = dirname(dirname(dshLlmPath));
+  const dshLlmPath = resolveDshLlmPath(moduleAnchor);
+  const dshPackageRoot = dirname(dshLlmPath);
   const piRoot = await findPackageRoot(dshPackageRoot, PI_AI);
   if (!piRoot) throw new Error(`Cannot find ${PI_AI} beside ${DSH_LLM_PI_AI}`);
 
@@ -117,17 +138,20 @@ async function importFromDshInstall(moduleAnchor) {
   return { PiAiAdapter, createProvider, openAICodexResponsesApi, openaiCodexProvider, builtinProviders };
 }
 
-async function loadExecutor(moduleAnchor) {
-  let dependencies;
+async function loadDependencies(moduleAnchor) {
+  // Always pair @deepseek-ai/dsh-llm-pi-ai with the @earendil-works/pi-ai
+  // installed beside it in the host DSH runtime. Resolving bare `@earendil-works/pi-ai`
+  // from the plugin's own dependencies can mix a newer host dsh-llm-pi-ai
+  // (e.g. string system messages in 0.2.x) with an older pi-ai (0.82.x).
   try {
-    dependencies = await importBareDependencies();
+    return await importFromDshInstall(moduleAnchor);
   } catch {
-    // A local DSH plugin is commonly linked into the profile, so its source
-    // file is outside the profile node_modules tree. Resolve the same
-    // dependencies from the DSH executable's installation in that case.
-    dependencies = await importFromDshInstall(moduleAnchor);
+    return importBareDependencies();
   }
-  const { PiAiAdapter, createProvider, openAICodexResponsesApi, openaiCodexProvider } = dependencies;
+}
+
+async function loadExecutor(moduleAnchor) {
+  const { PiAiAdapter, createProvider, openAICodexResponsesApi, openaiCodexProvider } = await loadDependencies(moduleAnchor);
   const models = openaiCodexProvider().getModels();
   const modelById = new Map(models.map((model) => [model.id, model]));
   return createCodexPiAiExecutor({
@@ -136,14 +160,6 @@ async function loadExecutor(moduleAnchor) {
     openAICodexResponsesApi,
     modelResolver: (modelId) => modelById.get(modelId) ?? activeCodexModels.get(modelId) ?? null,
   });
-}
-
-async function loadDependencies(moduleAnchor) {
-  try {
-    return await importBareDependencies();
-  } catch {
-    return importFromDshInstall(moduleAnchor);
-  }
 }
 
 /** Resolve DSH's installed pi-ai dependencies from the plugin package. */

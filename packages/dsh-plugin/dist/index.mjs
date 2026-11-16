@@ -1673,7 +1673,12 @@ function redactError(error) {
   const message = error instanceof Error ? error.message : String(error);
   const detail = error?.detail ? ` ${String(error.detail)}` : "";
   const code = error?.code !== void 0 && error?.code !== null ? ` [code ${String(error.code)}]` : "";
-  return `${message}${detail}${code}`.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]").replace(/(access|refresh|id)[_-]?token["'=:\s]+[^,\s}]+/gi, "$1_token=[redacted]").replace(/\b(?:sk|sk-ant|sk-proj|sk-svcacct|xai|agy|gsk|ghp|gho|ghu|github_pat|deepseek|pplx|nvapi|zai|glm)[-_][A-Za-z0-9_-]{12,}\b/gi, "[redacted]").replace(/(api[_-]?key|client[_-]?secret|session[_-]?token|private[_-]?key)["'=:\s]+[^,\s}"']+/gi, "$1=[redacted]").slice(0, 300);
+  const cause = error?.cause;
+  const causeMessage = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "";
+  const causeCode = cause?.code !== void 0 && cause?.code !== null ? String(cause.code) : "";
+  const causeParts = [causeCode, causeMessage && causeMessage !== message ? causeMessage : ""].filter(Boolean);
+  const causeSuffix = causeParts.length > 0 ? ` (${causeParts.join(": ")})` : "";
+  return `${message}${detail}${code}${causeSuffix}`.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]").replace(/(access|refresh|id)[_-]?token["'=:\s]+[^,\s}]+/gi, "$1_token=[redacted]").replace(/\b(?:sk|sk-ant|sk-proj|sk-svcacct|xai|agy|gsk|ghp|gho|ghu|github_pat|deepseek|pplx|nvapi|zai|glm)[-_][A-Za-z0-9_-]{12,}\b/gi, "[redacted]").replace(/(api[_-]?key|client[_-]?secret|session[_-]?token|private[_-]?key)["'=:\s]+[^,\s}"']+/gi, "$1=[redacted]").slice(0, 300);
 }
 function recursiveQuotaWindows(value, { source, now = /* @__PURE__ */ new Date(), prefix = "quota" } = {}) {
   const windows = [];
@@ -4749,6 +4754,7 @@ var CodexOAuthDriver = class {
     assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_CODEX_AUTHORIZATION_URL");
     this.usageUrls = usageUrls.map((url) => assertSecureEndpointUrl(url, "DOCKYARD_CODEX_USAGE_URL"));
     this.clientId = clientId;
+    this.clientVersion = clientVersion;
     this.fetchImpl = fetchImpl;
     this.requestExecutor = requestExecutor;
     this.catalogLoader = catalogLoader ?? createCodexCatalogLoader({
@@ -5000,7 +5006,9 @@ var CodexOAuthDriver = class {
         const response = await fetchJson(url, {
           headers: {
             authorization: `Bearer ${credential.access}`,
-            "chatgpt-account-id": credential.accountId ?? account.accountId
+            "chatgpt-account-id": credential.accountId ?? account.accountId,
+            "user-agent": `Codex/${this.clientVersion}`,
+            accept: "application/json"
           },
           ...context.signal ? { signal: context.signal } : {}
         }, { fetchImpl: this.fetchImpl });
@@ -5079,6 +5087,13 @@ var CodexOAuthDriver = class {
     return this.invoke(request, invocation, context);
   }
 };
+var CODEX_PI_AI_IMAGE_DEFAULTS = Object.freeze({
+  maxRequestImageBytes: 20 * 1024 * 1024,
+  maxRequestImages: 50,
+  imageOffloadCountQuantum: 10,
+  requestImagePixelBudget: 2048 * 2048,
+  requestImageMaxBytes: 1024 * 1024
+});
 function createCodexPiAiExecutor({
   PiAiAdapter,
   createProvider,
@@ -5137,7 +5152,8 @@ function createCodexPiAiExecutor({
       piProvider: provider,
       modelErrors: /* @__PURE__ */ new Map(),
       configuredMaxTokens: /* @__PURE__ */ new Map(),
-      streamIdleTimeoutMs: 3e5
+      streamIdleTimeoutMs: 3e5,
+      ...CODEX_PI_AI_IMAGE_DEFAULTS
     };
     const adapter = new PiAiAdapter({
       profiles: () => /* @__PURE__ */ new Map([[PROVIDER_ID, profile]]),
@@ -7068,12 +7084,29 @@ async function buildGeminiContents(request, attachments) {
   if (contents.length === 0) contents.push({ role: "user", parts: [{ text: "Continue the conversation." }] });
   return sanitizeContentsForThoughtSignatures(contents, requireThoughtSignatures);
 }
+var UNSUPPORTED_GEMINI_SCHEMA_KEYS = /* @__PURE__ */ new Set([
+  "$schema",
+  "additionalProperties",
+  "strict",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "patternProperties",
+  "unevaluatedProperties",
+  "dependentRequired",
+  "dependentSchemas",
+  "if",
+  "then",
+  "else",
+  "const",
+  "contentMediaType",
+  "examples"
+]);
 function sanitizeSchema(value) {
   if (Array.isArray(value)) return value.map(sanitizeSchema);
   if (!value || typeof value !== "object") return value;
   const result = {};
   for (const [key, child] of Object.entries(value)) {
-    if (["$schema", "additionalProperties", "strict"].includes(key)) continue;
+    if (UNSUPPORTED_GEMINI_SCHEMA_KEYS.has(key)) continue;
     result[key] = sanitizeSchema(child);
   }
   return result;
@@ -21985,7 +22018,7 @@ var DockyardRuntime = class {
 import { access, readFile as readFile7 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname as dirname8, join as join16, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath as fileURLToPath2 } from "node:url";
 var activeCodexModels = /* @__PURE__ */ new Map();
 function recordCodexModels(models) {
   if (Array.isArray(models)) {
@@ -22062,11 +22095,32 @@ async function packageImportUrl(packageRoot, subpath = null) {
   }
   return pathToFileURL(join16(packageRoot, target)).href;
 }
+function resolveDshLlmPath(moduleAnchor) {
+  const anchors = [
+    moduleAnchor,
+    process.env.DOCKYARD_DSH_CLI_PATH,
+    process.argv[1],
+    process.env.DSH_INSTALL_DIR ? join16(process.env.DSH_INSTALL_DIR, "package.json") : null
+  ].filter((value) => typeof value === "string" && value.length > 0);
+  for (const anchor of anchors) {
+    try {
+      const target = anchor.startsWith("file://") ? anchor : resolve(anchor);
+      return createRequire(target).resolve(DSH_LLM_PI_AI);
+    } catch {
+    }
+  }
+  if (typeof import.meta.resolve === "function") {
+    try {
+      const resolved = import.meta.resolve(DSH_LLM_PI_AI);
+      if (resolved.startsWith("file://")) return fileURLToPath2(resolved);
+    } catch {
+    }
+  }
+  return createRequire(import.meta.url).resolve(DSH_LLM_PI_AI);
+}
 async function importFromDshInstall(moduleAnchor) {
-  const anchor = moduleAnchor ?? process.env.DOCKYARD_DSH_CLI_PATH ?? process.argv[1] ?? import.meta.url;
-  const dshRequire = createRequire(anchor);
-  const dshLlmPath = dshRequire.resolve(DSH_LLM_PI_AI);
-  const dshPackageRoot = dirname8(dirname8(dshLlmPath));
+  const dshLlmPath = resolveDshLlmPath(moduleAnchor);
+  const dshPackageRoot = dirname8(dshLlmPath);
   const piRoot = await findPackageRoot(dshPackageRoot, PI_AI);
   if (!piRoot) throw new Error(`Cannot find ${PI_AI} beside ${DSH_LLM_PI_AI}`);
   const [{ PiAiAdapter }, { createProvider }, { openAICodexResponsesApi }, { openaiCodexProvider }, builtinProviders2] = await Promise.all([
@@ -22078,14 +22132,15 @@ async function importFromDshInstall(moduleAnchor) {
   ]);
   return { PiAiAdapter, createProvider, openAICodexResponsesApi, openaiCodexProvider, builtinProviders: builtinProviders2 };
 }
-async function loadExecutor(moduleAnchor) {
-  let dependencies;
+async function loadDependencies(moduleAnchor) {
   try {
-    dependencies = await importBareDependencies();
+    return await importFromDshInstall(moduleAnchor);
   } catch {
-    dependencies = await importFromDshInstall(moduleAnchor);
+    return importBareDependencies();
   }
-  const { PiAiAdapter, createProvider, openAICodexResponsesApi, openaiCodexProvider } = dependencies;
+}
+async function loadExecutor(moduleAnchor) {
+  const { PiAiAdapter, createProvider, openAICodexResponsesApi, openaiCodexProvider } = await loadDependencies(moduleAnchor);
   const models = openaiCodexProvider().getModels();
   const modelById = new Map(models.map((model) => [model.id, model]));
   return createCodexPiAiExecutor({
@@ -22094,13 +22149,6 @@ async function loadExecutor(moduleAnchor) {
     openAICodexResponsesApi,
     modelResolver: (modelId) => modelById.get(modelId) ?? activeCodexModels.get(modelId) ?? null
   });
-}
-async function loadDependencies(moduleAnchor) {
-  try {
-    return await importBareDependencies();
-  } catch {
-    return importFromDshInstall(moduleAnchor);
-  }
 }
 function createCodexDshRequestExecutor({ moduleAnchor = null } = {}) {
   let executorPromise;
