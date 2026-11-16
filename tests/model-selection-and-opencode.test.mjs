@@ -592,3 +592,18 @@ test("createOpencodeNativeExecutor falls back to pure network web wire when CLI 
   assert.equal(finish.usage.totalTokens, 40);
 });
 
+test("the free tier hides paid Zen models unless asked for them", async () => {
+  // A free account cannot serve the paid entries; listing them bloats the picker
+  // and offers requests that must fail.
+  const { freeTierCatalog } = await import("../modules/provider-opencode/src/driver.mjs");
+  const catalog = { models: [{ id: "a-free", free: true }, { id: "b-paid" }] };
+  assert.deepEqual(freeTierCatalog(catalog).models.map((model) => model.id), ["a-free"]);
+  const previous = process.env.DOCKYARD_OPENCODE_ALL_MODELS;
+  process.env.DOCKYARD_OPENCODE_ALL_MODELS = "1";
+  try {
+    assert.equal(freeTierCatalog(catalog).models.length, 2);
+  } finally {
+    if (previous === undefined) delete process.env.DOCKYARD_OPENCODE_ALL_MODELS;
+    else process.env.DOCKYARD_OPENCODE_ALL_MODELS = previous;
+  }
+});

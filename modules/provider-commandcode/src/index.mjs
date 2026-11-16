@@ -11,7 +11,6 @@ export function createCommandCodeModule({ driver = {} } = {}) {
       "invoke",
       "stream",
       PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
-      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP,
       // Authenticates with a static API Key; the panel renders a key field for it.
       PROVIDER_BEHAVIOR_CAPABILITIES.API_KEY_AUTH,
     ],

@@ -14,7 +14,6 @@ export function createCodexModule({ driver = {} } = {}) {
       "catalog",
       "invoke",
       "stream",
-      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP,
     ],
     driver,
   });

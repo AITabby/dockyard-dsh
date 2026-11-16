@@ -116,22 +116,18 @@ export function apply(ctx, config = {}) {
   }
   const runtime = config.runtime ?? new DockyardRuntime(runtimeOptions);
 
-  // Initialize the account pools before warming only providers that are
-  // actually connected. This keeps optional vendors out of the model menu and
-  // prevents their official session sources from competing for startup/network time.
-  if (catalogWarmers.length > 0 && typeof runtime.init === "function") {
+  // Catalogs load when a provider is opened, never at boot: eagerly fetching
+  // every connected subscription's model list made startup wait on the network
+  // for vendors the user is not looking at. DOCKYARD_WARM_CATALOGS=1 restores
+  // the old eager behaviour for diagnostics.
+  const warmCatalogs = String(process.env.DOCKYARD_WARM_CATALOGS ?? "") === "1";
+  if (warmCatalogs && catalogWarmers.length > 0 && typeof runtime.init === "function") {
     void (async () => {
       await runtime.init();
       const providers = runtime.snapshot?.().providers ?? [];
-      const connected = new Set(
-        providers
-          .filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length > 0)
-          .map((provider) => provider.providerId),
-      );
       const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
       await Promise.all(catalogWarmers
-        .filter(([providerId]) => connected.has(providerId)
-          || runtime.hasProviderCapability?.(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP))
+        .filter(([providerId]) => runtime.hasProviderCapability?.(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP))
         .map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [], secretStore: runtime.secretStore }).catch(() => null)));
 
       // An account whose authorization expired is parked, not deleted: an

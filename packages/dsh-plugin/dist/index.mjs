@@ -1018,7 +1018,7 @@ var init_dockyard_remote_host = __esm({
 });
 
 // packages/dsh-plugin/src/index.mjs
-import { existsSync as existsSync8, readFileSync as readFileSync6 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync7 } from "node:fs";
 import { join as join19 } from "node:path";
 
 // packages/core/src/errors.mjs
@@ -5183,8 +5183,7 @@ function createCodexModule({ driver = {} } = {}) {
       "quota",
       "catalog",
       "invoke",
-      "stream",
-      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP
+      "stream"
     ],
     driver
   });
@@ -13934,9 +13933,9 @@ function createCursorModule({ driver = {} } = {}) {
 }
 
 // modules/provider-opencode/src/native-transport.mjs
-import { execFileSync as execFileSync4 } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync4, readdirSync } from "node:fs";
+import { existsSync as existsSync4, readdirSync, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
 import { join as join12 } from "node:path";
 import readline from "node:readline";
@@ -13956,12 +13955,41 @@ function findOpencodeCliPath() {
   }
   return null;
 }
-function queryInstalledOpencodeCliModelIds(cliPath) {
+function opencodeCliModelCachePath() {
+  return join12(homedir11(), ".dockyard-dsh", "opencode-cli-models.json");
+}
+function readCliModelCache({ maxAgeMs }) {
+  try {
+    const raw = JSON.parse(readFileSync3(opencodeCliModelCachePath(), "utf8"));
+    if (!Array.isArray(raw?.ids) || raw.ids.length === 0) return null;
+    if (typeof raw.at === "number" && Date.now() - raw.at > maxAgeMs) return null;
+    return raw.ids;
+  } catch {
+    return null;
+  }
+}
+function writeCliModelCache(ids) {
+  try {
+    writeFileSync3(opencodeCliModelCachePath(), JSON.stringify({ at: Date.now(), ids }));
+  } catch {
+  }
+}
+async function queryInstalledOpencodeCliModelIds(cliPath, { timeoutMs = 2500, maxAgeMs = 6 * 60 * 60 * 1e3 } = {}) {
+  const cached = readCliModelCache({ maxAgeMs });
+  if (cached) return cached;
   if (!cliPath || !existsSync4(cliPath)) return null;
   try {
-    const stdout = execFileSync4(cliPath, ["models"], { encoding: "utf8", timeout: 5e3 });
-    const ids = stdout.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.startsWith("opencode/") ? line.slice("opencode/".length) : line);
-    if (ids.length > 0) return ids;
+    const stdout = await new Promise((resolve2, reject) => {
+      execFile(cliPath, ["models"], { encoding: "utf8", timeout: timeoutMs }, (error, value) => {
+        if (error) reject(error);
+        else resolve2(value);
+      });
+    });
+    const ids = String(stdout).split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.startsWith("opencode/") ? line.slice("opencode/".length) : line);
+    if (ids.length > 0) {
+      writeCliModelCache(ids);
+      return ids;
+    }
   } catch {
   }
   return null;
@@ -15130,6 +15158,12 @@ function parseOpencodeCatalog(data, { registry = [], installedIds = null } = {})
   }
   return { models: result.length > 0 ? result : [...BUILTIN_OPENCODE_FREE_MODELS] };
 }
+function freeTierCatalog(catalog) {
+  if (String(process.env.DOCKYARD_OPENCODE_ALL_MODELS ?? "") === "1") return catalog;
+  const models = Array.isArray(catalog?.models) ? catalog.models : [];
+  const free = models.filter((model) => model?.free === true);
+  return { ...catalog, models: free.length > 0 ? free : models };
+}
 function createOpencodeCatalogLoader({
   catalogUrl = DEFAULT_CATALOG_URL,
   fetchImpl = fetch,
@@ -15148,9 +15182,9 @@ function createOpencodeCatalogLoader({
     pending = (async () => {
       const registry = typeof registryLoader === "function" ? await registryLoader().catch(() => []) : [];
       const cliPath = findOpencodeCliPath();
-      const installedIds = cliPath ? queryInstalledOpencodeCliModelIds(cliPath) : null;
+      const installedIds = cliPath ? await queryInstalledOpencodeCliModelIds(cliPath) : null;
       if (catalogUrl === DEFAULT_CATALOG_URL && fetchImpl === fetch) {
-        cached = parseOpencodeCatalog(null, { registry, installedIds });
+        cached = freeTierCatalog(parseOpencodeCatalog(null, { registry, installedIds }));
         cachedAt = Date.now();
         return cached;
       }
@@ -15160,9 +15194,9 @@ function createOpencodeCatalogLoader({
           fetchImpl,
           timeoutMs
         });
-        cached = parseOpencodeCatalog(data, { registry, installedIds });
+        cached = freeTierCatalog(parseOpencodeCatalog(data, { registry, installedIds }));
       } catch {
-        cached = parseOpencodeCatalog(null, { registry, installedIds });
+        cached = freeTierCatalog(parseOpencodeCatalog(null, { registry, installedIds }));
       }
       cachedAt = Date.now();
       return cached;
@@ -15320,7 +15354,6 @@ function createOpencodeModule({ driver = {} } = {}) {
     displayName: "OpenCode",
     capabilities: [
       PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
-      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP,
       "quota",
       "catalog",
       "invoke",
@@ -15449,13 +15482,13 @@ function summarizeKiloCandidate(candidate2) {
 
 // modules/provider-commandcode/src/driver.mjs
 import { createHash as createHash10 } from "node:crypto";
-import { existsSync as existsSync6, readdirSync as readdirSync2, readFileSync as readFileSync4 } from "node:fs";
+import { existsSync as existsSync6, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
 import { join as join14 } from "node:path";
 
 // modules/provider-commandcode/src/native-transport.mjs
 import { createHash as createHash9, randomBytes as randomBytes5, randomUUID as randomUUID10 } from "node:crypto";
-import { existsSync as existsSync5, readFileSync as readFileSync3 } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync4 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { join as join13 } from "node:path";
 function firstString10(...values) {
@@ -15491,7 +15524,7 @@ function extractCommandCodeAuth({ force = false } = {}) {
   const authPath = findCommandCodeAuthFilePath();
   if (!authPath) return null;
   try {
-    const raw = readFileSync3(authPath, "utf8");
+    const raw = readFileSync4(authPath, "utf8");
     const json = JSON.parse(raw);
     if (!json?.apiKey) return null;
     return {
@@ -16276,7 +16309,7 @@ function createCommandCodeCatalogLoader({
     const localCatalog = findLocalCommandCodeCatalogFile();
     if (localCatalog) {
       try {
-        const raw = readFileSync4(localCatalog, "utf8");
+        const raw = readFileSync5(localCatalog, "utf8");
         const json = JSON.parse(raw);
         cached = parseCommandCodeCatalog(json);
         cachedAt = Date.now();
@@ -16606,7 +16639,6 @@ function createCommandCodeModule({ driver = {} } = {}) {
       "invoke",
       "stream",
       PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
-      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP,
       // Authenticates with a static API Key; the panel renders a key field for it.
       PROVIDER_BEHAVIOR_CAPABILITIES.API_KEY_AUTH
     ],
@@ -16618,7 +16650,7 @@ function createCommandCodeModule({ driver = {} } = {}) {
 import { createHash as createHash11 } from "node:crypto";
 
 // modules/provider-hermes/src/native-transport.mjs
-import { existsSync as existsSync7, readFileSync as readFileSync5, statSync as statSync2 } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync6, statSync as statSync2 } from "node:fs";
 import { homedir as homedir14 } from "node:os";
 import { join as join15 } from "node:path";
 import { randomUUID as randomUUID11 } from "node:crypto";
@@ -16655,7 +16687,7 @@ function extractHermesAuth({ force = false } = {}) {
     try {
       const stats = statSync2(authFile);
       if (force || !cachedAuth || stats.mtimeMs !== cachedAuthMtime) {
-        const raw = readFileSync5(authFile, "utf8");
+        const raw = readFileSync6(authFile, "utf8");
         const parsed = JSON.parse(raw);
         cachedAuth = parsed;
         cachedAuthMtime = stats.mtimeMs;
@@ -17478,7 +17510,6 @@ function createHermesModule({ driver = {} } = {}) {
       "invoke",
       "stream",
       PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
-      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP,
       // Authenticates with a static API Key; the panel renders a key field for it.
       PROVIDER_BEHAVIOR_CAPABILITIES.API_KEY_AUTH
     ],
@@ -18996,8 +19027,7 @@ function createOpenRouterFreeModule(options = {}) {
       ...PROVIDER_CAPABILITIES,
       PROVIDER_BEHAVIOR_CAPABILITIES.API_KEY_AUTH,
       PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
-      PROVIDER_BEHAVIOR_CAPABILITIES.FORCE_LIVE_CATALOG,
-      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP
+      PROVIDER_BEHAVIOR_CAPABILITIES.FORCE_LIVE_CATALOG
     ],
     driver
   });
@@ -23555,15 +23585,13 @@ function apply(ctx, config = {}) {
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders).filter(([, loader]) => typeof loader === "function");
   }
   const runtime = config.runtime ?? new DockyardRuntime(runtimeOptions);
-  if (catalogWarmers.length > 0 && typeof runtime.init === "function") {
+  const warmCatalogs = String(process.env.DOCKYARD_WARM_CATALOGS ?? "") === "1";
+  if (warmCatalogs && catalogWarmers.length > 0 && typeof runtime.init === "function") {
     void (async () => {
       await runtime.init();
       const providers = runtime.snapshot?.().providers ?? [];
-      const connected = new Set(
-        providers.filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length > 0).map((provider) => provider.providerId)
-      );
       const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
-      await Promise.all(catalogWarmers.filter(([providerId]) => connected.has(providerId) || runtime.hasProviderCapability?.(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [], secretStore: runtime.secretStore }).catch(() => null)));
+      await Promise.all(catalogWarmers.filter(([providerId]) => runtime.hasProviderCapability?.(providerId, PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [], secretStore: runtime.secretStore }).catch(() => null)));
       const relistTimer = setInterval(() => {
         Promise.resolve(runtime.relistExpiredAccounts?.() ?? null).catch(() => {
         });
@@ -23692,7 +23720,7 @@ function apply(ctx, config = {}) {
                   svg: "image/svg+xml"
                 };
                 const contentType = mimeTypes[ext] ?? "application/octet-stream";
-                const content = readFileSync6(filePath);
+                const content = readFileSync7(filePath);
                 res.writeHead(200, {
                   "Content-Type": contentType,
                   "Content-Length": content.length,

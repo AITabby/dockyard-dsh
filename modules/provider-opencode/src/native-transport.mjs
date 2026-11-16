@@ -1,6 +1,6 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import readline from "node:readline";
@@ -35,16 +35,53 @@ export function findOpencodeCliPath() {
   return null;
 }
 
-export function queryInstalledOpencodeCliModelIds(cliPath) {
+function opencodeCliModelCachePath() {
+  return join(homedir(), ".dockyard-dsh", "opencode-cli-models.json");
+}
+
+function readCliModelCache({ maxAgeMs }) {
+  try {
+    const raw = JSON.parse(readFileSync(opencodeCliModelCachePath(), "utf8"));
+    if (!Array.isArray(raw?.ids) || raw.ids.length === 0) return null;
+    if (typeof raw.at === "number" && Date.now() - raw.at > maxAgeMs) return null;
+    return raw.ids;
+  } catch {
+    return null;
+  }
+}
+
+function writeCliModelCache(ids) {
+  try {
+    writeFileSync(opencodeCliModelCachePath(), JSON.stringify({ at: Date.now(), ids }));
+  } catch {}
+}
+
+/**
+ * Ask the official CLI which models it installs. Running it synchronously froze
+ * the event loop for up to a second at startup, so this stays async and keeps a
+ * disk cache: the list barely changes, and startup must never wait on a child
+ * process.
+ */
+export async function queryInstalledOpencodeCliModelIds(cliPath, { timeoutMs = 2500, maxAgeMs = 6 * 60 * 60 * 1000 } = {}) {
+  const cached = readCliModelCache({ maxAgeMs });
+  if (cached) return cached;
   if (!cliPath || !existsSync(cliPath)) return null;
   try {
-    const stdout = execFileSync(cliPath, ["models"], { encoding: "utf8", timeout: 5000 });
-    const ids = stdout
+    const stdout = await new Promise((resolve, reject) => {
+      execFile(cliPath, ["models"], { encoding: "utf8", timeout: timeoutMs }, (error, value) => {
+        if (error) reject(error);
+        else resolve(value);
+      });
+    });
+    const ids = String(stdout)
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean)
       .map((line) => (line.startsWith("opencode/") ? line.slice("opencode/".length) : line));
-    if (ids.length > 0) return ids;
+    if (ids.length > 0) {
+      writeCliModelCache(ids);
+      return ids;
+    }
   } catch {}
   return null;
 }

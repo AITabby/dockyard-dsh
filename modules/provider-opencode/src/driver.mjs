@@ -298,6 +298,18 @@ export function parseOpencodeCatalog(data, { registry = [], installedIds = null 
   return { models: result.length > 0 ? result : [...BUILTIN_OPENCODE_FREE_MODELS] };
 }
 
+/**
+ * The free Zen rotation can only serve the models it gives away. Showing the
+ * other 340 paid entries bloats the picker and invites requests that must fail,
+ * so they stay hidden unless DOCKYARD_OPENCODE_ALL_MODELS=1.
+ */
+export function freeTierCatalog(catalog) {
+  if (String(process.env.DOCKYARD_OPENCODE_ALL_MODELS ?? "") === "1") return catalog;
+  const models = Array.isArray(catalog?.models) ? catalog.models : [];
+  const free = models.filter((model) => model?.free === true);
+  return { ...catalog, models: free.length > 0 ? free : models };
+}
+
 export function createOpencodeCatalogLoader({
   catalogUrl = DEFAULT_CATALOG_URL,
   fetchImpl = fetch,
@@ -318,9 +330,9 @@ export function createOpencodeCatalogLoader({
     pending = (async () => {
       const registry = typeof registryLoader === "function" ? await registryLoader().catch(() => []) : [];
       const cliPath = findOpencodeCliPath();
-      const installedIds = cliPath ? queryInstalledOpencodeCliModelIds(cliPath) : null;
+      const installedIds = cliPath ? await queryInstalledOpencodeCliModelIds(cliPath) : null;
       if (catalogUrl === DEFAULT_CATALOG_URL && fetchImpl === fetch) {
-        cached = parseOpencodeCatalog(null, { registry, installedIds });
+        cached = freeTierCatalog(parseOpencodeCatalog(null, { registry, installedIds }));
         cachedAt = Date.now();
         return cached;
       }
@@ -330,9 +342,9 @@ export function createOpencodeCatalogLoader({
           fetchImpl,
           timeoutMs,
         });
-        cached = parseOpencodeCatalog(data, { registry, installedIds });
+        cached = freeTierCatalog(parseOpencodeCatalog(data, { registry, installedIds }));
       } catch {
-        cached = parseOpencodeCatalog(null, { registry, installedIds });
+        cached = freeTierCatalog(parseOpencodeCatalog(null, { registry, installedIds }));
       }
       cachedAt = Date.now();
       return cached;

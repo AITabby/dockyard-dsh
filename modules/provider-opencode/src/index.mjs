@@ -6,7 +6,6 @@ export function createOpencodeModule({ driver = {} } = {}) {
     displayName: "OpenCode",
     capabilities: [
       PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
-      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP,
       "quota",
       "catalog",
       "invoke",
