@@ -166,12 +166,18 @@ test("OpenCode provider module manifests and catalog parsing", async () => {
     data: [
       { id: "test-model-1", name: "Test Model 1", contextWindow: 65536, maxTokens: 4096 },
       { id: "test-free", contextWindow: 131072 },
+      { id: "openrouter/google/gemini-3.1-pro-preview" },
     ],
   });
-  assert.equal(parsed.models.length, 2);
+  assert.equal(parsed.models.length, 3);
   assert.equal(parsed.models[0].id, "test-model-1");
   assert.equal(parsed.models[1].id, "test-free");
-  assert.equal(parsed.models[1].name, "test-free (Free)");
+  // The CLI installs paid Zen models too, so the name must not claim "(Free)";
+  // the free flag carries that fact instead.
+  assert.equal(parsed.models[1].name, "test-free");
+  assert.equal(parsed.models[1].free, true);
+  assert.equal(parsed.models[2].name, "google/gemini-3.1-pro-preview");
+  assert.equal(parsed.models[2].free, undefined);
 });
 
 test("DockyardRuntime auto-imports a free account and the LLM adapter filters by modelSelection", async () => {

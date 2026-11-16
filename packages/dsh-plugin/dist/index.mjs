@@ -14880,6 +14880,10 @@ function createOpencodeNativeExecutor({
 var PROVIDER_ID11 = "opencode";
 var DEFAULT_CATALOG_URL = "https://opencode.ai/zen/v1/models";
 var DEFAULT_ENDPOINT6 = "https://opencode.ai/inference/openai/v1/chat/completions";
+function isOpencodeFreeModelId(id) {
+  const value = String(id ?? "");
+  return value.includes("-free") || value.includes(":free") || value === "big-pickle" || value === "free" || value.endsWith("/free");
+}
 var BUILTIN_OPENCODE_FREE_MODELS = Object.freeze([
   {
     id: "big-pickle",
@@ -15022,7 +15026,7 @@ var BUILTIN_OPENCODE_FREE_MODELS = Object.freeze([
   },
   {
     id: "claude-sonnet-4-6",
-    name: "Claude Sonnet 4.6 (OpenCode)",
+    name: "Claude Sonnet 4.6",
     contextWindow: 1e6,
     maxTokens: 16384,
     reasoning: {
@@ -15038,11 +15042,11 @@ var BUILTIN_OPENCODE_FREE_MODELS = Object.freeze([
   },
   {
     id: "gemini-3.8-flash",
-    name: "Gemini 3.8 Flash (OpenCode)",
+    name: "Gemini 3.8 Flash",
     contextWindow: 1048576,
     maxTokens: 16384
   }
-]);
+].map((model) => ({ ...model, free: true })));
 function summarizeOpencodeCandidate(candidate2) {
   return candidate2?.displayName ?? candidate2?.email ?? candidate2?.accountId ?? "OpenCode Free";
 }
@@ -15090,9 +15094,10 @@ function parseOpencodeCatalog(data, { registry = [], installedIds = null } = {})
         if (builtin) return builtin;
         return {
           id,
-          name: `${id} (Free)`,
+          name: stripVendorPrefix(id).replace(/^openrouter\//, ""),
           contextWindow: 131072,
-          maxTokens: 8192
+          maxTokens: 8192,
+          ...isOpencodeFreeModelId(id) ? { free: true } : {}
         };
       });
       return { models: installedModels };
@@ -15108,8 +15113,8 @@ function parseOpencodeCatalog(data, { registry = [], installedIds = null } = {})
     seen.add(id);
     const regModel = findOpencodeRegistryModel(id, registry);
     const builtin = builtinMap.get(id);
-    const isFree = id.includes("-free") || id === "big-pickle";
-    const name2 = stripVendorPrefix(stringValue(item?.name) ?? regModel?.name ?? builtin?.name ?? (isFree ? `${id} (Free)` : id));
+    const isFree = isOpencodeFreeModelId(id);
+    const name2 = stripVendorPrefix(stringValue(item?.name) ?? regModel?.name ?? builtin?.name ?? id).replace(/^openrouter\//, "");
     const contextWindow = Number.isInteger(item?.contextWindow) ? item.contextWindow : Number.isInteger(regModel?.contextWindow) ? regModel.contextWindow : builtin?.contextWindow ?? 131072;
     const maxTokens = Number.isInteger(item?.maxTokens) ? Math.min(item.maxTokens, 16384) : Number.isInteger(regModel?.maxTokens) ? Math.min(regModel.maxTokens, 16384) : builtin?.maxTokens ?? 8192;
     const reasoning = item?.reasoning ? resolveReasoningFromModel(item) : regModel ? resolveReasoningFromModel(regModel) : builtin?.reasoning;

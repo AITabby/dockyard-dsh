@@ -20,6 +20,13 @@ const PROVIDER_ID = "opencode";
 const DEFAULT_CATALOG_URL = "https://opencode.ai/zen/v1/models";
 const DEFAULT_ENDPOINT = "https://opencode.ai/inference/openai/v1/chat/completions";
 
+/** A model is free when the Zen rotation serves it at no cost; the id says so. */
+export function isOpencodeFreeModelId(id) {
+  const value = String(id ?? "");
+  return value.includes("-free") || value.includes(":free") || value === "big-pickle"
+    || value === "free" || value.endsWith("/free");
+}
+
 export const BUILTIN_OPENCODE_FREE_MODELS = Object.freeze([
   {
     id: "big-pickle",
@@ -162,7 +169,7 @@ export const BUILTIN_OPENCODE_FREE_MODELS = Object.freeze([
   },
   {
     id: "claude-sonnet-4-6",
-    name: "Claude Sonnet 4.6 (OpenCode)",
+    name: "Claude Sonnet 4.6",
     contextWindow: 1000000,
     maxTokens: 16384,
     reasoning: {
@@ -178,11 +185,11 @@ export const BUILTIN_OPENCODE_FREE_MODELS = Object.freeze([
   },
   {
     id: "gemini-3.8-flash",
-    name: "Gemini 3.8 Flash (OpenCode)",
+    name: "Gemini 3.8 Flash",
     contextWindow: 1048576,
     maxTokens: 16384,
   },
-]);
+].map((model) => ({ ...model, free: true })));
 
 export function summarizeOpencodeCandidate(candidate) {
   return candidate?.displayName ?? candidate?.email ?? candidate?.accountId ?? "OpenCode Free";
@@ -233,11 +240,14 @@ export function parseOpencodeCatalog(data, { registry = [], installedIds = null 
       const installedModels = installedIds.map((id) => {
         const builtin = builtinMap.get(id);
         if (builtin) return builtin;
+        // The CLI installs paid Zen models too. Labelling all of them "(Free)"
+        // painted the whole directory as free and auto-selected it.
         return {
           id,
-          name: `${id} (Free)`,
+          name: stripVendorPrefix(id).replace(/^openrouter\//, ""),
           contextWindow: 131072,
           maxTokens: 8192,
+          ...(isOpencodeFreeModelId(id) ? { free: true } : {}),
         };
       });
       return { models: installedModels };
@@ -255,8 +265,8 @@ export function parseOpencodeCatalog(data, { registry = [], installedIds = null 
 
     const regModel = findOpencodeRegistryModel(id, registry);
     const builtin = builtinMap.get(id);
-    const isFree = id.includes("-free") || id === "big-pickle";
-    const name = stripVendorPrefix(stringValue(item?.name) ?? regModel?.name ?? builtin?.name ?? (isFree ? `${id} (Free)` : id));
+    const isFree = isOpencodeFreeModelId(id);
+    const name = stripVendorPrefix(stringValue(item?.name) ?? regModel?.name ?? builtin?.name ?? id).replace(/^openrouter\//, "");
     const contextWindow = Number.isInteger(item?.contextWindow)
       ? item.contextWindow
       : Number.isInteger(regModel?.contextWindow)
