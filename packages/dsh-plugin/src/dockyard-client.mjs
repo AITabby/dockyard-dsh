@@ -2498,20 +2498,24 @@ function DockyardAccountControl({ directory, modelDirectory, modelDirectories, c
   const compactBalance = compactIndicator?.type === "balance"
     ? formatBalance(compactIndicator.window, t)
     : null;
-  const compactLabel = compactIndicator?.type === "balance"
-    ? compactBalance
-    : compactIndicator?.type === "quota" ? `${compactIndicator.percent}%` : null;
+  // A balance that publishes the grant it started from renders as a percentage
+  // meter, exactly like a rolling window; a balance without a grant stays a
+  // plain amount. An exhausted balance therefore draws an empty bar.
+  const compactPercent = typeof compactIndicator?.percent === "number" ? compactIndicator.percent : null;
+  const compactLabel = compactPercent !== null
+    ? `${compactPercent}%`
+    : compactIndicator?.type === "balance" ? compactBalance : null;
   const compactVisible = Boolean(compactLabel);
-  const quotaValue = compactIndicator?.type === "quota" ? compactIndicator.percent : null;
+  const quotaValue = compactPercent;
   const health = currentSelectedAccount?.health?.status;
   const quotaLevel = loading
     ? "loading"
     : ["expired", "exhausted", "degraded"].includes(health)
       ? "critical"
-      : compactIndicator?.type === "balance"
-        ? compactIndicator.remaining <= 0 ? "critical" : "balance"
-        : quotaValue === null
-        ? "unknown"
+      : quotaValue === null
+        ? compactIndicator?.type === "balance"
+          ? compactIndicator.remaining <= 0 ? "critical" : "balance"
+          : "unknown"
         : quotaValue <= 10 ? "critical" : quotaValue <= 25 ? "warning" : "healthy";
   const providerLabel = currentProviderId
     ? providerDisplayName(currentProviderId, currentProvider?.manifest ?? currentNative?.entry, t)
@@ -2556,9 +2560,8 @@ function DockyardAccountControl({ directory, modelDirectory, modelDirectories, c
       "aria-expanded": open,
       onClick: toggleOpen,
     },
-      compactIndicator?.type === "balance"
-        ? h("span", { className: "dockyard-dsh-balance", "data-level": quotaLevel }, compactLabel)
-        : h("span", {
+      quotaValue !== null
+        ? h("span", {
           className: "dockyard-dsh-quota-meter",
           role: "progressbar",
           "aria-label": `${text(t, "value.quota")} ${compactLabel}`,
@@ -2569,7 +2572,10 @@ function DockyardAccountControl({ directory, modelDirectory, modelDirectories, c
         }, h("span", {
           className: "dockyard-dsh-quota-meter-fill",
           style: { width: `${quotaValue}%` },
-        }))) : null,
+        }))
+        : compactIndicator?.type === "balance"
+          ? h("span", { className: "dockyard-dsh-balance", "data-level": quotaLevel }, compactLabel)
+          : null) : null,
     overviewOpen ? h(SubscriptionOverviewPopup, {
       providers,
       directoryState,

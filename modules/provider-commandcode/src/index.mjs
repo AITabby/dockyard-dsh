@@ -22,6 +22,8 @@ export {
   CommandCodeDriver,
   createCommandCodeCatalogLoader,
   createCommandCodeDriver,
+  commandCodeQuotaWindows,
+  commandCodeMonthlyCreditLimit,
   parseCommandCodeCatalog,
   summarizeCommandCodeCandidate,
   formatCommandCodePlan,

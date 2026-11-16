@@ -229,6 +229,50 @@ export function isContextOverflowError(errorOrMessage) {
   return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(message));
 }
 
+// A gateway that drops a connection mid-request surfaces through undici as
+// `TypeError: terminated`, with the real socket fault hidden in `cause`. Nothing
+// in that shape carries a provider error code, so DSH would otherwise fall back
+// to the generic UNKNOWN code, which its retry policy never re-attempts: one
+// dropped connection then ends the whole turn with an opaque "terminated" card.
+// Recognize the transport shapes and let DSH retry them like any other blip.
+const TRANSPORT_TERMINATION_PATTERNS = [
+  /\bterminated\b/i,
+  /\bother side closed\b/i,
+  /\bsocket hang up\b/i,
+  /\bfetch failed\b/i,
+  /\b(?:UND_ERR_SOCKET|UND_ERR_CLOSED|ECONNRESET|ECONNREFUSED|EPIPE)\b/i,
+];
+
+// `terminated` is only ever undici's own wording for a torn-down stream, so a
+// message match alone is enough; these codes let a bare cause carry the signal.
+const TRANSPORT_CAUSE_CODES = new Set([
+  "UND_ERR_SOCKET",
+  "UND_ERR_CLOSED",
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "EPIPE",
+]);
+
+function isTransportTermination(errorOrMessage) {
+  if (!errorOrMessage) return false;
+  if (typeof errorOrMessage === "string") {
+    return TRANSPORT_TERMINATION_PATTERNS.some((pattern) => pattern.test(errorOrMessage));
+  }
+  const cause = errorOrMessage.cause;
+  if (cause && typeof cause === "object") {
+    if (TRANSPORT_CAUSE_CODES.has(String(cause.code ?? "").toUpperCase())) return true;
+    if (TRANSPORT_TERMINATION_PATTERNS.some((pattern) => pattern.test(String(cause.message ?? "")))) return true;
+  }
+  if (TRANSPORT_CAUSE_CODES.has(String(errorOrMessage.code ?? "").toUpperCase())) return true;
+  return TRANSPORT_TERMINATION_PATTERNS.some((pattern) => pattern.test(String(errorOrMessage.message ?? "")));
+}
+
+/** A failure whose code is absent or the generic UNKNOWN is still unclassified. */
+function isUnclassifiedFailureCode(code) {
+  const text = String(code ?? "").trim().toUpperCase();
+  return text === "" || text === "UNKNOWN";
+}
+
 /**
  * Normalize provider failures (WebSocket closed 1006 -> TRANSPORT, context overflow -> CONTEXT_WINDOW_EXCEEDED).
  * Context overflow mapping allows DSH's compaction service to intercept the error and perform
@@ -239,6 +283,22 @@ function normalizeTransportFailure(chunk) {
     ? chunk.reason.failure
     : null;
   if (!failure) return chunk;
+  if (failure.code !== "TRANSPORT" && isUnclassifiedFailureCode(failure.code) && isTransportTermination(failure)) {
+    const original = String(failure.message ?? "").trim();
+    return {
+      ...chunk,
+      reason: {
+        ...chunk.reason,
+        failure: {
+          ...failure,
+          code: "TRANSPORT",
+          message: original
+            ? `Provider connection dropped mid-stream (${original})`
+            : "Provider connection dropped mid-stream",
+        },
+      },
+    };
+  }
   if (failure.code !== "TRANSPORT" && /\bWebSocket closed\s+1006\b/i.test(String(failure.message ?? ""))) {
     return {
       ...chunk,
@@ -264,6 +324,56 @@ function normalizeTransportFailure(chunk) {
     };
   }
   return chunk;
+}
+
+/**
+ * True once a chunk carries content that a retry must not duplicate: visible
+ * text or a tool call. Streamed reasoning is not durable conversation content,
+ * so a connection that dies during chain-of-thought can still be re-attempted.
+ */
+function chunkCarriesDurableOutput(chunk) {
+  if (!chunk || typeof chunk !== "object") return false;
+  if (chunk.type === "text-delta") return Boolean(String(chunk.text ?? ""));
+  if (chunk.type === "tool-call-delta") return true;
+  if (chunk.type === "block-end" && chunk.block?.type === "tool-call") return true;
+  return false;
+}
+
+/**
+ * A provider error that carries account-health flags must reach dsh-route as a
+ * finish chunk, because DSH's own error→failure conversion keeps only `code`
+ * and `message`. Losing `quotaExhausted` is what let a spent account keep
+ * reporting `healthy`, so the panel never showed 额度耗尽 and the pool kept
+ * selecting it for every request.
+ */
+function healthFailureFromThrownError(error) {
+  if (!error) return null;
+  const flags = {
+    ...(error.authExpired ? { authExpired: true } : {}),
+    ...(error.authForbidden ? { authForbidden: true } : {}),
+    ...(error.rateLimited ? { rateLimited: true } : {}),
+    ...(error.quotaExhausted ? { quotaExhausted: true } : {}),
+  };
+  if (Object.keys(flags).length === 0) return null;
+  const code = error.quotaExhausted
+    ? "QUOTA"
+    : error.rateLimited
+      ? "RATE_LIMIT"
+      : error.authExpired
+        ? "AUTH_EXPIRED"
+        : "AUTH_FORBIDDEN";
+  return {
+    type: "finish",
+    reason: {
+      kind: "error",
+      failure: {
+        code,
+        message: String(error.message ?? ""),
+        ...(Number.isInteger(error.status) ? { status: error.status } : {}),
+        ...flags,
+      },
+    },
+  };
 }
 
 const RETRYABLE_THROWN_FAILURE_CODES = new Set([
@@ -292,6 +402,7 @@ function retryFinishFromThrownError(error) {
     code = "CONTEXT_WINDOW_EXCEEDED";
   } else if (
     code === "TRANSPORT" ||
+    (isUnclassifiedFailureCode(code) && isTransportTermination(error)) ||
     /\bfetch failed\b/i.test(String(error?.message ?? "")) ||
     error?.cause?.code === "ECONNRESET" ||
     error?.cause?.code === "ETIMEDOUT"
@@ -299,13 +410,16 @@ function retryFinishFromThrownError(error) {
     code = "TRANSPORT";
   }
   if (!RETRYABLE_THROWN_FAILURE_CODES.has(code)) return null;
+  const rawMessage = String(error.message ?? "Provider stream ended without substantive output");
   return {
     type: "finish",
     reason: {
       kind: "error",
       failure: {
         code,
-        message: String(error.message ?? "Provider stream ended without substantive output"),
+        message: code === "TRANSPORT" && /^\s*terminated\s*$/i.test(rawMessage)
+          ? `Provider connection dropped mid-stream (${rawMessage.trim()})`
+          : rawMessage,
         ...(Number.isInteger(error.status) ? { status: error.status } : {}),
         ...(typeof error.providerRetryAfterMs === "number" && Number.isFinite(error.providerRetryAfterMs)
           ? { providerRetryAfterMs: error.providerRetryAfterMs }
@@ -665,23 +779,31 @@ export function createDockyardLlmAdapter({
         ...(options.signal ? { signal: options.signal } : {}),
         ...(attachments ? { attachments } : {}),
       });
-      let emittedChunk = false;
+      let emittedDurableOutput = false;
       try {
         for await (const chunk of stream) {
-          emittedChunk = true;
+          if (chunkCarriesDurableOutput(chunk)) emittedDurableOutput = true;
           yield normalizeTransportFailure(chunk);
         }
       } catch (error) {
         // dsh-route buffers structural chunks before yielding them, so its
         // EMPTY_STREAM_OUTPUT marker reaches this boundary with no output
         // already committed. If another provider throws the same marker after
-        // forwarding a chunk, rethrow it to avoid replaying tool side effects.
-        if (!emittedChunk || isContextOverflowError(error)) {
+        // forwarding durable output, rethrow it to avoid replaying tool side
+        // effects or duplicating text.
+        if (!emittedDurableOutput || isContextOverflowError(error)) {
           const retryFinish = retryFinishFromThrownError(error);
           if (retryFinish) {
             yield retryFinish;
             return;
           }
+        }
+        // Health-carrying failures are reported even after partial output: the
+        // turn still fails, but the account pool must learn the account is spent.
+        const healthFailure = healthFailureFromThrownError(error);
+        if (healthFailure) {
+          yield healthFailure;
+          return;
         }
         throw error;
       }

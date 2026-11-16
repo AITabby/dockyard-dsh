@@ -75,3 +75,34 @@ test("compact quota indicator hides a window without a readable amount", () => {
     limit: 100,
   }]), null);
 });
+
+test("a window a provider declares primary wins over reset ordering", () => {
+  const now = Date.parse("2026-11-17T00:00:00.000Z");
+  const fiveHour = { id: "commandcode:5h", name: "5 小时窗口额度", remaining: 2.2, limit: 3, resetAt: "2026-11-17T02:00:00.000Z" };
+  const monthly = { id: "commandcode:monthly", name: "月度额度", primary: true, remaining: 0.05, limit: 10, resetAt: "2026-12-01T13:29:27.000Z" };
+  // The monthly credit grant is what runs out, so the compact indicator must
+  // show it instead of the comfortable 5-hour window.
+  assert.equal(selectPrimaryQuotaWindow([fiveHour, monthly], now), monthly);
+  const indicator = selectQuotaIndicator([fiveHour, monthly], now);
+  assert.equal(indicator.type, "quota");
+  assert.equal(indicator.remaining, 0.05);
+  // The plan grant gives it a denominator, so both the panel and the compact
+  // indicator draw a percentage bar.
+  assert.equal(indicator.percent, 1);
+});
+
+test("a monthly credit grant draws a percentage bar like the rolling windows", () => {
+  const now = Date.parse("2026-11-17T00:00:00.000Z");
+  const monthly = { id: "commandcode:monthly", name: "月度额度", primary: true, remaining: 0.056, limit: 10, unit: "credits" };
+  const indicator = selectQuotaIndicator([monthly], now);
+  assert.equal(indicator.type, "quota");
+  assert.equal(indicator.percent, 1);
+});
+
+test("an exhausted monthly grant reports 0% so the bar renders empty", () => {
+  const now = Date.parse("2026-11-17T00:00:00.000Z");
+  const monthly = { id: "commandcode:monthly", name: "月度额度", primary: true, remaining: 0, limit: 10 };
+  const indicator = selectQuotaIndicator([monthly], now);
+  assert.equal(indicator.type, "quota");
+  assert.equal(indicator.percent, 0);
+});

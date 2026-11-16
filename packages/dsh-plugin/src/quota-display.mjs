@@ -53,6 +53,10 @@ function comparisonValue(window, now) {
  */
 export function selectPrimaryQuotaWindow(windows, now = Date.now()) {
   if (!Array.isArray(windows) || windows.length === 0) return null;
+  // A provider can name the window that actually gates usage — Command Code's
+  // monthly credit grant, for instance — which must win over reset ordering.
+  const declared = windows.filter((window) => window?.primary === true);
+  if (declared.length === 1) return declared[0];
   return windows.reduce((selected, candidate) => {
     if (!selected) return candidate;
     const selectedValue = comparisonValue(selected, now);

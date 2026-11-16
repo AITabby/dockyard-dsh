@@ -137,7 +137,14 @@ export function nativeProviderError(providerId, message, { status, body, code } 
     || /\bquota\b[\s\S]{0,80}\b(?:exhausted|depleted|exceeded)\b/.test(exhaustionText)
     || /\busage limit\b[\s\S]{0,80}\breached\b/.test(exhaustionText)
     || /\bfree[\s\S]{0,40}limit reached\b/.test(exhaustionText)
-    || /\bcapacity\b[\s\S]{0,80}\bexhausted\b/.test(exhaustionText);
+    || /\bcapacity\b[\s\S]{0,80}\bexhausted\b/.test(exhaustionText)
+    // Prepaid-balance gateways (Command Code) reject every paid model once the
+    // account balance falls under their floor, using HTTP 400 rather than a 429.
+    // Treat it as exhausted credit so the pool stops selecting the account and
+    // the user sees an actionable message instead of a bare UNKNOWN code.
+    || /\binsufficient (?:credits?|funds?|balance)\b/.test(exhaustionText)
+    || /\b(?:credits?|balance)\b[\s\S]{0,60}\b(?:exhausted|depleted|exceeded|insufficient)\b/.test(exhaustionText)
+    || /\bpurchase more credits?\b/.test(exhaustionText);
   const rateLimited = statusCode === 429
     || numericStatus(resolvedCode) === 429
     || numericStatus(upstreamStatus) === 429

@@ -264,6 +264,89 @@ test("invoke resolves the credential from the account reference", async () => {
   assert.equal(seen.body.model, "glm-5.2");
 });
 
+test("invoke forwards token accounting when the stream reports it", async () => {
+  const fetchImpl = async () => new Response(sseBody([
+    'event:output\ndata:{"response":"ok","usage":{"prompt_tokens":120,"completion_tokens":7,"total_tokens":127}}\n\n',
+    'event:done\ndata:{"usage":{"input_tokens":120,"output_tokens":7}}\n\n',
+  ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+  const driver = createTraeCnDriver({ fetchImpl });
+  const secretStore = { read: async () => ({ token: "tok", uid: "9", device: { deviceId: "1", machineId: "m" } }) };
+  const stream = await driver.invoke({
+    request: { model: "deepseek-v4.1-flash", messages: [{ role: "user", content: "hi" }] },
+    invocation: { auth: { credentialRef: "x" } },
+    context: { secretStore },
+  });
+  const events = await collectEvents(stream);
+  const usage = events.find((event) => event.type === "usage");
+  assert.ok(usage, "a usage chunk is required for DSH to show tokens and tok/s");
+  assert.equal(usage.usage.inputTokens, 120);
+  assert.equal(usage.usage.outputTokens, 7);
+  // Usage must precede the finish so the host can attach it to the step.
+  const usageAt = events.findIndex((event) => event.type === "usage");
+  const finishAt = events.findIndex((event) => event.type === "finish");
+  assert.ok(usageAt < finishAt);
+});
+
+test("invoke emits no usage chunk when the stream reports none", async () => {
+  const fetchImpl = async () => new Response(sseBody([
+    'event:output\ndata:{"response":"ok"}\n\n',
+  ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+  const driver = createTraeCnDriver({ fetchImpl });
+  const secretStore = { read: async () => ({ token: "tok", uid: "9", device: { deviceId: "1", machineId: "m" } }) };
+  const stream = await driver.invoke({
+    request: { model: "deepseek-v4.1-flash", messages: [{ role: "user", content: "hi" }] },
+    invocation: { auth: { credentialRef: "x" } },
+    context: { secretStore },
+  });
+  const events = await collectEvents(stream);
+  assert.equal(events.filter((event) => event.type === "usage").length, 0);
+  assert.equal(events.at(-1).type, "finish");
+});
+
+test("invoke merges token accounting split across events", async () => {
+  const fetchImpl = async () => new Response(sseBody([
+    'event:output\ndata:{"response":"ok","usage":{"prompt_tokens":900,"completion_tokens":7}}\n\n',
+    // A later event may carry only the cache details; it must still land.
+    'event:done\ndata:{"usage":{"prompt_cache_hit_tokens":800}}\n\n',
+  ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+  const driver = createTraeCnDriver({ fetchImpl });
+  const secretStore = { read: async () => ({ token: "tok", uid: "9", device: { deviceId: "1", machineId: "m" } }) };
+  const stream = await driver.invoke({
+    request: { model: "deepseek-v4.1-flash", messages: [{ role: "user", content: "hi" }] },
+    invocation: { auth: { credentialRef: "x" } },
+    context: { secretStore },
+  });
+  const events = await collectEvents(stream);
+  const usage = events.find((event) => event.type === "usage")?.usage;
+  assert.equal(usage?.outputTokens, 7);
+  assert.equal(usage?.cacheReadTokens, 800);
+});
+
+test("invoke reads Trae's token_usage event including cache counters", async () => {
+  const fetchImpl = async () => new Response(sseBody([
+    'event:output\ndata:{"response":"ok"}\n\n',
+    // Trae's own accounting event. Real streams currently report both cache
+    // counters as 0 (this upstream does not cache), but the counters must be
+    // carried through whenever they are non-zero.
+    'event:token_usage\ndata:{"prompt_tokens":21000,"completion_tokens":12,"total_tokens":21012,"cache_read_input_tokens":19000,"cache_creation_input_tokens":0,"reasoning_tokens":10}\n\n',
+    'event:done\ndata:{"finish_reason":"stop"}\n\n',
+  ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+  const driver = createTraeCnDriver({ fetchImpl });
+  const secretStore = { read: async () => ({ token: "tok", uid: "9", device: { deviceId: "1", machineId: "m" } }) };
+  const stream = await driver.invoke({
+    request: { model: "deepseek-v4.1-flash", messages: [{ role: "user", content: "hi" }] },
+    invocation: { auth: { credentialRef: "x" } },
+    context: { secretStore },
+  });
+  const events = await collectEvents(stream);
+  const usage = events.find((event) => event.type === "usage")?.usage;
+  assert.equal(usage?.cacheReadTokens, 19000);
+  // normalizeUsage splits the prompt into uncached input plus cache reads, which
+  // is exactly the shape DSH bills from: 2000 + 19000 = the 21000 prompt.
+  assert.equal(usage?.inputTokens, 2000);
+  assert.equal(usage?.outputTokens, 12);
+});
+
 test("invoke refuses to run without a credential", async () => {
   const driver = createTraeCnDriver({ fetchImpl: async () => new Response("no") });
   await assert.rejects(

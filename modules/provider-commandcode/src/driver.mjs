@@ -353,6 +353,83 @@ export function formatCommandCodePlan(planId) {
   return `Command Code (${planId})`;
 }
 
+/**
+ * Command Code reports quota as two rolling caps plus a spendable credit
+ * balance. The balance is what actually gates requests — the rolling windows
+ * can both look comfortable while every request is rejected — so it gets its
+ * own row. The API exposes only what is left of the monthly grant, never the
+ * grant itself, so this row is a balance without a denominator.
+ */
+/**
+ * Monthly credit grant per plan, from Command Code's public pricing page
+ * (2026-11-17): Go $10, GOAT $100, Pro $110, Max 10x $150, Max 20x $300.
+ * The API only reports what is left, so the grant has to come from the plan.
+ */
+const COMMANDCODE_PLAN_MONTHLY_CREDITS = [
+  ["goat", 100],
+  ["max20", 300],
+  ["max-20", 300],
+  ["max10", 150],
+  ["max-10", 150],
+  ["pro", 110],
+  ["go", 10],
+];
+
+export function commandCodeMonthlyCreditLimit(planId) {
+  const id = String(planId ?? "").toLowerCase();
+  if (!id) return null;
+  for (const [needle, credits] of COMMANDCODE_PLAN_MONTHLY_CREDITS) {
+    if (id.includes(needle)) return credits;
+  }
+  return null;
+}
+
+export function commandCodeQuotaWindows(creditsData, { currentPeriodEnd = null, planId = null } = {}) {
+  const windows = [];
+  const fiveHour = creditsData?.windowLimits?.fiveHour;
+  if (fiveHour) {
+    windows.push({
+      id: "commandcode:5h",
+      name: "5 小时窗口额度",
+      remaining: Math.max(0, (fiveHour.cap ?? 3) - (fiveHour.used ?? 0)),
+      limit: fiveHour.cap ?? 3,
+      unit: "credits",
+      resetAt: fiveHour.resetAt ? new Date(fiveHour.resetAt).toISOString() : null,
+    });
+  }
+  const weekly = creditsData?.windowLimits?.weekly;
+  if (weekly) {
+    windows.push({
+      id: "commandcode:weekly",
+      name: "周度额度",
+      remaining: Math.max(0, (weekly.cap ?? 6) - (weekly.used ?? 0)),
+      limit: weekly.cap ?? 6,
+      unit: "credits",
+      resetAt: weekly.resetAt ? new Date(weekly.resetAt).toISOString() : null,
+    });
+  }
+  const credits = creditsData?.credits;
+  if (credits && typeof credits.monthlyCredits === "number") {
+    const remaining = Number(credits.monthlyCredits)
+      + Number(credits.purchasedCredits ?? 0)
+      + Number(credits.freeCredits ?? 0);
+    windows.push({
+      id: "commandcode:monthly",
+      name: "月度额度",
+      // A subscription grant, not a pay-as-you-go balance: it carries the plan's
+      // credit total as its denominator, so the panel and the compact indicator
+      // both draw it as a percentage bar. It is also the number that actually
+      // runs out, hence `primary`.
+      primary: true,
+      remaining: Number.isFinite(remaining) ? Math.max(0, remaining) : 0,
+      limit: commandCodeMonthlyCreditLimit(planId),
+      unit: "credits",
+      resetAt: currentPeriodEnd ? new Date(currentPeriodEnd).toISOString() : null,
+    });
+  }
+  return windows;
+}
+
 export class CommandCodeDriver {
   constructor({
     endpoint = DEFAULT_COMMANDCODE_GENERATE_ENDPOINT,
@@ -419,29 +496,7 @@ export class CommandCodeDriver {
       ? creditsData.credits.monthlyCredits
       : 10;
 
-    const windows = [];
-    if (creditsData?.windowLimits?.fiveHour) {
-      const fh = creditsData.windowLimits.fiveHour;
-      windows.push({
-        id: "commandcode:5h",
-        name: "5 小时窗口额度",
-        remaining: Math.max(0, (fh.cap ?? 3) - (fh.used ?? 0)),
-        limit: fh.cap ?? 3,
-        unit: "credits",
-        resetAt: fh.resetAt ? new Date(fh.resetAt).toISOString() : null,
-      });
-    }
-    if (creditsData?.windowLimits?.weekly) {
-      const wk = creditsData.windowLimits.weekly;
-      windows.push({
-        id: "commandcode:weekly",
-        name: "周度额度",
-        remaining: Math.max(0, (wk.cap ?? 6) - (wk.used ?? 0)),
-        limit: wk.cap ?? 6,
-        unit: "credits",
-        resetAt: wk.resetAt ? new Date(wk.resetAt).toISOString() : null,
-      });
-    }
+    const windows = commandCodeQuotaWindows(creditsData, { currentPeriodEnd, planId });
 
     return {
       candidates: [
@@ -457,7 +512,7 @@ export class CommandCodeDriver {
           },
           quota: {
             remaining: remainingCredits,
-            limit: 10,
+            limit: commandCodeMonthlyCreditLimit(planId),
             unit: "credits",
             resetAt: currentPeriodEnd,
             updatedAt: new Date().toISOString(),
@@ -585,34 +640,12 @@ export class CommandCodeDriver {
         ? creditsData.credits.monthlyCredits
         : (account.quota?.remaining ?? 10);
 
-      const windows = [];
-      if (creditsData?.windowLimits?.fiveHour) {
-        const fh = creditsData.windowLimits.fiveHour;
-        windows.push({
-          id: "commandcode:5h",
-          name: "5 小时窗口额度",
-          remaining: Math.max(0, (fh.cap ?? 3) - (fh.used ?? 0)),
-          limit: fh.cap ?? 3,
-          unit: "credits",
-          resetAt: fh.resetAt ? new Date(fh.resetAt).toISOString() : null,
-        });
-      }
-      if (creditsData?.windowLimits?.weekly) {
-        const wk = creditsData.windowLimits.weekly;
-        windows.push({
-          id: "commandcode:weekly",
-          name: "周度额度",
-          remaining: Math.max(0, (wk.cap ?? 6) - (wk.used ?? 0)),
-          limit: wk.cap ?? 6,
-          unit: "credits",
-          resetAt: wk.resetAt ? new Date(wk.resetAt).toISOString() : null,
-        });
-      }
-
       const planId = subData?.data?.planId;
       const planName = planId ? formatCommandCodePlan(planId) : account.subscription?.plan;
       const subStatus = subData?.data?.status || account.subscription?.status || "active";
       const currentPeriodEnd = subData?.data?.currentPeriodEnd || account.subscription?.expiresAt || null;
+
+      const windows = commandCodeQuotaWindows(creditsData, { currentPeriodEnd, planId });
 
       return {
         subscription: {
@@ -623,7 +656,7 @@ export class CommandCodeDriver {
         },
         quota: createQuotaSnapshot({
           remaining: remainingCredits,
-          limit: account.quota?.limit ?? 10,
+          limit: commandCodeMonthlyCreditLimit(planId) ?? account.quota?.limit ?? null,
           unit: "credits",
           resetAt: currentPeriodEnd,
           updatedAt: new Date().toISOString(),

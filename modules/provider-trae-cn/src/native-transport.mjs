@@ -20,7 +20,7 @@
  */
 import { createServer } from "node:http";
 import { randomBytes, randomInt, randomUUID } from "node:crypto";
-import { guardEmptyCompletion } from "../../../packages/providers/src/native-transport.mjs";
+import { guardEmptyCompletion, normalizeUsage } from "../../../packages/providers/src/native-transport.mjs";
 
 export const PROVIDER_ID = "trae-cn";
 
@@ -695,6 +695,45 @@ export function traeChatBody(request = {}, { site = TRAE_CN_SITE, model } = {}) 
 }
 
 /** Split an SSE byte stream into `{ event, data }` records. */
+/**
+ * Trae's `output` events carry the answer text, but a stream may also carry
+ * token accounting — either in a separate event or nested in the same payload.
+ * Nothing documents the shape, so look in every plausible place and let the
+ * shared normalizer decide. Returning null keeps the previous behaviour (no
+ * usage chunk), so a stream that reports nothing is unaffected.
+ */
+export function traeUsageCandidate(data, event = "") {
+  if (!data || typeof data !== "object") return null;
+  // Trae reports accounting in its own `token_usage` event, with
+  // Anthropic-shaped fields: prompt/completion tokens plus
+  // cache_read_input_tokens / cache_creation_input_tokens. Verified against a
+  // real account on 2026-11-17 — including that both cache counters stay 0 even
+  // for an identical 22k-token prefix replayed in the same session, i.e. this
+  // upstream does not cache at all.
+  if (event === "token_usage") return normalizeUsage(data);
+  const candidates = [
+    data.usage,
+    data.token_usage,
+    data.tokenUsage,
+    data.usage_metadata,
+    data.usageMetadata,
+    data.meta?.usage,
+    data.stat?.usage,
+    data,
+  ];
+  // A stream may split accounting across events: token counts on one, cache
+  // details on another. Any normalized field counts, and callers merge the
+  // results, so a cache-only payload is not dropped for lacking token counts.
+  let merged = null;
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const usage = normalizeUsage(candidate);
+    if (!usage) continue;
+    merged = { ...(merged ?? {}), ...usage };
+  }
+  return merged;
+}
+
 export async function* traeSseEvents(stream) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -790,6 +829,10 @@ export function createTraeNativeExecutor({
       let reasoningOpen = false;
       let reasoningIndex = 0;
       let reasoning = "";
+      // Latest token accounting reported by the stream, if it reports any. DSH
+      // derives tok/s and the context meter from it, so a provider that drops it
+      // leaves the status line with only turns and steps.
+      let rawUsage = null;
       // Trae CN streams calls the way OpenAI does: the same call keeps arriving
       // as a snapshot of its arguments, so pieces are appended per call index.
       const calls = new Map();
@@ -840,6 +883,10 @@ export function createTraeNativeExecutor({
           throw traeRequestError(response.status, detail);
         }
         for await (const { event, data } of traeSseEvents(response.body)) {
+          // Token accounting can arrive on any event, including ones this loop
+          // otherwise ignores, so sample every payload before filtering.
+          const reportedUsage = traeUsageCandidate(data, event);
+          if (reportedUsage) rawUsage = { ...(rawUsage ?? {}), ...reportedUsage };
           if (event === "error") {
             const message = data?.message ?? "Trae CN 返回了错误";
             const error = new Error(message);
@@ -897,6 +944,7 @@ export function createTraeNativeExecutor({
             block: { type: "tool-call", id: state.id, name: state.name || "tool", arguments: state.arguments || "{}" },
           };
         }
+        if (rawUsage) yield { type: "usage", usage: rawUsage };
         yield { type: "finish", reason: calls.size === 0 ? { kind: "stop" } : { kind: "tool-calls" } };
       } finally {
         clearTimeout(timer);

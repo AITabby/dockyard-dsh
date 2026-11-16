@@ -77,10 +77,19 @@ function refreshTimeoutError(providerId, accountId, timeoutMs) {
  * that the selected account's native transport was authenticated; a CLI
  * metadata check alone must not clear a real transport failure.
  */
-function reportPostRefreshHealth(pool, accountId, { allowExpiredRecovery = false } = {}) {
+function reportPostRefreshHealth(pool, accountId, { allowExpiredRecovery = false, previousRemaining = null } = {}) {
   const account = pool.get(accountId);
   if (!account || (account.health?.status === ACCOUNT_HEALTH.EXPIRED && !allowExpiredRecovery)) return;
   const remaining = account.quota?.remaining;
+  const grew = typeof remaining === "number"
+    && typeof previousRemaining === "number"
+    && remaining > previousRemaining;
+  // A provider that meters a spendable balance can be exhausted while the
+  // number is still positive: Command Code rejects every request once the
+  // balance falls under its floor, yet reports the leftover cents. Only a
+  // larger balance proves the account recovered; a successful request clears
+  // the status through the request path.
+  if (account.health?.status === ACCOUNT_HEALTH.EXHAUSTED && !grew) return;
   if (typeof remaining === "number" && remaining <= 0) {
     pool.report(accountId, {
       status: "quota_exhausted",
@@ -816,6 +825,7 @@ export class DockyardRuntime {
     await this.init();
     const entry = this.#entry(providerId);
     providerAccount(entry.pool, accountId);
+    const previousRemaining = entry.pool.get(accountId)?.quota?.remaining ?? null;
     const diagnostics = [];
     let authorizationFailure = null;
     let refresh = null;
@@ -853,6 +863,7 @@ export class DockyardRuntime {
       if (refresh && Object.hasOwn(refresh, "quota")) {
         reportPostRefreshHealth(entry.pool, accountId, {
           allowExpiredRecovery: refresh.resources?.quotaSource === "antigravity_native",
+          previousRemaining,
         });
         await this.#saveState([providerId]);
         return { account: entry.pool.get(accountId), diagnostics };
@@ -869,6 +880,7 @@ export class DockyardRuntime {
       // that explicitly clears an expired transport credential.
       reportPostRefreshHealth(entry.pool, accountId, {
         allowExpiredRecovery: quota.resources?.quotaSource === "antigravity_native",
+        previousRemaining,
       });
     } catch (error) {
       if (signal?.aborted) throw error;

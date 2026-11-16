@@ -1126,6 +1126,14 @@ function createQuotaWindow(input = {}, now = /* @__PURE__ */ new Date()) {
   return {
     id: stringOrNull(input.id),
     name: stringOrNull(input.name),
+    // `balance` marks a spendable amount rather than a percentage window; the
+    // client renders and ranks it differently, so it must survive this
+    // whitelist. Only emitted when a provider declares it, to keep every other
+    // window's shape unchanged.
+    ...input.kind ? { kind: String(input.kind) } : {},
+    // A provider may name the window that actually gates usage; the compact
+    // indicator shows that one instead of ranking by reset time.
+    ...input.primary === true ? { primary: true } : {},
     remaining: numberOrNull(input.remaining, "quota.windows.remaining"),
     limit: numberOrNull(input.limit, "quota.windows.limit"),
     unit: stringOrNull(input.unit),
@@ -2678,9 +2686,54 @@ function isContextOverflowError(errorOrMessage) {
   const message = String(errorOrMessage.message ?? errorOrMessage.reason ?? "");
   return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(message));
 }
+var TRANSPORT_TERMINATION_PATTERNS = [
+  /\bterminated\b/i,
+  /\bother side closed\b/i,
+  /\bsocket hang up\b/i,
+  /\bfetch failed\b/i,
+  /\b(?:UND_ERR_SOCKET|UND_ERR_CLOSED|ECONNRESET|ECONNREFUSED|EPIPE)\b/i
+];
+var TRANSPORT_CAUSE_CODES = /* @__PURE__ */ new Set([
+  "UND_ERR_SOCKET",
+  "UND_ERR_CLOSED",
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "EPIPE"
+]);
+function isTransportTermination(errorOrMessage) {
+  if (!errorOrMessage) return false;
+  if (typeof errorOrMessage === "string") {
+    return TRANSPORT_TERMINATION_PATTERNS.some((pattern) => pattern.test(errorOrMessage));
+  }
+  const cause = errorOrMessage.cause;
+  if (cause && typeof cause === "object") {
+    if (TRANSPORT_CAUSE_CODES.has(String(cause.code ?? "").toUpperCase())) return true;
+    if (TRANSPORT_TERMINATION_PATTERNS.some((pattern) => pattern.test(String(cause.message ?? "")))) return true;
+  }
+  if (TRANSPORT_CAUSE_CODES.has(String(errorOrMessage.code ?? "").toUpperCase())) return true;
+  return TRANSPORT_TERMINATION_PATTERNS.some((pattern) => pattern.test(String(errorOrMessage.message ?? "")));
+}
+function isUnclassifiedFailureCode(code) {
+  const text3 = String(code ?? "").trim().toUpperCase();
+  return text3 === "" || text3 === "UNKNOWN";
+}
 function normalizeTransportFailure(chunk) {
   const failure = chunk?.type === "finish" && chunk.reason?.kind === "error" ? chunk.reason.failure : null;
   if (!failure) return chunk;
+  if (failure.code !== "TRANSPORT" && isUnclassifiedFailureCode(failure.code) && isTransportTermination(failure)) {
+    const original = String(failure.message ?? "").trim();
+    return {
+      ...chunk,
+      reason: {
+        ...chunk.reason,
+        failure: {
+          ...failure,
+          code: "TRANSPORT",
+          message: original ? `Provider connection dropped mid-stream (${original})` : "Provider connection dropped mid-stream"
+        }
+      }
+    };
+  }
   if (failure.code !== "TRANSPORT" && /\bWebSocket closed\s+1006\b/i.test(String(failure.message ?? ""))) {
     return {
       ...chunk,
@@ -2707,6 +2760,36 @@ function normalizeTransportFailure(chunk) {
   }
   return chunk;
 }
+function chunkCarriesDurableOutput(chunk) {
+  if (!chunk || typeof chunk !== "object") return false;
+  if (chunk.type === "text-delta") return Boolean(String(chunk.text ?? ""));
+  if (chunk.type === "tool-call-delta") return true;
+  if (chunk.type === "block-end" && chunk.block?.type === "tool-call") return true;
+  return false;
+}
+function healthFailureFromThrownError(error) {
+  if (!error) return null;
+  const flags = {
+    ...error.authExpired ? { authExpired: true } : {},
+    ...error.authForbidden ? { authForbidden: true } : {},
+    ...error.rateLimited ? { rateLimited: true } : {},
+    ...error.quotaExhausted ? { quotaExhausted: true } : {}
+  };
+  if (Object.keys(flags).length === 0) return null;
+  const code = error.quotaExhausted ? "QUOTA" : error.rateLimited ? "RATE_LIMIT" : error.authExpired ? "AUTH_EXPIRED" : "AUTH_FORBIDDEN";
+  return {
+    type: "finish",
+    reason: {
+      kind: "error",
+      failure: {
+        code,
+        message: String(error.message ?? ""),
+        ...Number.isInteger(error.status) ? { status: error.status } : {},
+        ...flags
+      }
+    }
+  };
+}
 var RETRYABLE_THROWN_FAILURE_CODES = /* @__PURE__ */ new Set([
   "CONTEXT_WINDOW_EXCEEDED",
   "EMPTY_RESPONSE",
@@ -2723,17 +2806,18 @@ function retryFinishFromThrownError(error) {
     code = "TRANSPORT";
   } else if (isContextOverflowError(error)) {
     code = "CONTEXT_WINDOW_EXCEEDED";
-  } else if (code === "TRANSPORT" || /\bfetch failed\b/i.test(String(error?.message ?? "")) || error?.cause?.code === "ECONNRESET" || error?.cause?.code === "ETIMEDOUT") {
+  } else if (code === "TRANSPORT" || isUnclassifiedFailureCode(code) && isTransportTermination(error) || /\bfetch failed\b/i.test(String(error?.message ?? "")) || error?.cause?.code === "ECONNRESET" || error?.cause?.code === "ETIMEDOUT") {
     code = "TRANSPORT";
   }
   if (!RETRYABLE_THROWN_FAILURE_CODES.has(code)) return null;
+  const rawMessage = String(error.message ?? "Provider stream ended without substantive output");
   return {
     type: "finish",
     reason: {
       kind: "error",
       failure: {
         code,
-        message: String(error.message ?? "Provider stream ended without substantive output"),
+        message: code === "TRANSPORT" && /^\s*terminated\s*$/i.test(rawMessage) ? `Provider connection dropped mid-stream (${rawMessage.trim()})` : rawMessage,
         ...Number.isInteger(error.status) ? { status: error.status } : {},
         ...typeof error.providerRetryAfterMs === "number" && Number.isFinite(error.providerRetryAfterMs) ? { providerRetryAfterMs: error.providerRetryAfterMs } : {}
       }
@@ -3013,19 +3097,24 @@ function createDockyardLlmAdapter({
         ...options.signal ? { signal: options.signal } : {},
         ...attachments ? { attachments } : {}
       });
-      let emittedChunk = false;
+      let emittedDurableOutput = false;
       try {
         for await (const chunk of stream) {
-          emittedChunk = true;
+          if (chunkCarriesDurableOutput(chunk)) emittedDurableOutput = true;
           yield normalizeTransportFailure(chunk);
         }
       } catch (error) {
-        if (!emittedChunk || isContextOverflowError(error)) {
+        if (!emittedDurableOutput || isContextOverflowError(error)) {
           const retryFinish = retryFinishFromThrownError(error);
           if (retryFinish) {
             yield retryFinish;
             return;
           }
+        }
+        const healthFailure = healthFailureFromThrownError(error);
+        if (healthFailure) {
+          yield healthFailure;
+          return;
         }
         throw error;
       }
@@ -5505,7 +5594,7 @@ function nativeProviderError(providerId, message, { status, body, code } = {}) {
   const statusCode = numericStatus(status);
   const codeText = String(upstreamStatus ?? resolvedCode ?? "").toUpperCase();
   const exhaustionText = `${resolvedMessage ?? ""} ${diagnosticText(body)} ${diagnosticText(upstreamStatus)} ${diagnosticText(resolvedCode)}`.toLowerCase();
-  const quotaExhausted = codeText === "RESOURCE_EXHAUSTED" || /\bresources?\b[\s\S]{0,80}\bexhausted\b/.test(exhaustionText) || /\bquota\b[\s\S]{0,80}\b(?:exhausted|depleted|exceeded)\b/.test(exhaustionText) || /\busage limit\b[\s\S]{0,80}\breached\b/.test(exhaustionText) || /\bfree[\s\S]{0,40}limit reached\b/.test(exhaustionText) || /\bcapacity\b[\s\S]{0,80}\bexhausted\b/.test(exhaustionText);
+  const quotaExhausted = codeText === "RESOURCE_EXHAUSTED" || /\bresources?\b[\s\S]{0,80}\bexhausted\b/.test(exhaustionText) || /\bquota\b[\s\S]{0,80}\b(?:exhausted|depleted|exceeded)\b/.test(exhaustionText) || /\busage limit\b[\s\S]{0,80}\breached\b/.test(exhaustionText) || /\bfree[\s\S]{0,40}limit reached\b/.test(exhaustionText) || /\bcapacity\b[\s\S]{0,80}\bexhausted\b/.test(exhaustionText) || /\binsufficient (?:credits?|funds?|balance)\b/.test(exhaustionText) || /\b(?:credits?|balance)\b[\s\S]{0,60}\b(?:exhausted|depleted|exceeded|insufficient)\b/.test(exhaustionText) || /\bpurchase more credits?\b/.test(exhaustionText);
   const rateLimited = statusCode === 429 || numericStatus(resolvedCode) === 429 || numericStatus(upstreamStatus) === 429 || codeText === "RESOURCE_EXHAUSTED" || codeText === "RATE_LIMITED" || quotaExhausted;
   const displayMessage = quotaExhausted ? "\u989D\u5EA6\u6216\u4E0A\u6E38\u8D44\u6E90\u5DF2\u8017\u5C3D\uFF0C\u8BF7\u5237\u65B0\u989D\u5EA6\u3001\u5207\u6362\u8D26\u53F7\u6216\u7A0D\u540E\u91CD\u8BD5" : rateLimited ? "\u8BF7\u6C42\u9891\u7387\u53D7\u9650\uFF0C\u8BF7\u5207\u6362\u8D26\u53F7\u6216\u7A0D\u540E\u91CD\u8BD5" : resolvedMessage;
   const error = new Error(`${providerId ?? "provider"} native request failed${displayMessage ? `: ${displayMessage}` : ""}`);
@@ -16432,6 +16521,66 @@ function formatCommandCodePlan(planId) {
   if (planId.includes("max")) return "Command Code Max Plan";
   return `Command Code (${planId})`;
 }
+var COMMANDCODE_PLAN_MONTHLY_CREDITS = [
+  ["goat", 100],
+  ["max20", 300],
+  ["max-20", 300],
+  ["max10", 150],
+  ["max-10", 150],
+  ["pro", 110],
+  ["go", 10]
+];
+function commandCodeMonthlyCreditLimit(planId) {
+  const id = String(planId ?? "").toLowerCase();
+  if (!id) return null;
+  for (const [needle, credits] of COMMANDCODE_PLAN_MONTHLY_CREDITS) {
+    if (id.includes(needle)) return credits;
+  }
+  return null;
+}
+function commandCodeQuotaWindows(creditsData, { currentPeriodEnd = null, planId = null } = {}) {
+  const windows = [];
+  const fiveHour = creditsData?.windowLimits?.fiveHour;
+  if (fiveHour) {
+    windows.push({
+      id: "commandcode:5h",
+      name: "5 \u5C0F\u65F6\u7A97\u53E3\u989D\u5EA6",
+      remaining: Math.max(0, (fiveHour.cap ?? 3) - (fiveHour.used ?? 0)),
+      limit: fiveHour.cap ?? 3,
+      unit: "credits",
+      resetAt: fiveHour.resetAt ? new Date(fiveHour.resetAt).toISOString() : null
+    });
+  }
+  const weekly = creditsData?.windowLimits?.weekly;
+  if (weekly) {
+    windows.push({
+      id: "commandcode:weekly",
+      name: "\u5468\u5EA6\u989D\u5EA6",
+      remaining: Math.max(0, (weekly.cap ?? 6) - (weekly.used ?? 0)),
+      limit: weekly.cap ?? 6,
+      unit: "credits",
+      resetAt: weekly.resetAt ? new Date(weekly.resetAt).toISOString() : null
+    });
+  }
+  const credits = creditsData?.credits;
+  if (credits && typeof credits.monthlyCredits === "number") {
+    const remaining = Number(credits.monthlyCredits) + Number(credits.purchasedCredits ?? 0) + Number(credits.freeCredits ?? 0);
+    windows.push({
+      id: "commandcode:monthly",
+      name: "\u6708\u5EA6\u989D\u5EA6",
+      // A subscription grant, not a pay-as-you-go balance: it carries the plan's
+      // credit total as its denominator, so the panel and the compact indicator
+      // both draw it as a percentage bar. It is also the number that actually
+      // runs out, hence `primary`.
+      primary: true,
+      remaining: Number.isFinite(remaining) ? Math.max(0, remaining) : 0,
+      limit: commandCodeMonthlyCreditLimit(planId),
+      unit: "credits",
+      resetAt: currentPeriodEnd ? new Date(currentPeriodEnd).toISOString() : null
+    });
+  }
+  return windows;
+}
 var CommandCodeDriver = class {
   constructor({
     endpoint: endpoint2 = DEFAULT_COMMANDCODE_GENERATE_ENDPOINT,
@@ -16488,29 +16637,7 @@ var CommandCodeDriver = class {
     const subStatus = subData?.data?.status || "active";
     const currentPeriodEnd = subData?.data?.currentPeriodEnd || null;
     const remainingCredits = typeof creditsData?.credits?.monthlyCredits === "number" ? creditsData.credits.monthlyCredits : 10;
-    const windows = [];
-    if (creditsData?.windowLimits?.fiveHour) {
-      const fh = creditsData.windowLimits.fiveHour;
-      windows.push({
-        id: "commandcode:5h",
-        name: "5 \u5C0F\u65F6\u7A97\u53E3\u989D\u5EA6",
-        remaining: Math.max(0, (fh.cap ?? 3) - (fh.used ?? 0)),
-        limit: fh.cap ?? 3,
-        unit: "credits",
-        resetAt: fh.resetAt ? new Date(fh.resetAt).toISOString() : null
-      });
-    }
-    if (creditsData?.windowLimits?.weekly) {
-      const wk = creditsData.windowLimits.weekly;
-      windows.push({
-        id: "commandcode:weekly",
-        name: "\u5468\u5EA6\u989D\u5EA6",
-        remaining: Math.max(0, (wk.cap ?? 6) - (wk.used ?? 0)),
-        limit: wk.cap ?? 6,
-        unit: "credits",
-        resetAt: wk.resetAt ? new Date(wk.resetAt).toISOString() : null
-      });
-    }
+    const windows = commandCodeQuotaWindows(creditsData, { currentPeriodEnd, planId });
     return {
       candidates: [
         {
@@ -16525,7 +16652,7 @@ var CommandCodeDriver = class {
           },
           quota: {
             remaining: remainingCredits,
-            limit: 10,
+            limit: commandCodeMonthlyCreditLimit(planId),
             unit: "credits",
             resetAt: currentPeriodEnd,
             updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -16634,33 +16761,11 @@ var CommandCodeDriver = class {
       const creditsData = creditsRes?.ok ? await creditsRes.json().catch(() => null) : null;
       const subData = subRes?.ok ? await subRes.json().catch(() => null) : null;
       const remainingCredits = typeof creditsData?.credits?.monthlyCredits === "number" ? creditsData.credits.monthlyCredits : account.quota?.remaining ?? 10;
-      const windows = [];
-      if (creditsData?.windowLimits?.fiveHour) {
-        const fh = creditsData.windowLimits.fiveHour;
-        windows.push({
-          id: "commandcode:5h",
-          name: "5 \u5C0F\u65F6\u7A97\u53E3\u989D\u5EA6",
-          remaining: Math.max(0, (fh.cap ?? 3) - (fh.used ?? 0)),
-          limit: fh.cap ?? 3,
-          unit: "credits",
-          resetAt: fh.resetAt ? new Date(fh.resetAt).toISOString() : null
-        });
-      }
-      if (creditsData?.windowLimits?.weekly) {
-        const wk = creditsData.windowLimits.weekly;
-        windows.push({
-          id: "commandcode:weekly",
-          name: "\u5468\u5EA6\u989D\u5EA6",
-          remaining: Math.max(0, (wk.cap ?? 6) - (wk.used ?? 0)),
-          limit: wk.cap ?? 6,
-          unit: "credits",
-          resetAt: wk.resetAt ? new Date(wk.resetAt).toISOString() : null
-        });
-      }
       const planId = subData?.data?.planId;
       const planName = planId ? formatCommandCodePlan(planId) : account.subscription?.plan;
       const subStatus = subData?.data?.status || account.subscription?.status || "active";
       const currentPeriodEnd = subData?.data?.currentPeriodEnd || account.subscription?.expiresAt || null;
+      const windows = commandCodeQuotaWindows(creditsData, { currentPeriodEnd, planId });
       return {
         subscription: {
           ...account.subscription,
@@ -16670,7 +16775,7 @@ var CommandCodeDriver = class {
         },
         quota: createQuotaSnapshot({
           remaining: remainingCredits,
-          limit: account.quota?.limit ?? 10,
+          limit: commandCodeMonthlyCreditLimit(planId) ?? account.quota?.limit ?? null,
           unit: "credits",
           resetAt: currentPeriodEnd,
           updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -19737,6 +19842,28 @@ function traeChatBody(request = {}, { site = TRAE_CN_SITE, model } = {}) {
   }
   return body;
 }
+function traeUsageCandidate(data, event = "") {
+  if (!data || typeof data !== "object") return null;
+  if (event === "token_usage") return normalizeUsage(data);
+  const candidates = [
+    data.usage,
+    data.token_usage,
+    data.tokenUsage,
+    data.usage_metadata,
+    data.usageMetadata,
+    data.meta?.usage,
+    data.stat?.usage,
+    data
+  ];
+  let merged = null;
+  for (const candidate2 of candidates) {
+    if (!candidate2 || typeof candidate2 !== "object") continue;
+    const usage = normalizeUsage(candidate2);
+    if (!usage) continue;
+    merged = { ...merged ?? {}, ...usage };
+  }
+  return merged;
+}
 async function* traeSseEvents(stream) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -19825,6 +19952,7 @@ function createTraeNativeExecutor({
       let reasoningOpen = false;
       let reasoningIndex = 0;
       let reasoning = "";
+      let rawUsage = null;
       const calls = /* @__PURE__ */ new Map();
       let callIndex = null;
       function* closeText() {
@@ -19868,6 +19996,8 @@ function createTraeNativeExecutor({
           throw traeRequestError(response.status, detail);
         }
         for await (const { event, data } of traeSseEvents(response.body)) {
+          const reportedUsage = traeUsageCandidate(data, event);
+          if (reportedUsage) rawUsage = { ...rawUsage ?? {}, ...reportedUsage };
           if (event === "error") {
             const message = data?.message ?? "Trae CN \u8FD4\u56DE\u4E86\u9519\u8BEF";
             const error = new Error(message);
@@ -19922,6 +20052,7 @@ function createTraeNativeExecutor({
             block: { type: "tool-call", id: state.id, name: state.name || "tool", arguments: state.arguments || "{}" }
           };
         }
+        if (rawUsage) yield { type: "usage", usage: rawUsage };
         yield { type: "finish", reason: calls.size === 0 ? { kind: "stop" } : { kind: "tool-calls" } };
       } finally {
         clearTimeout(timer);
@@ -21077,10 +21208,12 @@ function refreshTimeoutError(providerId, accountId, timeoutMs) {
   error.timeoutMs = timeoutMs;
   return error;
 }
-function reportPostRefreshHealth(pool, accountId, { allowExpiredRecovery = false } = {}) {
+function reportPostRefreshHealth(pool, accountId, { allowExpiredRecovery = false, previousRemaining = null } = {}) {
   const account = pool.get(accountId);
   if (!account || account.health?.status === ACCOUNT_HEALTH.EXPIRED && !allowExpiredRecovery) return;
   const remaining = account.quota?.remaining;
+  const grew = typeof remaining === "number" && typeof previousRemaining === "number" && remaining > previousRemaining;
+  if (account.health?.status === ACCOUNT_HEALTH.EXHAUSTED && !grew) return;
   if (typeof remaining === "number" && remaining <= 0) {
     pool.report(accountId, {
       status: "quota_exhausted",
@@ -21705,6 +21838,7 @@ var DockyardRuntime = class {
     await this.init();
     const entry = this.#entry(providerId);
     providerAccount2(entry.pool, accountId);
+    const previousRemaining = entry.pool.get(accountId)?.quota?.remaining ?? null;
     const diagnostics = [];
     let authorizationFailure = null;
     let refresh = null;
@@ -21733,7 +21867,8 @@ var DockyardRuntime = class {
     try {
       if (refresh && Object.hasOwn(refresh, "quota")) {
         reportPostRefreshHealth(entry.pool, accountId, {
-          allowExpiredRecovery: refresh.resources?.quotaSource === "antigravity_native"
+          allowExpiredRecovery: refresh.resources?.quotaSource === "antigravity_native",
+          previousRemaining
         });
         await this.#saveState([providerId]);
         return { account: entry.pool.get(accountId), diagnostics };
@@ -21745,7 +21880,8 @@ var DockyardRuntime = class {
       if (signal?.aborted) throw signal.reason ?? refreshTimeoutError(providerId, accountId, this.refreshTimeoutMs);
       this.#applyPatch(entry.pool, accountId, quota);
       reportPostRefreshHealth(entry.pool, accountId, {
-        allowExpiredRecovery: quota.resources?.quotaSource === "antigravity_native"
+        allowExpiredRecovery: quota.resources?.quotaSource === "antigravity_native",
+        previousRemaining
       });
     } catch (error) {
       if (signal?.aborted) throw error;

@@ -101,6 +101,31 @@ test("native auth classification distinguishes token budgets from invalid creden
   assert.equal(invalidKey.authExpired, true);
 });
 
+test("native quota classification recognizes a prepaid credit floor rejection", () => {
+  // Command Code answers HTTP 400 (not 429) once the account balance is under
+  // its floor; without this mapping the account stays "healthy" and keeps being
+  // selected, and the user only sees an opaque UNKNOWN failure.
+  const error = nativeProviderError(
+    "commandcode",
+    "You have insufficient credits to make this request. Please purchase more credits to continue using the service.",
+    { status: 400, code: "BAD_REQUEST" },
+  );
+  assert.equal(error.quotaExhausted, true);
+  assert.equal(error.status, 400);
+  assert.match(error.message, /额度或上游资源已耗尽/);
+  assert.match(error.upstreamMessage, /insufficient credits/);
+});
+
+test("native quota classification ignores ordinary validation failures", () => {
+  const validation = nativeProviderError("commandcode", "Validation error: Invalid UUID at \"threadId\"", {
+    status: 400,
+    code: "BAD_REQUEST",
+  });
+  assert.equal(validation.quotaExhausted, false);
+  const tokenBudget = nativeProviderError("test", "Invalid token count in image tile");
+  assert.equal(tokenBudget.quotaExhausted, false);
+});
+
 test("Claude native transport posts Anthropic Messages and streams the first text delta", async () => {
   let call;
   const executor = createClaudeNativeExecutor({

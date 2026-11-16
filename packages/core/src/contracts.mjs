@@ -72,6 +72,14 @@ function createQuotaWindow(input = {}, now = new Date()) {
   return {
     id: stringOrNull(input.id),
     name: stringOrNull(input.name),
+    // `balance` marks a spendable amount rather than a percentage window; the
+    // client renders and ranks it differently, so it must survive this
+    // whitelist. Only emitted when a provider declares it, to keep every other
+    // window's shape unchanged.
+    ...(input.kind ? { kind: String(input.kind) } : {}),
+    // A provider may name the window that actually gates usage; the compact
+    // indicator shows that one instead of ranking by reset time.
+    ...(input.primary === true ? { primary: true } : {}),
     remaining: numberOrNull(input.remaining, "quota.windows.remaining"),
     limit: numberOrNull(input.limit, "quota.windows.limit"),
     unit: stringOrNull(input.unit),

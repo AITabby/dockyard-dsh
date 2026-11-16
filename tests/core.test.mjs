@@ -6,6 +6,7 @@ import {
   EventBus,
   ModuleRuntime,
   createProviderRoute,
+  createQuotaSnapshot,
 } from "../packages/core/src/index.mjs";
 import { AccountPool } from "../packages/account-pool/src/index.mjs";
 import { createCodexModule } from "../modules/provider-codex/src/index.mjs";
@@ -200,6 +201,21 @@ test("event listeners are isolated from each other", async () => {
   const result = await events.emit("test", {});
   assert.deepEqual(calls, ["first", "second"]);
   assert.equal(result.errors.length, 1);
+});
+
+test("a quota window keeps its balance kind through the snapshot contract", () => {
+  // The client renders and ranks balance windows differently from percentage
+  // windows; the contract whitelist must not silently drop that marker.
+  const snapshot = createQuotaSnapshot({
+    windows: [{ id: "monthly", name: "月度额度", kind: "balance", remaining: 0.056, limit: null, unit: "credits" }],
+  });
+  assert.equal(snapshot.windows[0].kind, "balance");
+  // Windows that declare no kind keep their previous shape exactly.
+  const plain = createQuotaSnapshot({ windows: [{ id: "5h", remaining: 1, limit: 3 }] });
+  assert.equal("kind" in plain.windows[0], false);
+  // A declared primary window must survive too: the compact indicator uses it.
+  const primary = createQuotaSnapshot({ windows: [{ id: "monthly", remaining: 1, limit: 10, primary: true }] });
+  assert.equal(primary.windows[0].primary, true);
 });
 
 test("provider health reporting cannot mask a response after account removal", async () => {
@@ -692,6 +708,160 @@ test("DSH LLM adapter makes Codex WebSocket 1006 retryable", async () => {
       failure: { code: "TRANSPORT", message: "WebSocket closed 1006" },
     },
   }]);
+});
+
+test("DSH LLM adapter turns an unclassified dropped connection into retryable TRANSPORT", async () => {
+  const adapter = createDockyardLlmAdapter({
+    runtime: {
+      listProviderIds: () => ["commandcode"],
+      listProviderManifests: () => [{ id: "commandcode", displayName: "Command Code" }],
+      async getCatalog() {
+        return { models: [{ id: "live-model", name: "Live model" }] };
+      },
+      async stream() {
+        return (async function* chunks() {
+          yield {
+            type: "finish",
+            reason: {
+              kind: "error",
+              failure: { code: "UNKNOWN", message: "terminated" },
+            },
+          };
+        })();
+      },
+    },
+  });
+
+  const chunks = [];
+  for await (const chunk of adapter.stream({ provider: "commandcode", model: "live-model" })) {
+    chunks.push(chunk);
+  }
+  assert.equal(chunks.length, 1);
+  assert.equal(chunks[0].reason.failure.code, "TRANSPORT");
+  assert.match(chunks[0].reason.failure.message, /terminated/);
+});
+
+test("DSH LLM adapter makes a thrown undici terminated error retryable", async () => {
+  const adapter = createDockyardLlmAdapter({
+    runtime: {
+      listProviderIds: () => ["commandcode"],
+      listProviderManifests: () => [{ id: "commandcode", displayName: "Command Code" }],
+      async getCatalog() {
+        return { models: [{ id: "live-model", name: "Live model" }] };
+      },
+      async stream() {
+        return (async function* chunks() {
+          const error = new TypeError("terminated");
+          error.cause = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" });
+          throw error;
+        })();
+      },
+    },
+  });
+
+  const chunks = [];
+  for await (const chunk of adapter.stream({ provider: "commandcode", model: "live-model" })) {
+    chunks.push(chunk);
+  }
+  assert.deepEqual(chunks, [{
+    type: "finish",
+    reason: {
+      kind: "error",
+      failure: {
+        code: "TRANSPORT",
+        message: "Provider connection dropped mid-stream (terminated)",
+      },
+    },
+  }]);
+});
+
+test("DSH LLM adapter retries a dropped connection that died during reasoning only", async () => {
+  const adapter = createDockyardLlmAdapter({
+    runtime: {
+      listProviderIds: () => ["commandcode"],
+      listProviderManifests: () => [{ id: "commandcode", displayName: "Command Code" }],
+      async getCatalog() {
+        return { models: [{ id: "live-model", name: "Live model" }] };
+      },
+      async stream() {
+        return (async function* chunks() {
+          yield { type: "block-start", index: 1, blockType: "reasoning" };
+          yield { type: "reasoning-delta", index: 1, text: "thinking" };
+          const error = new TypeError("terminated");
+          error.cause = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" });
+          throw error;
+        })();
+      },
+    },
+  });
+
+  const chunks = [];
+  for await (const chunk of adapter.stream({ provider: "commandcode", model: "live-model" })) {
+    chunks.push(chunk);
+  }
+  const finish = chunks.at(-1);
+  assert.equal(finish.type, "finish");
+  assert.equal(finish.reason.failure.code, "TRANSPORT");
+});
+
+test("DSH LLM adapter does not replay a dropped connection after visible text", async () => {
+  const adapter = createDockyardLlmAdapter({
+    runtime: {
+      listProviderIds: () => ["commandcode"],
+      listProviderManifests: () => [{ id: "commandcode", displayName: "Command Code" }],
+      async getCatalog() {
+        return { models: [{ id: "live-model", name: "Live model" }] };
+      },
+      async stream() {
+        return (async function* chunks() {
+          yield { type: "text-delta", index: 0, text: "partial answer" };
+          throw new TypeError("terminated");
+        })();
+      },
+    },
+  });
+
+  await assert.rejects(
+    (async () => {
+      for await (const _chunk of adapter.stream({ provider: "commandcode", model: "live-model" })) {}
+    })(),
+    (error) => {
+      assert.match(String(error.message), /terminated/);
+      return true;
+    },
+  );
+});
+
+test("DSH LLM adapter reports a quota failure as a health-carrying finish", async () => {
+  const adapter = createDockyardLlmAdapter({
+    runtime: {
+      listProviderIds: () => ["commandcode"],
+      listProviderManifests: () => [{ id: "commandcode", displayName: "Command Code" }],
+      async getCatalog() {
+        return { models: [{ id: "live-model", name: "Live model" }] };
+      },
+      async stream() {
+        return (async function* chunks() {
+          const error = new Error("commandcode native request failed: 额度或上游资源已耗尽");
+          error.code = "BAD_REQUEST";
+          error.status = 400;
+          error.quotaExhausted = true;
+          throw error;
+        })();
+      },
+    },
+  });
+
+  const chunks = [];
+  for await (const chunk of adapter.stream({ provider: "commandcode", model: "live-model" })) {
+    chunks.push(chunk);
+  }
+  const failure = chunks.at(-1)?.reason?.failure;
+  // The pool only learns the account is spent if the flag survives into the
+  // finish chunk; DSH's own error conversion keeps just code and message.
+  assert.equal(failure?.quotaExhausted, true);
+  assert.equal(failure?.code, "QUOTA");
+  assert.equal(failure?.status, 400);
 });
 
 test("DSH LLM adapter turns a thrown empty provider stream into retryable EMPTY_RESPONSE", async () => {

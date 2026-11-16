@@ -16464,6 +16464,8 @@ function comparisonValue(window2, now) {
 }
 function selectPrimaryQuotaWindow(windows, now = Date.now()) {
   if (!Array.isArray(windows) || windows.length === 0) return null;
+  const declared = windows.filter((window2) => window2?.primary === true);
+  if (declared.length === 1) return declared[0];
   return windows.reduce((selected, candidate) => {
     if (!selected) return candidate;
     const selectedValue = comparisonValue(selected, now);
@@ -18936,11 +18938,12 @@ function DockyardAccountControl({ directory, modelDirectory, modelDirectories, c
     compactIndicatorCacheRef.current = { providerId: currentProviderId, indicator: null };
   }
   const compactBalance = compactIndicator?.type === "balance" ? formatBalance(compactIndicator.window, t) : null;
-  const compactLabel = compactIndicator?.type === "balance" ? compactBalance : compactIndicator?.type === "quota" ? `${compactIndicator.percent}%` : null;
+  const compactPercent = typeof compactIndicator?.percent === "number" ? compactIndicator.percent : null;
+  const compactLabel = compactPercent !== null ? `${compactPercent}%` : compactIndicator?.type === "balance" ? compactBalance : null;
   const compactVisible = Boolean(compactLabel);
-  const quotaValue = compactIndicator?.type === "quota" ? compactIndicator.percent : null;
+  const quotaValue = compactPercent;
   const health = currentSelectedAccount?.health?.status;
-  const quotaLevel = loading ? "loading" : ["expired", "exhausted", "degraded"].includes(health) ? "critical" : compactIndicator?.type === "balance" ? compactIndicator.remaining <= 0 ? "critical" : "balance" : quotaValue === null ? "unknown" : quotaValue <= 10 ? "critical" : quotaValue <= 25 ? "warning" : "healthy";
+  const quotaLevel = loading ? "loading" : ["expired", "exhausted", "degraded"].includes(health) ? "critical" : quotaValue === null ? compactIndicator?.type === "balance" ? compactIndicator.remaining <= 0 ? "critical" : "balance" : "unknown" : quotaValue <= 10 ? "critical" : quotaValue <= 25 ? "warning" : "healthy";
   const providerLabel = currentProviderId ? providerDisplayName(currentProviderId, currentProvider?.manifest ?? currentNative?.entry, t) : text(t, "trigger.subscriptionManagement");
   const modelLabel = model?.name ?? current2?.model ?? "";
   const toggleOpen = () => {
@@ -18977,7 +18980,7 @@ function DockyardAccountControl({ directory, modelDirectory, modelDirectories, c
         "aria-expanded": open,
         onClick: toggleOpen
       },
-      compactIndicator?.type === "balance" ? h("span", { className: "dockyard-dsh-balance", "data-level": quotaLevel }, compactLabel) : h("span", {
+      quotaValue !== null ? h("span", {
         className: "dockyard-dsh-quota-meter",
         role: "progressbar",
         "aria-label": `${text(t, "value.quota")} ${compactLabel}`,
@@ -18988,7 +18991,7 @@ function DockyardAccountControl({ directory, modelDirectory, modelDirectories, c
       }, h("span", {
         className: "dockyard-dsh-quota-meter-fill",
         style: { width: `${quotaValue}%` }
-      }))
+      })) : compactIndicator?.type === "balance" ? h("span", { className: "dockyard-dsh-balance", "data-level": quotaLevel }, compactLabel) : null
     ) : null,
     overviewOpen ? h(SubscriptionOverviewPopup, {
       providers,

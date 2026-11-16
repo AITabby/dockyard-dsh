@@ -328,7 +328,11 @@ test("CommandCodeDriver discover and importAccount work with mock endpoints", as
     assert.equal(cand.accountId, "usr_123");
     assert.equal(cand.subscription.plan, "Command Code Go Plan");
     assert.equal(cand.quota.remaining, 8.5);
-    assert.equal(cand.quota.windows.length, 2);
+    assert.equal(cand.quota.windows.length, 3);
+    const monthlyWindow = cand.quota.windows.find((window) => window.id === "commandcode:monthly");
+    assert.equal(monthlyWindow?.remaining, 8.5);
+    assert.equal(monthlyWindow?.limit, 10, "the Go plan's $10 grant is the bar denominator");
+    assert.equal(monthlyWindow?.primary, true);
 
     const mockSecretStore = {
       data: new Map(),
@@ -569,4 +573,63 @@ test("buildCommandCodeMessages fails loudly when an image attachment cannot be r
     }, null),
     /图片附件无法读取/,
   );
+});
+
+test("commandcode quota shows the monthly credit balance that actually gates requests", async () => {
+  const { commandCodeQuotaWindows } = await import("../modules/provider-commandcode/src/index.mjs");
+  const creditsData = {
+    credits: { monthlyCredits: 0.0560426896, purchasedCredits: 0, freeCredits: 0 },
+    windowLimits: {
+      fiveHour: { used: 0.742091952, cap: 3, resetAt: 1794853336425 },
+      weekly: { used: 1.506026196, cap: 6, resetAt: 1795422131585 },
+    },
+  };
+  const windows = commandCodeQuotaWindows(creditsData, {
+    currentPeriodEnd: "2026-12-01T13:29:27.000Z",
+    planId: "individual-go-v1",
+  });
+  assert.equal(windows.length, 3, "the rolling windows plus the monthly balance");
+  const monthly = windows.find((window) => window.id === "commandcode:monthly");
+  assert.ok(monthly, "a monthly credit row is required");
+  // A subscription grant, so it renders as a percentage bar like the rolling
+  // windows rather than as a pay-as-you-go balance.
+  assert.equal(monthly.kind, undefined);
+  assert.ok(Math.abs(monthly.remaining - 0.0560426896) < 1e-9);
+  // The API only reports what is left; the Go plan's $10 grant is the bar's
+  // denominator, and the window is flagged as the one that gates usage.
+  assert.equal(monthly.limit, 10);
+  assert.equal(monthly.primary, true);
+  assert.equal(monthly.resetAt, "2026-12-01T13:29:27.000Z");
+  const fiveHour = windows.find((window) => window.id === "commandcode:5h");
+  assert.ok(Math.abs(fiveHour.remaining - (3 - 0.742091952)) < 1e-9);
+});
+
+test("commandcode quota omits the monthly row when the balance is unavailable", async () => {
+  const { commandCodeQuotaWindows } = await import("../modules/provider-commandcode/src/index.mjs");
+  const windows = commandCodeQuotaWindows({ windowLimits: { fiveHour: { used: 1, cap: 3 } } });
+  assert.equal(windows.length, 1);
+  assert.equal(windows.some((window) => window.id === "commandcode:monthly"), false);
+});
+
+
+test("commandcode maps each plan to its published monthly credit grant", async () => {
+  const { commandCodeMonthlyCreditLimit } = await import("../modules/provider-commandcode/src/index.mjs");
+  assert.equal(commandCodeMonthlyCreditLimit("individual-go-v1"), 10);
+  assert.equal(commandCodeMonthlyCreditLimit("individual-goat-v1"), 100);
+  assert.equal(commandCodeMonthlyCreditLimit("individual-pro-v1"), 110);
+  assert.equal(commandCodeMonthlyCreditLimit("individual-max10-v1"), 150);
+  assert.equal(commandCodeMonthlyCreditLimit("individual-max20-v1"), 300);
+  assert.equal(commandCodeMonthlyCreditLimit(null), null);
+  assert.equal(commandCodeMonthlyCreditLimit("something-else"), null);
+});
+
+test("commandcode monthly row still renders when the plan is unknown", async () => {
+  const { commandCodeQuotaWindows } = await import("../modules/provider-commandcode/src/index.mjs");
+  const windows = commandCodeQuotaWindows(
+    { credits: { monthlyCredits: 3 } },
+    { planId: "mystery-plan" },
+  );
+  const monthly = windows.find((window) => window.id === "commandcode:monthly");
+  assert.equal(monthly?.limit, null, "no invented denominator");
+  assert.equal(monthly?.remaining, 3);
 });

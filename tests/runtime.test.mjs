@@ -1207,3 +1207,59 @@ test("JsonStateStore recovers from a corrupt state file", async () => {
     await rm(home, { recursive: true, force: true });
   }
 });
+
+test("a quota refresh keeps an exhausted account exhausted until the balance grows", async () => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-runtime-"));
+  try {
+    const stateStore = new JsonStateStore({ home });
+    await stateStore.save({
+      pools: {
+        "test-provider": {
+          policy: ACCOUNT_SELECTION_POLICY.MANUAL,
+          defaultAccountId: "account-a",
+          accounts: [{
+            providerId: "test-provider",
+            accountId: "account-a",
+            auth: { kind: "api_key", credentialRef: "keychain://opaque-ref", scopes: [] },
+            quota: { remaining: 0.056, limit: 10, unit: "credits" },
+            health: { status: "exhausted", lastError: "insufficient credits" },
+          }],
+        },
+      },
+    });
+
+    let balance = 0.056;
+    const module = {
+      ...fakeModule(),
+      // A spendable-balance provider keeps reporting the leftover cents even
+      // while every request is rejected.
+      async refreshAccount() {
+        return { quota: { remaining: balance, limit: 10, unit: "credits" } };
+      },
+    };
+    const runtime = new DockyardRuntime({
+      providers: [{ module }],
+      runtime: new ModuleRuntime({ logger: { error() {}, warn() {}, info() {} } }),
+      stateStore,
+      secretStore: new MemorySecretStore(),
+    });
+    await runtime.init();
+
+    await runtime.refreshAccount("test-provider", "account-a", { tolerateFailure: true });
+    assert.equal(
+      runtime.snapshot().providers[0].accounts[0].health.status,
+      "exhausted",
+      "an unchanged positive balance must not clear the exhausted status",
+    );
+
+    balance = 5;
+    await runtime.refreshAccount("test-provider", "account-a", { tolerateFailure: true });
+    assert.equal(
+      runtime.snapshot().providers[0].accounts[0].health.status,
+      "healthy",
+      "a topped-up balance proves the account recovered",
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
