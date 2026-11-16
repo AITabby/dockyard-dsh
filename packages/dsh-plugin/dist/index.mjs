@@ -2513,6 +2513,7 @@ function defaultCatalogCachePath() {
   const home = process.env.DOCKYARD_DSH_HOME || join(homedir(), ".dockyard-dsh");
   return join(home, "catalog-cache.json");
 }
+var CATALOG_CACHE_VERSION = 2;
 function loadDiskCatalogCache(filePath) {
   try {
     if (!filePath || !existsSync(filePath)) return /* @__PURE__ */ new Map();
@@ -2521,7 +2522,7 @@ function loadDiskCatalogCache(filePath) {
     const map = /* @__PURE__ */ new Map();
     if (parsed && typeof parsed === "object") {
       for (const [providerId, entry] of Object.entries(parsed)) {
-        if (entry && Array.isArray(entry.value?.models) && entry.value.models.length > 0) {
+        if (entry && Array.isArray(entry.value?.models) && entry.value.models.length > 0 && Number(entry.version) === CATALOG_CACHE_VERSION) {
           map.set(providerId, {
             value: entry.value,
             fetchedAt: Number(entry.fetchedAt) || Date.now()
@@ -2865,7 +2866,7 @@ function createDockyardLlmAdapter({
       promise = Promise.resolve().then(() => runtime.getCatalog(provider, { force, ...accountId ? { accountId } : {} })).then((catalog) => {
         if (Array.isArray(catalog?.models) && catalog.models.length > 0) {
           const previous = catalogCache.get(key)?.value;
-          catalogCache.set(key, { value: catalog, fetchedAt: Date.now() });
+          catalogCache.set(key, { value: catalog, fetchedAt: Date.now(), version: CATALOG_CACHE_VERSION });
           saveDiskCatalogCache(catalogCachePath, catalogCache);
           if (previous && modelSignature(previous) !== modelSignature(catalog)) {
             try {
@@ -2888,7 +2889,7 @@ function createDockyardLlmAdapter({
     if (!entry) {
       const legacy = catalogCache.get(provider);
       if (legacy) {
-        catalogCache.set(key, { ...legacy, fetchedAt: 0 });
+        catalogCache.set(key, { ...legacy, fetchedAt: 0, version: CATALOG_CACHE_VERSION });
         entry = catalogCache.get(key);
       }
     }
@@ -15150,8 +15151,28 @@ var OPENCODE_VERIFIED_VARIANTS = Object.freeze({
   "glm-5.3-flash-free": ["high", "max"],
   "minimax-m3.1-flash-free": ["low", "high"]
 });
+var EFFORT_LABELS = Object.freeze({
+  none: "None",
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  max: "Max",
+  xhigh: "Extra High"
+});
+function reasoningFromZenCapabilities(capabilities) {
+  const reasoning = capabilities?.reasoning;
+  if (!reasoning?.supported) return null;
+  const ids = Array.isArray(reasoning.effort) ? reasoning.effort.filter((value) => typeof value === "string" && value.length > 0) : [];
+  if (ids.length === 0 && reasoning.toggle === true) ids.push("none");
+  if (ids.length === 0) return null;
+  return {
+    efforts: ids.map((id) => ({ id, name: EFFORT_LABELS[id] ?? id }))
+  };
+}
 function withVerifiedVariants(models) {
   return models.map((model) => {
+    if (model.reasoning?.efforts?.length) return model;
     if (!Object.hasOwn(OPENCODE_VERIFIED_VARIANTS, model.id)) return model;
     const variants = OPENCODE_VERIFIED_VARIANTS[model.id];
     if (variants.length === 0) {
@@ -15196,8 +15217,8 @@ function parseOpencodeCatalog(data, { registry = [], installedIds = null } = {})
     const name2 = stripVendorPrefix(stringValue(item?.name) ?? regModel?.name ?? builtin?.name ?? id).replace(/^openrouter\//, "");
     const contextWindow = Number.isInteger(item?.limit?.context) ? item.limit.context : Number.isInteger(item?.contextWindow) ? item.contextWindow : Number.isInteger(regModel?.contextWindow) ? regModel.contextWindow : builtin?.contextWindow ?? 131072;
     const maxTokens = Number.isInteger(item?.limit?.output) ? Math.min(item.limit.output, 16384) : Number.isInteger(item?.maxTokens) ? Math.min(item.maxTokens, 16384) : Number.isInteger(regModel?.maxTokens) ? Math.min(regModel.maxTokens, 16384) : builtin?.maxTokens ?? 8192;
-    const reasoning = item?.reasoning ? resolveReasoningFromModel(item) : regModel ? resolveReasoningFromModel(regModel) : builtin?.reasoning;
-    const inputModalities = Array.isArray(item?.modalities?.input) ? item.modalities.input.filter((value) => typeof value === "string") : null;
+    const reasoning = reasoningFromZenCapabilities(item?.capabilities) ?? (item?.reasoning ? resolveReasoningFromModel(item) : regModel ? resolveReasoningFromModel(regModel) : builtin?.reasoning);
+    const inputModalities = Array.isArray(item?.modalities?.input) ? [...new Set(item.modalities.input.filter((value) => typeof value === "string").map((value) => value.startsWith("image/") ? "image" : value))] : null;
     result.push({
       id,
       name: name2,

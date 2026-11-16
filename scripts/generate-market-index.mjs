@@ -98,6 +98,7 @@ const RELEASE_HISTORY = [
   // 0.1.17 was never published: its local commit embedded OAuth credentials and
   // was rewritten into the 0.1.18 release before being pushed. Do not list a
   // version whose commit does not exist on the remote.
+  { version: "0.1.38", publishTimestamp: 1794823803, commit: "d74e6b863ad994bede1f407f24497b8d30b0f551" },
   { version: "0.1.37", publishTimestamp: 1794823028, commit: "8fe6a0675f90f72c08704a299e27fffcd70d71b2" },
   { version: "0.1.36", publishTimestamp: 1794685562, commit: "8637dca82b70b37045c72a76f6d281e3d00747b3" },
   { version: "0.1.35", publishTimestamp: 1794558223, commit: "704fd9e1ee21139b4bb9dba0e466e1548b708af4" },

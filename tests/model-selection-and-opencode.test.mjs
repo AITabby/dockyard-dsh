@@ -608,18 +608,22 @@ test("the free tier hides paid Zen models unless asked for them", async () => {
   }
 });
 
-test("only the reasoning variants the Zen server accepts are offered", async () => {
-  // Registry guesses ("minimal" on big-pickle) made the provider reject the
-  // whole turn, so tiers follow the verified table instead.
+test("the verified table only fills in models the payload leaves blank", async () => {
+  // Zen states its own tiers; the hand-verified table is a fallback for CLI
+  // listings that carry no capabilities block.
   const { OPENCODE_VERIFIED_VARIANTS, withVerifiedVariants } = await import("../modules/provider-opencode/src/driver.mjs");
   const models = withVerifiedVariants([
-    { id: "big-pickle", reasoning: { efforts: [{ id: "low" }, { id: "high" }], defaultEffort: "low" } },
-    { id: "deepseek-v4.1-flash-free", reasoning: { efforts: [{ id: "minimal" }] } },
+    { id: "big-pickle", reasoning: { efforts: [{ id: "none" }, { id: "high" }] } },
+    { id: "deepseek-v4.1-flash-free" },
     { id: "untouched-model", reasoning: { efforts: [{ id: "high" }] } },
   ]);
-  assert.equal(models[0].reasoning, undefined, "a model that takes no variant offers no tiers");
-  assert.deepEqual(models[1].reasoning.efforts.map((effort) => effort.id), OPENCODE_VERIFIED_VARIANTS["deepseek-v4.1-flash-free"]);
-  assert.deepEqual(models[2].reasoning.efforts.map((effort) => effort.id), ["high"], "unverified models keep their registry tiers");
+  assert.deepEqual(models[0].reasoning.efforts.map((effort) => effort.id), ["none", "high"], "payload tiers win over the table");
+  assert.deepEqual(
+    models[1].reasoning.efforts.map((effort) => effort.id),
+    OPENCODE_VERIFIED_VARIANTS["deepseek-v4.1-flash-free"],
+    "a blank model falls back to the verified table",
+  );
+  assert.deepEqual(models[2].reasoning.efforts.map((effort) => effort.id), ["high"]);
 });
 
 test("the Zen payload decides price, limits and modalities", async () => {
@@ -649,4 +653,24 @@ test("the Zen payload decides price, limits and modalities", async () => {
   assert.deepEqual(models[0].inputModalities, ["text", "image"]);
   assert.equal(models[1].free, true);
   assert.equal(models[1].contextWindow, 128000);
+});
+
+test("tiers come from the Zen capabilities block, like the OpenCode app shows", async () => {
+  // The payload states the accepted efforts per model; guessing from the local
+  // registry produced lists that did not match the app (hy4 lost "none",
+  // deepseek lost "low").
+  const { parseOpencodeCatalog } = await import("../modules/provider-opencode/src/driver.mjs");
+  const { models } = parseOpencodeCatalog({
+    data: [
+      { id: "hy4-flash-free", capabilities: { reasoning: { supported: true, effort: ["none", "high"] } } },
+      { id: "deepseek-v4.1-flash-free", capabilities: { reasoning: { supported: true, toggle: true, effort: ["low", "high", "max"] } } },
+      { id: "no-reasoning-free", capabilities: { reasoning: { supported: false } } },
+      { id: "toggle-only-free", capabilities: { reasoning: { supported: true, toggle: true } } },
+    ],
+  });
+  const tiers = (id) => models.find((model) => model.id === id)?.reasoning?.efforts.map((effort) => effort.id);
+  assert.deepEqual(tiers("hy4-flash-free"), ["none", "high"]);
+  assert.deepEqual(tiers("deepseek-v4.1-flash-free"), ["low", "high", "max"]);
+  assert.equal(tiers("no-reasoning-free"), undefined);
+  assert.deepEqual(tiers("toggle-only-free"), ["none"], "a toggle without a list can still be switched off");
 });

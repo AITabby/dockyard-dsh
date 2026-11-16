@@ -10,6 +10,10 @@ export function defaultCatalogCachePath() {
   return join(home, "catalog-cache.json");
 }
 
+// Bumped whenever catalog shape/semantics change, so a stale entry from an
+// older build cannot keep serving old tiers or old free flags.
+const CATALOG_CACHE_VERSION = 2;
+
 function loadDiskCatalogCache(filePath) {
   try {
     if (!filePath || !existsSync(filePath)) return new Map();
@@ -18,7 +22,8 @@ function loadDiskCatalogCache(filePath) {
     const map = new Map();
     if (parsed && typeof parsed === "object") {
       for (const [providerId, entry] of Object.entries(parsed)) {
-        if (entry && Array.isArray(entry.value?.models) && entry.value.models.length > 0) {
+        if (entry && Array.isArray(entry.value?.models) && entry.value.models.length > 0
+          && Number(entry.version) === CATALOG_CACHE_VERSION) {
           map.set(providerId, {
             value: entry.value,
             fetchedAt: Number(entry.fetchedAt) || Date.now(),
@@ -475,7 +480,7 @@ export function createDockyardLlmAdapter({
         .then((catalog) => {
           if (Array.isArray(catalog?.models) && catalog.models.length > 0) {
             const previous = catalogCache.get(key)?.value;
-            catalogCache.set(key, { value: catalog, fetchedAt: Date.now() });
+            catalogCache.set(key, { value: catalog, fetchedAt: Date.now(), version: CATALOG_CACHE_VERSION });
             saveDiskCatalogCache(catalogCachePath, catalogCache);
             // Tell the host only when the set changed: an unchanged re-read used
             // to re-list models in DSH's picker forever.
@@ -505,7 +510,7 @@ export function createDockyardLlmAdapter({
       // rather than treating the upgrade as a cold cache.
       const legacy = catalogCache.get(provider);
       if (legacy) {
-        catalogCache.set(key, { ...legacy, fetchedAt: 0 });
+        catalogCache.set(key, { ...legacy, fetchedAt: 0, version: CATALOG_CACHE_VERSION });
         entry = catalogCache.get(key);
       }
     }

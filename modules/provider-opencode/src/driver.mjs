@@ -246,8 +246,36 @@ export const OPENCODE_VERIFIED_VARIANTS = Object.freeze({
   "minimax-m3.1-flash-free": ["low", "high"],
 });
 
+export const EFFORT_LABELS = Object.freeze({
+  none: "None",
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  max: "Max",
+  xhigh: "Extra High",
+});
+
+function reasoningFromZenCapabilities(capabilities) {
+  const reasoning = capabilities?.reasoning;
+  if (!reasoning?.supported) return null;
+  const ids = Array.isArray(reasoning.effort)
+    ? reasoning.effort.filter((value) => typeof value === "string" && value.length > 0)
+    : [];
+  // "toggle" means the tier can be turned off entirely, which is an effort the
+  // picker has to offer ("None" in the OpenCode app).
+  if (ids.length === 0 && reasoning.toggle === true) ids.push("none");
+  if (ids.length === 0) return null;
+  return {
+    efforts: ids.map((id) => ({ id, name: EFFORT_LABELS[id] ?? id })),
+  };
+}
+
 export function withVerifiedVariants(models) {
   return models.map((model) => {
+    // The Zen payload states the accepted tiers; the hand-verified table only
+    // covers CLI-only listings that carry no capabilities block.
+    if (model.reasoning?.efforts?.length) return model;
     if (!Object.hasOwn(OPENCODE_VERIFIED_VARIANTS, model.id)) return model;
     const variants = OPENCODE_VERIFIED_VARIANTS[model.id];
     if (variants.length === 0) {
@@ -312,14 +340,17 @@ export function parseOpencodeCatalog(data, { registry = [], installedIds = null 
         ? Math.min(regModel.maxTokens, 16384)
         : builtin?.maxTokens ?? 8192;
 
-    const reasoning = item?.reasoning
-      ? resolveReasoningFromModel(item)
-      : regModel
-        ? resolveReasoningFromModel(regModel)
-        : builtin?.reasoning;
+    const reasoning = reasoningFromZenCapabilities(item?.capabilities)
+      ?? (item?.reasoning
+        ? resolveReasoningFromModel(item)
+        : regModel
+          ? resolveReasoningFromModel(regModel)
+          : builtin?.reasoning);
 
     const inputModalities = Array.isArray(item?.modalities?.input)
-      ? item.modalities.input.filter((value) => typeof value === "string")
+      ? [...new Set(item.modalities.input
+        .filter((value) => typeof value === "string")
+        .map((value) => (value.startsWith("image/") ? "image" : value)))]
       : null;
     result.push({
       id,
