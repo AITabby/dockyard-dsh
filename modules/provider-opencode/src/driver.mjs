@@ -292,15 +292,22 @@ export function parseOpencodeCatalog(data, { registry = [], installedIds = null 
 
     const regModel = findOpencodeRegistryModel(id, registry);
     const builtin = builtinMap.get(id);
-    const isFree = isOpencodeFreeModelId(id);
+    // The Zen API prices every model; zero input price is the authoritative
+    // "free" signal. Id rules stay as the fallback for CLI-only listings.
+    const inputPrice = item?.cost?.text?.input?.price;
+    const isFree = typeof inputPrice === "number" ? inputPrice === 0 : isOpencodeFreeModelId(id);
     const name = stripVendorPrefix(stringValue(item?.name) ?? regModel?.name ?? builtin?.name ?? id).replace(/^openrouter\//, "");
-    const contextWindow = Number.isInteger(item?.contextWindow)
-      ? item.contextWindow
+    const contextWindow = Number.isInteger(item?.limit?.context)
+      ? item.limit.context
+      : Number.isInteger(item?.contextWindow)
+        ? item.contextWindow
       : Number.isInteger(regModel?.contextWindow)
         ? regModel.contextWindow
         : builtin?.contextWindow ?? 131072;
-    const maxTokens = Number.isInteger(item?.maxTokens)
-      ? Math.min(item.maxTokens, 16384)
+    const maxTokens = Number.isInteger(item?.limit?.output)
+      ? Math.min(item.limit.output, 16384)
+      : Number.isInteger(item?.maxTokens)
+        ? Math.min(item.maxTokens, 16384)
       : Number.isInteger(regModel?.maxTokens)
         ? Math.min(regModel.maxTokens, 16384)
         : builtin?.maxTokens ?? 8192;
@@ -311,11 +318,15 @@ export function parseOpencodeCatalog(data, { registry = [], installedIds = null 
         ? resolveReasoningFromModel(regModel)
         : builtin?.reasoning;
 
+    const inputModalities = Array.isArray(item?.modalities?.input)
+      ? item.modalities.input.filter((value) => typeof value === "string")
+      : null;
     result.push({
       id,
       name,
       contextWindow,
       maxTokens,
+      ...(inputModalities && inputModalities.length > 0 ? { inputModalities } : {}),
       // Publish the free tier so a spent account can still serve these models.
       ...(isFree ? { free: true } : {}),
       ...(reasoning ? { reasoning } : {}),
@@ -358,18 +369,16 @@ export function createOpencodeCatalogLoader({
       const registry = typeof registryLoader === "function" ? await registryLoader().catch(() => []) : [];
       const cliPath = findOpencodeCliPath();
       const installedIds = cliPath ? await queryInstalledOpencodeCliModelIds(cliPath) : null;
-      if (catalogUrl === DEFAULT_CATALOG_URL && fetchImpl === fetch) {
-        cached = freeTierCatalog(parseOpencodeCatalog(null, { registry, installedIds }));
-        cachedAt = Date.now();
-        return cached;
-      }
       try {
-        const data = await fetchJson(validatedUrl, {
-          headers: { Accept: "application/json" },
-          fetchImpl,
-          timeoutMs,
-        });
-        cached = freeTierCatalog(parseOpencodeCatalog(data, { registry, installedIds }));
+        // fetchJson answers { body, response }; options belong in its third
+        // argument. Treating the wrapper as the payload silently fell back to
+        // the 15 builtin models on every platform without a desktop CLI.
+        const { body } = await fetchJson(
+          validatedUrl,
+          { headers: { Accept: "application/json" } },
+          { fetchImpl, timeoutMs },
+        );
+        cached = freeTierCatalog(parseOpencodeCatalog(body, { registry, installedIds }));
       } catch {
         cached = freeTierCatalog(parseOpencodeCatalog(null, { registry, installedIds }));
       }

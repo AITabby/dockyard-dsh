@@ -621,3 +621,32 @@ test("only the reasoning variants the Zen server accepts are offered", async () 
   assert.deepEqual(models[1].reasoning.efforts.map((effort) => effort.id), OPENCODE_VERIFIED_VARIANTS["deepseek-v4.1-flash-free"]);
   assert.deepEqual(models[2].reasoning.efforts.map((effort) => effort.id), ["high"], "unverified models keep their registry tiers");
 });
+
+test("the Zen payload decides price, limits and modalities", async () => {
+  // The live API states cost directly: zero input price is free, and limit.*
+  // carries the real context/output window.
+  const { parseOpencodeCatalog } = await import("../modules/provider-opencode/src/driver.mjs");
+  const { models } = parseOpencodeCatalog({
+    data: [
+      {
+        id: "paid-model",
+        name: "Paid Model",
+        cost: { text: { input: { price: 3 }, output: { price: 15 } } },
+        limit: { context: 200000, output: 64000 },
+        modalities: { input: ["text", "image"] },
+      },
+      {
+        id: "free-model",
+        name: "Free Model",
+        cost: { text: { input: { price: 0 }, output: { price: 0 } } },
+        limit: { context: 128000, output: 8192 },
+      },
+    ],
+  });
+  assert.equal(models[0].free, undefined, "a priced model is not free");
+  assert.equal(models[0].contextWindow, 200000);
+  assert.equal(models[0].maxTokens, 16384, "output window is capped for DSH budgeting");
+  assert.deepEqual(models[0].inputModalities, ["text", "image"]);
+  assert.equal(models[1].free, true);
+  assert.equal(models[1].contextWindow, 128000);
+});

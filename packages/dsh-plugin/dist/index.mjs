@@ -13953,6 +13953,19 @@ function findOpencodeCliPath() {
     } catch {
     }
   }
+  const home = homedir11();
+  const candidates = [
+    join12(home, ".opencode", "bin", process.platform === "win32" ? "opencode.exe" : "opencode"),
+    join12(home, ".local", "bin", "opencode"),
+    "/usr/local/bin/opencode",
+    "/opt/homebrew/bin/opencode",
+    process.env.LOCALAPPDATA ? join12(process.env.LOCALAPPDATA, "opencode", "bin", "opencode.exe") : null,
+    process.env.APPDATA ? join12(process.env.APPDATA, "opencode", "bin", "opencode.exe") : null,
+    join12(home, "AppData", "Local", "opencode", "bin", "opencode.exe")
+  ];
+  for (const candidate2 of candidates) {
+    if (candidate2 && existsSync4(candidate2)) return candidate2;
+  }
   return null;
 }
 function opencodeCliModelCachePath() {
@@ -15178,16 +15191,19 @@ function parseOpencodeCatalog(data, { registry = [], installedIds = null } = {})
     seen.add(id);
     const regModel = findOpencodeRegistryModel(id, registry);
     const builtin = builtinMap.get(id);
-    const isFree = isOpencodeFreeModelId(id);
+    const inputPrice = item?.cost?.text?.input?.price;
+    const isFree = typeof inputPrice === "number" ? inputPrice === 0 : isOpencodeFreeModelId(id);
     const name2 = stripVendorPrefix(stringValue(item?.name) ?? regModel?.name ?? builtin?.name ?? id).replace(/^openrouter\//, "");
-    const contextWindow = Number.isInteger(item?.contextWindow) ? item.contextWindow : Number.isInteger(regModel?.contextWindow) ? regModel.contextWindow : builtin?.contextWindow ?? 131072;
-    const maxTokens = Number.isInteger(item?.maxTokens) ? Math.min(item.maxTokens, 16384) : Number.isInteger(regModel?.maxTokens) ? Math.min(regModel.maxTokens, 16384) : builtin?.maxTokens ?? 8192;
+    const contextWindow = Number.isInteger(item?.limit?.context) ? item.limit.context : Number.isInteger(item?.contextWindow) ? item.contextWindow : Number.isInteger(regModel?.contextWindow) ? regModel.contextWindow : builtin?.contextWindow ?? 131072;
+    const maxTokens = Number.isInteger(item?.limit?.output) ? Math.min(item.limit.output, 16384) : Number.isInteger(item?.maxTokens) ? Math.min(item.maxTokens, 16384) : Number.isInteger(regModel?.maxTokens) ? Math.min(regModel.maxTokens, 16384) : builtin?.maxTokens ?? 8192;
     const reasoning = item?.reasoning ? resolveReasoningFromModel(item) : regModel ? resolveReasoningFromModel(regModel) : builtin?.reasoning;
+    const inputModalities = Array.isArray(item?.modalities?.input) ? item.modalities.input.filter((value) => typeof value === "string") : null;
     result.push({
       id,
       name: name2,
       contextWindow,
       maxTokens,
+      ...inputModalities && inputModalities.length > 0 ? { inputModalities } : {},
       // Publish the free tier so a spent account can still serve these models.
       ...isFree ? { free: true } : {},
       ...reasoning ? { reasoning } : {}
@@ -15220,18 +15236,13 @@ function createOpencodeCatalogLoader({
       const registry = typeof registryLoader === "function" ? await registryLoader().catch(() => []) : [];
       const cliPath = findOpencodeCliPath();
       const installedIds = cliPath ? await queryInstalledOpencodeCliModelIds(cliPath) : null;
-      if (catalogUrl === DEFAULT_CATALOG_URL && fetchImpl === fetch) {
-        cached = freeTierCatalog(parseOpencodeCatalog(null, { registry, installedIds }));
-        cachedAt = Date.now();
-        return cached;
-      }
       try {
-        const data = await fetchJson(validatedUrl, {
-          headers: { Accept: "application/json" },
-          fetchImpl,
-          timeoutMs
-        });
-        cached = freeTierCatalog(parseOpencodeCatalog(data, { registry, installedIds }));
+        const { body } = await fetchJson(
+          validatedUrl,
+          { headers: { Accept: "application/json" } },
+          { fetchImpl, timeoutMs }
+        );
+        cached = freeTierCatalog(parseOpencodeCatalog(body, { registry, installedIds }));
       } catch {
         cached = freeTierCatalog(parseOpencodeCatalog(null, { registry, installedIds }));
       }

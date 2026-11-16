@@ -22,6 +22,9 @@ const PROVIDER_ID = "opencode";
 const DEFAULT_ENDPOINT = "https://opencode.ai/inference/openai/v1/chat/completions";
 
 export function findOpencodeCliPath() {
+  // The desktop app ships its own CLI; the standalone installer puts one on
+  // PATH. Only the macOS app path used to be probed, so Windows always fell
+  // back to the builtin model list.
   const appSupportCliDir = join(homedir(), "Library/Application Support/ai.opencode.desktop/cli");
   if (existsSync(appSupportCliDir)) {
     try {
@@ -31,6 +34,19 @@ export function findOpencodeCliPath() {
         if (existsSync(candidate)) return candidate;
       }
     } catch {}
+  }
+  const home = homedir();
+  const candidates = [
+    join(home, ".opencode", "bin", process.platform === "win32" ? "opencode.exe" : "opencode"),
+    join(home, ".local", "bin", "opencode"),
+    "/usr/local/bin/opencode",
+    "/opt/homebrew/bin/opencode",
+    process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "opencode", "bin", "opencode.exe") : null,
+    process.env.APPDATA ? join(process.env.APPDATA, "opencode", "bin", "opencode.exe") : null,
+    join(home, "AppData", "Local", "opencode", "bin", "opencode.exe"),
+  ];
+  for (const candidate of candidates) {
+    if (candidate && existsSync(candidate)) return candidate;
   }
   return null;
 }
