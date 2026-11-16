@@ -232,6 +232,33 @@ function findOpencodeRegistryModel(id, registry) {
   return null;
 }
 
+/**
+ * Reasoning variants the Zen server actually accepts, verified against the live
+ * endpoint. Registry-derived guesses broke whole turns with "Variant
+ * unavailable", so any model listed here uses exactly this list — an empty list
+ * means the model takes no variant at all and gets no tier selector.
+ */
+export const OPENCODE_VERIFIED_VARIANTS = Object.freeze({
+  "big-pickle": [],
+  "mimo-v2.6-flash-free": [],
+  "deepseek-v4.1-flash-free": ["high", "max"],
+  "glm-5.3-flash-free": ["high", "max"],
+  "minimax-m3.1-flash-free": ["low", "high"],
+});
+
+export function withVerifiedVariants(models) {
+  return models.map((model) => {
+    if (!Object.hasOwn(OPENCODE_VERIFIED_VARIANTS, model.id)) return model;
+    const variants = OPENCODE_VERIFIED_VARIANTS[model.id];
+    if (variants.length === 0) {
+      const { reasoning: _drop, ...rest } = model;
+      return rest;
+    }
+    const efforts = variants.map((id) => ({ id, name: id.charAt(0).toUpperCase() + id.slice(1) }));
+    return { ...model, reasoning: { efforts, defaultEffort: variants.at(-1) } };
+  });
+}
+
 export function parseOpencodeCatalog(data, { registry = [], installedIds = null } = {}) {
   const models = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
   if (!models.length) {
@@ -250,9 +277,9 @@ export function parseOpencodeCatalog(data, { registry = [], installedIds = null 
           ...(isOpencodeFreeModelId(id) ? { free: true } : {}),
         };
       });
-      return { models: installedModels };
+      return { models: withVerifiedVariants(installedModels) };
     }
-    return { models: [...BUILTIN_OPENCODE_FREE_MODELS] };
+    return { models: withVerifiedVariants([...BUILTIN_OPENCODE_FREE_MODELS]) };
   }
 
   const builtinMap = new Map(BUILTIN_OPENCODE_FREE_MODELS.map((m) => [m.id, m]));
@@ -295,7 +322,7 @@ export function parseOpencodeCatalog(data, { registry = [], installedIds = null 
     });
   }
 
-  return { models: result.length > 0 ? result : [...BUILTIN_OPENCODE_FREE_MODELS] };
+  return { models: withVerifiedVariants(result.length > 0 ? result : [...BUILTIN_OPENCODE_FREE_MODELS]) };
 }
 
 /**

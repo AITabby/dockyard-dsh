@@ -607,3 +607,17 @@ test("the free tier hides paid Zen models unless asked for them", async () => {
     else process.env.DOCKYARD_OPENCODE_ALL_MODELS = previous;
   }
 });
+
+test("only the reasoning variants the Zen server accepts are offered", async () => {
+  // Registry guesses ("minimal" on big-pickle) made the provider reject the
+  // whole turn, so tiers follow the verified table instead.
+  const { OPENCODE_VERIFIED_VARIANTS, withVerifiedVariants } = await import("../modules/provider-opencode/src/driver.mjs");
+  const models = withVerifiedVariants([
+    { id: "big-pickle", reasoning: { efforts: [{ id: "low" }, { id: "high" }], defaultEffort: "low" } },
+    { id: "deepseek-v4.1-flash-free", reasoning: { efforts: [{ id: "minimal" }] } },
+    { id: "untouched-model", reasoning: { efforts: [{ id: "high" }] } },
+  ]);
+  assert.equal(models[0].reasoning, undefined, "a model that takes no variant offers no tiers");
+  assert.deepEqual(models[1].reasoning.efforts.map((effort) => effort.id), OPENCODE_VERIFIED_VARIANTS["deepseek-v4.1-flash-free"]);
+  assert.deepEqual(models[2].reasoning.efforts.map((effort) => effort.id), ["high"], "unverified models keep their registry tiers");
+});

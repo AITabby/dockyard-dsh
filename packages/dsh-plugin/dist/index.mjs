@@ -14614,6 +14614,24 @@ function createOpencodeNativeExecutor({
           }
           return;
         } catch (error) {
+          const variantRejected = !emitted && !signal?.aborted && /variant unavailable/i.test(String(error?.message ?? ""));
+          if (variantRejected) {
+            try {
+              for await (const event of runViaOpencodeServer({
+                server,
+                request: { ...request, reasoningEffort: void 0, reasoning_effort: void 0 },
+                signal,
+                fetchImpl,
+                timeoutMs
+              })) {
+                emitted = true;
+                yield event;
+              }
+              return;
+            } catch (retryError) {
+              if (emitted || signal?.aborted) throw retryError;
+            }
+          }
           if (emitted || signal?.aborted) throw error;
         }
       }
@@ -15112,6 +15130,25 @@ function findOpencodeRegistryModel(id, registry) {
   }
   return null;
 }
+var OPENCODE_VERIFIED_VARIANTS = Object.freeze({
+  "big-pickle": [],
+  "mimo-v2.6-flash-free": [],
+  "deepseek-v4.1-flash-free": ["high", "max"],
+  "glm-5.3-flash-free": ["high", "max"],
+  "minimax-m3.1-flash-free": ["low", "high"]
+});
+function withVerifiedVariants(models) {
+  return models.map((model) => {
+    if (!Object.hasOwn(OPENCODE_VERIFIED_VARIANTS, model.id)) return model;
+    const variants = OPENCODE_VERIFIED_VARIANTS[model.id];
+    if (variants.length === 0) {
+      const { reasoning: _drop, ...rest } = model;
+      return rest;
+    }
+    const efforts = variants.map((id) => ({ id, name: id.charAt(0).toUpperCase() + id.slice(1) }));
+    return { ...model, reasoning: { efforts, defaultEffort: variants.at(-1) } };
+  });
+}
 function parseOpencodeCatalog(data, { registry = [], installedIds = null } = {}) {
   const models = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
   if (!models.length) {
@@ -15128,9 +15165,9 @@ function parseOpencodeCatalog(data, { registry = [], installedIds = null } = {})
           ...isOpencodeFreeModelId(id) ? { free: true } : {}
         };
       });
-      return { models: installedModels };
+      return { models: withVerifiedVariants(installedModels) };
     }
-    return { models: [...BUILTIN_OPENCODE_FREE_MODELS] };
+    return { models: withVerifiedVariants([...BUILTIN_OPENCODE_FREE_MODELS]) };
   }
   const builtinMap = new Map(BUILTIN_OPENCODE_FREE_MODELS.map((m) => [m.id, m]));
   const result = [];
@@ -15156,7 +15193,7 @@ function parseOpencodeCatalog(data, { registry = [], installedIds = null } = {})
       ...reasoning ? { reasoning } : {}
     });
   }
-  return { models: result.length > 0 ? result : [...BUILTIN_OPENCODE_FREE_MODELS] };
+  return { models: withVerifiedVariants(result.length > 0 ? result : [...BUILTIN_OPENCODE_FREE_MODELS]) };
 }
 function freeTierCatalog(catalog) {
   if (String(process.env.DOCKYARD_OPENCODE_ALL_MODELS ?? "") === "1") return catalog;

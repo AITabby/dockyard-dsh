@@ -764,6 +764,27 @@ export function createOpencodeNativeExecutor({
           }
           return;
         } catch (error) {
+          // A tier the model does not take must not kill the turn: retry once at
+          // the model's default variant before giving up.
+          const variantRejected = !emitted && !signal?.aborted
+            && /variant unavailable/i.test(String(error?.message ?? ""));
+          if (variantRejected) {
+            try {
+              for await (const event of runViaOpencodeServer({
+                server,
+                request: { ...request, reasoningEffort: undefined, reasoning_effort: undefined },
+                signal,
+                fetchImpl,
+                timeoutMs,
+              })) {
+                emitted = true;
+                yield event;
+              }
+              return;
+            } catch (retryError) {
+              if (emitted || signal?.aborted) throw retryError;
+            }
+          }
           // Fall back to the CLI transport only when the server path failed
           // before it produced anything (otherwise we would duplicate output).
           if (emitted || signal?.aborted) throw error;
