@@ -13,6 +13,7 @@ import { createGrokCatalogLoader, createGrokNativeExecutor } from "../../../modu
 import { createClaudeCatalogLoader, createClaudeNativeExecutor } from "../../../modules/provider-claude/src/index.mjs";
 import { createAgentRouterCatalogLoader, createAgentRouterNativeExecutor } from "../../../modules/provider-agentrouter/src/index.mjs";
 import { createCursorCatalogLoader, createCursorNativeExecutor } from "../../../modules/provider-cursor/src/index.mjs";
+import { createOpencodeCatalogLoader, createOpencodeNativeExecutor } from "../../../modules/provider-opencode/src/index.mjs";
 import { createCommandCodeCatalogLoader, createCommandCodeNativeExecutor } from "../../../modules/provider-commandcode/src/index.mjs";
 import { createHermesCatalogLoader, createHermesNativeExecutor } from "../../../modules/provider-hermes/src/index.mjs";
 import { createOpenRouterFreeCatalogLoader, createOpenRouterFreeNativeExecutor } from "../../../modules/provider-openrouter-free/src/index.mjs";
@@ -82,6 +83,7 @@ export function apply(ctx, config = {}) {
       }),
       claude: runtimeOptions.requestExecutors?.claude ?? createClaudeNativeExecutor(runtimeOptions.claude ?? {}),
       cursor: runtimeOptions.requestExecutors?.cursor ?? createCursorNativeExecutor(runtimeOptions.cursor ?? {}),
+      opencode: runtimeOptions.requestExecutors?.opencode ?? createOpencodeNativeExecutor(runtimeOptions.opencode ?? {}),
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
       commandcode: runtimeOptions.requestExecutors?.commandcode ?? createCommandCodeNativeExecutor(runtimeOptions.commandcode ?? {}),
       hermes: runtimeOptions.requestExecutors?.hermes ?? createHermesNativeExecutor(runtimeOptions.hermes ?? {}),
@@ -99,6 +101,10 @@ export function apply(ctx, config = {}) {
       }),
       claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
+      opencode: runtimeOptions.catalogLoaders?.opencode ?? createOpencodeCatalogLoader({
+        ...(runtimeOptions.opencode ?? {}),
+        registryLoader: modelRegistryLoader,
+      }),
       commandcode: runtimeOptions.catalogLoaders?.commandcode ?? createCommandCodeCatalogLoader(runtimeOptions.commandcode ?? {}),
       hermes: runtimeOptions.catalogLoaders?.hermes ?? createHermesCatalogLoader(runtimeOptions.hermes ?? {}),
       "openrouter-free": runtimeOptions.catalogLoaders?.["openrouter-free"] ?? createOpenRouterFreeCatalogLoader(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {}),

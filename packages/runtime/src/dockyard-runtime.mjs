@@ -250,6 +250,15 @@ export function createDefaultProviderEntries(options = {}) {
       driver: options.cursorDriver,
     },
     {
+      module: createOpencodeModule({
+        driver: options.opencodeDriver ?? createOpencodeDriver({
+          ...withRequestExecutor("opencode", options.opencode, requestExecutors),
+          ...(catalogLoaders.opencode ? { catalogLoader: catalogLoaders.opencode } : {}),
+        }),
+      }),
+      driver: options.opencodeDriver,
+    },
+    {
       module: createCommandCodeModule({
         driver: options.commandcodeDriver ?? createCommandCodeDriver({
           ...withRequestExecutor("commandcode", options.commandcode, requestExecutors),
@@ -393,17 +402,13 @@ export class DockyardRuntime {
     if (this.#preparePromise) return this.#preparePromise;
     this.#preparePromise = (async () => {
       const state = await this.stateStore.load();
-      if (state?.pools?.opencode || state?.pools?.kilo || state?.modelSelection?.providers?.opencode || state?.modelSelection?.providers?.kilo) {
+      // Kilo stays retired; OpenCode is registered again, so only its old
+      // credentials are cleared out of the state file.
+      if (state?.pools?.kilo || state?.modelSelection?.providers?.kilo) {
         if (typeof this.stateStore.update === "function") {
           await this.stateStore.update((latest) => {
-            if (latest?.pools) {
-              delete latest.pools.opencode;
-              delete latest.pools.kilo;
-            }
-            if (latest?.modelSelection?.providers) {
-              delete latest.modelSelection.providers.opencode;
-              delete latest.modelSelection.providers.kilo;
-            }
+            if (latest?.pools) delete latest.pools.kilo;
+            if (latest?.modelSelection?.providers) delete latest.modelSelection.providers.kilo;
             return latest;
           }).catch(() => {});
         }

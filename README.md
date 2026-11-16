@@ -30,7 +30,7 @@ Dockyard DSH 把多个官方 OAuth 授权和官方客户端会话接入 DeepSeek
 
 官方客户端、CLI 或 OAuth 源缺失时，Dockyard 明确返回 `unavailable` / `degraded`；**不会用硬编码的账号、模型、版本、套餐或额度伪造可用结果**。
 
-> OpenCode 与 Kilo 在早期版本里出现过，现已移出插件：两者的免费额度不对第三方客户端开放（OpenCode 的免费档位只认官方客户端身份），留着只会给出不可用的假象。
+> OpenCode 已重新接入：它的免费档位只认官方客户端身份，因此请求会带上官方 CLI 的标识头（`user-agent: opencode/...` / `x-opencode-client: cli`），与早期版本做法一致。Kilo 仍然移出插件。
 
 ### 关键能力
 
@@ -215,7 +215,7 @@ Dockyard DSH connects official OAuth authorizations and official client sessions
 
 When an official client, CLI, or OAuth source is missing, Dockyard reports an explicit `unavailable` / `degraded` state. It never invents accounts, models, versions, plans, or quota values.
 
-> OpenCode and Kilo appeared in early builds and have been removed: neither free tier is open to third-party clients (OpenCode grants it to the official client identity only), so keeping them would only promise something unusable.
+> OpenCode is registered again: its free tier is granted to the official client identity only, so requests carry the official CLI's identity headers (`user-agent: opencode/...`, `x-opencode-client: cli`), same as early builds did. Kilo stays removed.
 
 ### What you get
 

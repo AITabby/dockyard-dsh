@@ -1018,8 +1018,8 @@ var init_dockyard_remote_host = __esm({
 });
 
 // packages/dsh-plugin/src/index.mjs
-import { existsSync as existsSync7, readFileSync as readFileSync6 } from "node:fs";
-import { join as join18 } from "node:path";
+import { existsSync as existsSync8, readFileSync as readFileSync6 } from "node:fs";
+import { join as join19 } from "node:path";
 
 // packages/core/src/errors.mjs
 var DockyardError = class extends Error {
@@ -13933,7 +13933,953 @@ function createCursorModule({ driver = {} } = {}) {
   });
 }
 
+// modules/provider-opencode/src/native-transport.mjs
+import { execFileSync as execFileSync4 } from "node:child_process";
+import { randomBytes as randomBytes4 } from "node:crypto";
+import { existsSync as existsSync4, readdirSync } from "node:fs";
+import { homedir as homedir11 } from "node:os";
+import { join as join12 } from "node:path";
+import readline from "node:readline";
+var PROVIDER_ID10 = "opencode";
+var DEFAULT_ENDPOINT5 = "https://opencode.ai/inference/openai/v1/chat/completions";
+function findOpencodeCliPath() {
+  const appSupportCliDir = join12(homedir11(), "Library/Application Support/ai.opencode.desktop/cli");
+  if (existsSync4(appSupportCliDir)) {
+    try {
+      const entries = readdirSync(appSupportCliDir);
+      for (const entry of entries) {
+        const candidate2 = join12(appSupportCliDir, entry, "opencode-cli");
+        if (existsSync4(candidate2)) return candidate2;
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+function queryInstalledOpencodeCliModelIds(cliPath) {
+  if (!cliPath || !existsSync4(cliPath)) return null;
+  try {
+    const stdout = execFileSync4(cliPath, ["models"], { encoding: "utf8", timeout: 5e3 });
+    const ids = stdout.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.startsWith("opencode/") ? line.slice("opencode/".length) : line);
+    if (ids.length > 0) return ids;
+  } catch {
+  }
+  return null;
+}
+var DEFAULT_OPENCODE_MAX_MESSAGES = 40;
+var OPENCODE_SLIDING_WINDOW_QUANTUM = 10;
+function resolveOpencodeMaxMessages(request = {}) {
+  const envLimit = Number.parseInt(process.env.DOCKYARD_OPENCODE_MAX_MESSAGES ?? "", 10);
+  if (Number.isSafeInteger(envLimit) && envLimit > 0) return envLimit;
+  if (Number.isSafeInteger(request?.maxMessages) && request.maxMessages > 0) return request.maxMessages;
+  const contextWindow = request?.modelContext?.contextWindow ?? request?.contextWindow;
+  if (Number.isSafeInteger(contextWindow) && contextWindow >= 5e5) {
+    return 500;
+  }
+  return DEFAULT_OPENCODE_MAX_MESSAGES;
+}
+function compactMessagesForOpencode(messages, { maxMessages = DEFAULT_OPENCODE_MAX_MESSAGES, quantum = OPENCODE_SLIDING_WINDOW_QUANTUM } = {}) {
+  if (!Array.isArray(messages) || messages.length <= maxMessages) return messages;
+  const initialIndex = messages.findIndex((m) => m?.role === "user" || m?.role === "system");
+  const prefix = initialIndex >= 0 ? [messages[initialIndex]] : [];
+  const rawWindowCount = Math.max(10, maxMessages - prefix.length - 1);
+  const excess = messages.length - maxMessages;
+  const quantOffset = excess > 0 ? Math.floor(excess / quantum) * quantum : 0;
+  const windowCount = Math.max(10, rawWindowCount + (excess - quantOffset));
+  const recent = messages.slice(-windowCount);
+  const startIndex = messages.length - windowCount;
+  if (startIndex > 0) {
+    const firstRecent = recent[0];
+    const isToolResult = firstRecent?.role === "tool" || Array.isArray(firstRecent?.content) && firstRecent.content.some((part) => part?.type === "tool-result" || part?.type === "tool_result");
+    if (isToolResult && messages[startIndex - 1]) {
+      recent.unshift(messages[startIndex - 1]);
+    }
+  }
+  const compactedCount = messages.length - prefix.length - recent.length;
+  if (compactedCount <= 0) return messages;
+  const milestone = {
+    role: "user",
+    content: "[System Note: Context sliding window active. Intermediate messages were compacted to maintain low latency and prevent token exhaustion. Initial requirements and recent active turns are preserved.]"
+  };
+  return [...prefix, milestone, ...recent];
+}
+function contentPartText(part) {
+  if (typeof part === "string") return part;
+  if (!part || typeof part !== "object") return "";
+  if (part.type === "reasoning" || part.type === "thinking") return "";
+  if (part.type === "tool-call" || part.type === "function-call" || part.type === "tooluse") {
+    const name2 = part.name ?? part.function?.name ?? "tool";
+    return `[Tool Call: ${name2}]`;
+  }
+  if (part.type === "tool-result" || part.type === "tool_result") {
+    const text3 = textFromContent(part.content ?? part.output ?? part.result ?? part.text);
+    const trimmed = text3.length > 8192 ? `${text3.slice(0, 8192)}... [truncated]` : text3;
+    return `[Tool Result ${part.toolCallId ?? part.id ?? ""}]:
+${trimmed}`;
+  }
+  return textFromContent(part);
+}
+function promptFromRequest(request) {
+  if (typeof request.prompt === "string" && request.prompt.trim()) {
+    return request.prompt;
+  }
+  const isCompaction = request.purpose === "compaction";
+  const defaultInstruction = isCompaction ? "You are an AI assistant summarizing the conversation. Reply directly with a concise text summary. Do not invoke tools or commands." : "You are an AI assistant. Reply directly to the user in text. Do not invoke tools or commands under any circumstances.";
+  const rawMessages = Array.isArray(request.messages) ? request.messages : [];
+  const messages = isCompaction ? rawMessages : compactMessagesForOpencode(rawMessages, { maxMessages: resolveOpencodeMaxMessages(request) });
+  const parts = [];
+  const systemText = typeof request.system === "string" && request.system.trim() ? `${defaultInstruction}
+
+${request.system.trim()}` : defaultInstruction;
+  parts.push(`[System instructions: ${systemText}]`);
+  for (const msg of messages) {
+    const role = msg?.role === "assistant" ? "Assistant" : msg?.role === "system" ? "System" : "User";
+    const text3 = typeof msg?.content === "string" ? msg.content : Array.isArray(msg?.content) ? msg.content.map(contentPartText).filter(Boolean).join("\n") : contentPartText(msg?.content);
+    if (text3) {
+      parts.push(`${role}: ${text3}`);
+    }
+  }
+  if (parts.length > 0) return parts.join("\n\n");
+  return typeof request.prompt === "string" ? request.prompt : "";
+}
+function firstString9(...values) {
+  return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
+}
+function toolCallPart3(part) {
+  const type = String(part?.type ?? "").toLowerCase().replace(/[_-]/g, "");
+  return type === "toolcall" || type === "functioncall" || type === "tooluse" ? part : null;
+}
+async function openAiContent2(content, attachments) {
+  const values = Array.isArray(content) ? content : [content];
+  const blocks = [];
+  for (const part of values) {
+    if (typeof part === "string") {
+      if (part) blocks.push({ type: "text", text: part });
+      continue;
+    }
+    if (!part || typeof part !== "object") continue;
+    if (part.type === "image") {
+      const image = await resolveImageData(part, attachments);
+      if (!image) throw nativeProviderError(PROVIDER_ID10, "image attachment could not be resolved");
+      blocks.push({ type: "image_url", image_url: { url: `data:${image.mediaType};base64,${image.data}` } });
+      continue;
+    }
+    if (part.type === "tool-result" || part.type === "tool_result") {
+      blocks.push({
+        type: "text",
+        text: `[Tool Result ${part.toolCallId ?? part.id ?? ""}]
+${textFromContent(part.content ?? part.output ?? part.result ?? part.text)}`
+      });
+      continue;
+    }
+    const call = toolCallPart3(part);
+    if (call) {
+      blocks.push({
+        type: "text",
+        text: `[Tool Call ${call.name ?? call.function?.name ?? "tool"}] ${JSON.stringify(parseToolArguments(call.arguments ?? call.input ?? call.function?.arguments))}`
+      });
+      continue;
+    }
+    const text3 = textFromContent(part);
+    if (text3) blocks.push({ type: "text", text: text3 });
+  }
+  return blocks;
+}
+async function buildOpencodeMessages(request, attachments) {
+  const result = [];
+  if (typeof request.system === "string" && request.system.length > 0) {
+    result.push({ role: "system", content: request.system });
+  }
+  const rawMessages = Array.isArray(request.messages) ? request.messages : [];
+  const messages = request.purpose === "compaction" ? rawMessages : compactMessagesForOpencode(rawMessages, { maxMessages: resolveOpencodeMaxMessages(request) });
+  for (const message of messages) {
+    const role = message?.role === "assistant" ? "assistant" : message?.role === "tool" ? "tool" : "user";
+    if (role === "tool") {
+      result.push({
+        role: "tool",
+        tool_call_id: sanitizeToolCallId(firstString9(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
+        content: textFromContent(message.content ?? message.text ?? message.output ?? message.result)
+      });
+      continue;
+    }
+    const content = await openAiContent2(message?.content ?? message?.text, attachments);
+    result.push({
+      role,
+      content: content.length === 1 && content[0]?.type === "text" ? content[0].text : content
+    });
+  }
+  return result;
+}
+var OPENCODE_SERVER_START_TIMEOUT_MS = 15e3;
+var OPENCODE_SERVER_READY_PATTERN = /server listening on (http:\/\/127\.0\.0\.1:\d+)/i;
+var serverChild = null;
+var serverUrl = null;
+var serverPassword = null;
+var serverStarting = null;
+function opencodeServerAuth(password) {
+  return `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`;
+}
+function abortSignalError(signal) {
+  const reason = signal?.reason;
+  if (reason instanceof Error) return reason;
+  const error = new Error("The operation was aborted");
+  error.name = "AbortError";
+  return error;
+}
+function opencodeDebug(...args) {
+  if (process.env.OPENCODE_TRANSPORT_DEBUG) {
+    console.error("[opencode-transport]", ...args);
+  }
+}
+async function startOpencodeServer(cliPath) {
+  opencodeDebug("starting local server", cliPath);
+  const password = randomBytes4(24).toString("base64url");
+  const child = spawnCli(cliPath, ["serve", "--hostname", "127.0.0.1", "--port", "0"], {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, OPENCODE_PASSWORD: password }
+  });
+  let diagnostics = "";
+  child.stderr?.on("data", (chunk) => {
+    diagnostics = `${diagnostics}${String(chunk)}`.slice(-4e3);
+  });
+  let url;
+  try {
+    url = await new Promise((resolve2, reject) => {
+      let buffer = "";
+      let timer = null;
+      let settled = false;
+      const settle = (error, value) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        child.stdout?.off?.("data", onStdout);
+        child.off?.("exit", onExit);
+        child.off?.("error", onError);
+        if (error) reject(error);
+        else resolve2(value);
+      };
+      const onStdout = (chunk) => {
+        buffer += String(chunk);
+        const match = buffer.match(OPENCODE_SERVER_READY_PATTERN);
+        if (match) settle(null, match[1]);
+      };
+      const onExit = (code, exitSignal) => {
+        settle(
+          new Error(
+            `OpenCode \u672C\u5730\u670D\u52A1\u63D0\u524D\u9000\u51FA (code ${code ?? "null"}, signal ${exitSignal ?? "null"})${diagnostics ? `: ${diagnostics.trim()}` : ""}`
+          )
+        );
+      };
+      const onError = (error) => settle(error);
+      timer = setTimeout(() => {
+        settle(new Error(`OpenCode \u672C\u5730\u670D\u52A1\u542F\u52A8\u8D85\u65F6${diagnostics ? `: ${diagnostics.trim()}` : ""}`));
+      }, OPENCODE_SERVER_START_TIMEOUT_MS);
+      child.stdout?.on("data", onStdout);
+      child.once("exit", onExit);
+      child.once("error", onError);
+    });
+  } catch (error) {
+    try {
+      child.kill();
+    } catch {
+    }
+    throw error;
+  }
+  child.stdout?.on("data", () => {
+  });
+  child.stderr?.on("data", () => {
+  });
+  child.unref?.();
+  child.stdout?.unref?.();
+  child.stderr?.unref?.();
+  const info = { child, url, password };
+  opencodeDebug("local server ready", url);
+  child.once("exit", () => {
+    if (serverChild === child) {
+      serverChild = null;
+      serverUrl = null;
+      serverPassword = null;
+    }
+  });
+  process.once("exit", () => {
+    try {
+      child.kill();
+    } catch {
+    }
+  });
+  return info;
+}
+async function ensureOpencodeServer(cliPath) {
+  if (serverUrl && serverChild && serverChild.exitCode === null) {
+    return { child: serverChild, url: serverUrl, password: serverPassword };
+  }
+  if (serverStarting) return serverStarting;
+  serverStarting = startOpencodeServer(cliPath).then((info) => {
+    serverChild = info.child;
+    serverUrl = info.url;
+    serverPassword = info.password;
+    serverStarting = null;
+    return info;
+  }).catch((error) => {
+    serverStarting = null;
+    throw error;
+  });
+  return serverStarting;
+}
+async function opencodeServerRequest(server, method, path2, body, { signal, fetchImpl = fetch } = {}) {
+  let response;
+  try {
+    response = await fetchImpl(`${server.url}${path2}`, {
+      method,
+      headers: {
+        Authorization: opencodeServerAuth(server.password),
+        ...body !== void 0 ? { "Content-Type": "application/json" } : {}
+      },
+      ...body !== void 0 ? { body: JSON.stringify(body) } : {},
+      ...signal ? { signal } : {}
+    });
+  } catch (error) {
+    if (signal?.aborted) throw abortSignalError(signal);
+    throw error;
+  }
+  if (!response.ok) {
+    const details = await response.text().catch(() => "");
+    throw nativeProviderError(
+      PROVIDER_ID10,
+      `OpenCode \u672C\u5730\u670D\u52A1\u8BF7\u6C42\u5931\u8D25 (${method} ${path2}): ${response.status}${details ? ` ${details.slice(0, 500)}` : ""}`
+    );
+  }
+  if (response.status === 204) return null;
+  const text3 = await response.text();
+  if (!text3) return null;
+  try {
+    return JSON.parse(text3);
+  } catch {
+    return null;
+  }
+}
+async function openOpencodeEventStream(server, sessionId, { signal, fetchImpl = fetch, idleTimeoutMs = 6e4 } = {}) {
+  let response;
+  try {
+    response = await fetchImpl(`${server.url}/api/event`, {
+      headers: {
+        Authorization: opencodeServerAuth(server.password),
+        Accept: "text/event-stream"
+      },
+      ...signal ? { signal } : {}
+    });
+  } catch (error) {
+    if (signal?.aborted) throw abortSignalError(signal);
+    throw error;
+  }
+  if (!response.ok) {
+    const details = await response.text().catch(() => "");
+    throw nativeProviderError(
+      PROVIDER_ID10,
+      `OpenCode \u4E8B\u4EF6\u6D41\u8FDE\u63A5\u5931\u8D25: ${response.status}${details ? ` ${details.slice(0, 300)}` : ""}`
+    );
+  }
+  if (!response.body?.getReader) {
+    throw nativeProviderError(PROVIDER_ID10, "OpenCode \u4E8B\u4EF6\u6D41\u4E0D\u53EF\u8BFB\u53D6");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let closed = false;
+  async function readChunkWithTimeout() {
+    if (!idleTimeoutMs || idleTimeoutMs <= 0) return reader.read();
+    let timer = null;
+    try {
+      return await Promise.race([
+        reader.read(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            const err = nativeProviderError(PROVIDER_ID10, "OpenCode \u4E8B\u4EF6\u6D41\u54CD\u5E94\u8D85\u65F6", { code: "TIMEOUT" });
+            reject(err);
+          }, idleTimeoutMs);
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  return {
+    async next() {
+      while (!closed) {
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary === -1) {
+          const { value, done } = await readChunkWithTimeout();
+          if (done) {
+            closed = true;
+            return { done: true };
+          }
+          buffer = `${buffer}${decoder.decode(value, { stream: true })}`.replace(/\r\n/g, "\n");
+          boundary = buffer.indexOf("\n\n");
+        }
+        const raw = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        let data = "";
+        for (const line of raw.split("\n")) {
+          if (line.startsWith("data:")) data += `${data ? "\n" : ""}${line.slice(5).trim()}`;
+        }
+        if (!data) continue;
+        let event;
+        try {
+          event = JSON.parse(data);
+        } catch {
+          continue;
+        }
+        if (event?.data?.sessionID !== sessionId) continue;
+        return { done: false, value: event };
+      }
+      return { done: true };
+    },
+    async close() {
+      closed = true;
+      try {
+        await reader.cancel();
+      } catch {
+      }
+    }
+  };
+}
+function opencodeServerModel(request) {
+  const raw = typeof request?.model === "string" ? request.model.trim() : "";
+  if (!raw) return null;
+  const [baseRaw, embeddedVariant] = raw.split("#");
+  const base = baseRaw.startsWith("opencode/") ? baseRaw.slice("opencode/".length) : baseRaw;
+  if (!base) return null;
+  if (request?.purpose === "compaction" || request?.thinking === false) {
+    return { providerID: PROVIDER_ID10, id: base };
+  }
+  const effort = request.reasoningEffort ?? request.reasoning_effort ?? embeddedVariant;
+  const variant = typeof effort === "string" && effort && effort !== "medium" ? effort : null;
+  return { providerID: PROVIDER_ID10, id: base, ...variant ? { variant } : {} };
+}
+function opencodeUsageFromTokens(tokens) {
+  const input = Number(tokens?.input ?? 0);
+  const output = Number(tokens?.output ?? 0);
+  return {
+    prompt_tokens: Number.isFinite(input) ? input : 0,
+    completion_tokens: Number.isFinite(output) ? output : 0,
+    total_tokens: (Number.isFinite(input) ? input : 0) + (Number.isFinite(output) ? output : 0)
+  };
+}
+function opencodeEventMessage(data) {
+  const value = data?.error ?? data?.message ?? data?.reason;
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (value && typeof value === "object") {
+    const nested = value.message ?? value.error ?? value.reason;
+    if (typeof nested === "string" && nested.trim()) return nested.trim();
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+function isPermissionRequestEvent(type, data, sessionId) {
+  if (typeof type !== "string" || !type.includes("permission")) return false;
+  if (data?.sessionID !== sessionId) return false;
+  return type.includes("request") || type.endsWith(".updated") || type.endsWith(".asked");
+}
+async function* runViaOpencodeServer({ server, request, signal, fetchImpl, timeoutMs = 6e4 }) {
+  const prompt = promptFromRequest(request);
+  const model = opencodeServerModel(request);
+  const controller = new AbortController();
+  let sessionId = null;
+  let stream = null;
+  let aborted = false;
+  const pendingReplies = /* @__PURE__ */ new Set();
+  const isCompaction = request.purpose === "compaction";
+  const onAbort = () => {
+    aborted = true;
+    controller.abort();
+    if (sessionId) {
+      void opencodeServerRequest(server, "POST", `/api/session/${sessionId}/interrupt`, void 0, { fetchImpl }).catch(() => {
+      });
+    }
+  };
+  if (signal) {
+    if (signal.aborted) throw abortSignalError(signal);
+    signal.addEventListener("abort", onAbort, { once: true });
+  }
+  let text3 = "";
+  let textIndex = 0;
+  let textOpen = false;
+  let nextIndex = 1;
+  let reasoning = null;
+  let rawUsage = null;
+  let stop = "stop";
+  let stepCount = 0;
+  try {
+    const created = await opencodeServerRequest(
+      server,
+      "POST",
+      "/api/session",
+      {
+        ...model ? { model } : {},
+        location: { directory: process.cwd() }
+      },
+      { signal: controller.signal, fetchImpl }
+    );
+    sessionId = created?.data?.id ?? created?.id ?? null;
+    if (!sessionId) {
+      throw nativeProviderError(PROVIDER_ID10, "OpenCode \u4F1A\u8BDD\u521B\u5EFA\u5931\u8D25\uFF1A\u54CD\u5E94\u4E2D\u6CA1\u6709\u4F1A\u8BDD ID");
+    }
+    opencodeDebug("session created", sessionId);
+    stream = await openOpencodeEventStream(server, sessionId, {
+      signal: controller.signal,
+      fetchImpl,
+      idleTimeoutMs: timeoutMs
+    });
+    opencodeDebug("event stream connected");
+    await opencodeServerRequest(
+      server,
+      "POST",
+      `/api/session/${sessionId}/prompt`,
+      { text: prompt },
+      { signal: controller.signal, fetchImpl }
+    );
+    opencodeDebug("prompt submitted");
+    let finished = false;
+    while (!finished) {
+      let next;
+      try {
+        next = await stream.next();
+      } catch (error) {
+        if (controller.signal.aborted || signal?.aborted) break;
+        throw error;
+      }
+      if (next.done) {
+        if (!finished && !text3 && !reasoning) {
+          throw nativeProviderError(PROVIDER_ID10, "OpenCode \u4E8B\u4EF6\u6D41\u5F02\u5E38\u7ED3\u675F\uFF0C\u672A\u8FD4\u56DE\u6709\u6548\u5185\u5BB9", { code: "EMPTY_RESPONSE" });
+        }
+        break;
+      }
+      const event = next.value;
+      const type = event.type;
+      const data = event.data ?? {};
+      if (type && !type.endsWith(".delta")) opencodeDebug("event", type);
+      if (type === "session.reasoning.delta" && typeof data.delta === "string" && data.delta) {
+        if (!isCompaction) {
+          if (textOpen) {
+            yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+            textOpen = false;
+          }
+          if (!reasoning) {
+            reasoning = { index: nextIndex++, text: "" };
+            yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+          }
+          reasoning.text += data.delta;
+          yield { type: "reasoning-delta", index: reasoning.index, text: data.delta };
+        }
+      } else if (type === "session.text.delta" && typeof data.delta === "string" && data.delta) {
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        if (!textOpen) {
+          textIndex = nextIndex++;
+          text3 = "";
+          textOpen = true;
+          yield { type: "block-start", index: textIndex, blockType: "text" };
+        }
+        text3 += data.delta;
+        yield { type: "text-delta", index: textIndex, text: data.delta };
+      } else if (type === "session.usage.updated" && data.tokens) {
+        rawUsage = opencodeUsageFromTokens(data.tokens);
+      } else if (type === "session.step.ended") {
+        stepCount++;
+        if (typeof data.finish === "string" && data.finish) stop = data.finish;
+        if (data.tokens) rawUsage = opencodeUsageFromTokens(data.tokens);
+        if (isCompaction) {
+          if (text3 || data.finish === "stop") {
+            finished = true;
+          }
+        } else if (data.finish === "stop" && text3) {
+          finished = true;
+        } else if (stepCount >= 5 && text3) {
+          finished = true;
+        }
+      } else if (type === "session.step.failed") {
+        const msg = opencodeEventMessage(data) || "OpenCode \u6B65\u9AA4\u6267\u884C\u5931\u8D25";
+        const status = data.error?.status ?? data.status;
+        const code = data.error?.type ?? data.type;
+        throw nativeProviderError(PROVIDER_ID10, msg, { status, code });
+      } else if (type === "session.execution.succeeded") {
+        finished = true;
+      } else if (type === "session.execution.failed" || type === "session.execution.error" || type === "session.error") {
+        const msg = opencodeEventMessage(data) || "OpenCode \u6267\u884C\u5931\u8D25";
+        const status = data.error?.status ?? data.status;
+        const code = data.error?.type ?? data.type;
+        throw nativeProviderError(PROVIDER_ID10, msg, { status, code });
+      } else if (type === "session.execution.interrupted") {
+        aborted = true;
+        finished = true;
+      } else if (isPermissionRequestEvent(type, data, sessionId)) {
+        const requestId = data.id ?? data.requestID;
+        if (requestId) {
+          pendingReplies.add(
+            opencodeServerRequest(
+              server,
+              "POST",
+              `/api/session/${sessionId}/permission/${requestId}/reply`,
+              { decision: "deny" },
+              { fetchImpl }
+            ).catch(() => {
+            })
+          );
+        }
+      }
+    }
+  } finally {
+    if (stream) await stream.close();
+    if (sessionId) {
+      await opencodeServerRequest(server, "DELETE", `/api/session/${sessionId}`, void 0, { fetchImpl }).catch(() => {
+      });
+    }
+    signal?.removeEventListener?.("abort", onAbort);
+    if (pendingReplies.size > 0) await Promise.allSettled([...pendingReplies]);
+  }
+  if (reasoning) {
+    yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+  }
+  if (textOpen) {
+    yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+  }
+  if (rawUsage) {
+    yield { type: "usage", usage: normalizeUsage(rawUsage) };
+  }
+  yield {
+    type: "finish",
+    reason: aborted ? { kind: "stop" } : finishReason(stop),
+    ...rawUsage ? { usage: normalizeUsage(rawUsage) } : {}
+  };
+}
+function createOpencodeNativeExecutor({
+  endpoint: endpoint2 = DEFAULT_ENDPOINT5,
+  apiKey = null,
+  fetchImpl = fetch,
+  timeoutMs = 6e4,
+  cliPath = void 0
+} = {}) {
+  const validatedEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID10 });
+  return async function* opencodeNativeExecutor(envelope2 = {}) {
+    const { request, attachments, credential, signal } = envelope2;
+    const token = apiKey ?? (credential?.access && credential.access !== "free-tier" ? credential.access : null) ?? credential?.apiKey ?? credential?.token ?? process.env.OPENCODE_API_KEY ?? null;
+    const resolvedCliPath = !token ? cliPath !== void 0 ? cliPath : findOpencodeCliPath() : null;
+    if (resolvedCliPath) {
+      let server = null;
+      try {
+        server = await ensureOpencodeServer(resolvedCliPath);
+      } catch {
+        server = null;
+      }
+      if (server) {
+        let emitted = false;
+        try {
+          for await (const event of runViaOpencodeServer({ server, request, signal, fetchImpl, timeoutMs })) {
+            emitted = true;
+            yield event;
+          }
+          return;
+        } catch (error) {
+          if (emitted || signal?.aborted) throw error;
+        }
+      }
+    }
+    if (resolvedCliPath) {
+      const baseModel = request.model?.startsWith("opencode/") ? request.model : `opencode/${request.model}`;
+      const isCompaction = request.purpose === "compaction";
+      const thinkingDisabled = isCompaction || request.thinking === false;
+      const effort = thinkingDisabled ? null : request.reasoningEffort ?? request.reasoning_effort;
+      const model = effort && effort !== "medium" ? `${baseModel}#${effort}` : baseModel;
+      const prompt = promptFromRequest(request);
+      const args = ["run", "--model", model];
+      if (!thinkingDisabled) {
+        args.push("--thinking");
+      }
+      args.push("--format", "json", prompt);
+      const child = spawnCli(resolvedCliPath, args, {
+        signal,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env }
+      });
+      let timeoutTimer = null;
+      let timedOut = false;
+      if (timeoutMs > 0) {
+        timeoutTimer = setTimeout(() => {
+          timedOut = true;
+          try {
+            child.kill("SIGTERM");
+          } catch {
+          }
+        }, timeoutMs);
+      }
+      const rl = readline.createInterface({ input: child.stdout });
+      let text4 = "";
+      let textIndex2 = 0;
+      let textOpen2 = false;
+      let nextIndex2 = 1;
+      let reasoning2 = null;
+      let rawUsage2 = null;
+      let stderrOutput = "";
+      child.stderr?.on?.("data", (chunk) => {
+        stderrOutput += String(chunk);
+      });
+      try {
+        for await (const line of rl) {
+          if (!line.trim()) continue;
+          let parsed;
+          try {
+            parsed = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (parsed.type === "reasoning" && parsed.part?.text) {
+            if (!isCompaction) {
+              if (textOpen2) {
+                yield { type: "block-end", index: textIndex2, block: { type: "text", text: text4 } };
+                textOpen2 = false;
+              }
+              if (!reasoning2) {
+                reasoning2 = { index: nextIndex2++, text: "" };
+                yield { type: "block-start", index: reasoning2.index, blockType: "reasoning" };
+              }
+              const chunk = parsed.part.text;
+              reasoning2.text += chunk;
+              yield { type: "reasoning-delta", index: reasoning2.index, text: chunk };
+            }
+          } else if (parsed.type === "text" && parsed.part?.text) {
+            if (reasoning2) {
+              yield { type: "block-end", index: reasoning2.index, block: { type: "reasoning", text: reasoning2.text } };
+              reasoning2 = null;
+            }
+            if (!textOpen2) {
+              textIndex2 = nextIndex2++;
+              text4 = "";
+              textOpen2 = true;
+              yield { type: "block-start", index: textIndex2, blockType: "text" };
+            }
+            const chunk = parsed.part.text;
+            text4 += chunk;
+            yield { type: "text-delta", index: textIndex2, text: chunk };
+          } else if (parsed.type === "step_finish" && parsed.part?.tokens) {
+            rawUsage2 = {
+              prompt_tokens: parsed.part.tokens.input ?? 0,
+              completion_tokens: parsed.part.tokens.output ?? 0,
+              total_tokens: (parsed.part.tokens.input ?? 0) + (parsed.part.tokens.output ?? 0)
+            };
+            if (isCompaction) {
+              break;
+            }
+          } else if (parsed.type === "error") {
+            const msg = parsed.error?.message || "OpenCode CLI execution error";
+            const status = parsed.error?.status;
+            const code = parsed.error?.type;
+            throw nativeProviderError(PROVIDER_ID10, msg, { status, code });
+          }
+        }
+      } finally {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        try {
+          child.kill();
+        } catch {
+        }
+      }
+      if (timedOut) {
+        throw nativeProviderError(PROVIDER_ID10, `OpenCode CLI \u6267\u884C\u8D85\u65F6 (${timeoutMs}ms)`, { code: "TIMEOUT" });
+      }
+      if (!text4 && !reasoning2) {
+        if (stderrOutput.trim()) {
+          throw nativeProviderError(PROVIDER_ID10, stderrOutput.trim());
+        }
+        throw nativeProviderError(PROVIDER_ID10, "OpenCode CLI \u672A\u8FD4\u56DE\u6709\u6548\u5185\u5BB9", { code: "EMPTY_RESPONSE" });
+      }
+      if (reasoning2) {
+        yield { type: "block-end", index: reasoning2.index, block: { type: "reasoning", text: reasoning2.text } };
+      }
+      if (textOpen2) {
+        yield { type: "block-end", index: textIndex2, block: { type: "text", text: text4 } };
+      }
+      if (rawUsage2) {
+        yield {
+          type: "usage",
+          usage: normalizeUsage(rawUsage2)
+        };
+      }
+      yield {
+        type: "finish",
+        reason: { kind: "stop" },
+        ...rawUsage2 ? { usage: normalizeUsage(rawUsage2) } : {}
+      };
+      return;
+    }
+    const isFreeTier = !token || token === "free-tier";
+    let activeEndpoint = validatedEndpoint;
+    let authHeader = token && token !== "free-tier" ? `Bearer ${token}` : "Bearer public";
+    let extraHeaders = {};
+    let tools = void 0;
+    if (isFreeTier) {
+      activeEndpoint = "https://opencode.ai/inference/v1/chat/completions";
+      const ts = Date.now();
+      const value = ~(BigInt(ts) * 0x1000n + 1n);
+      let hex = "";
+      for (let i = 0; i < 6; i++) hex += Number(value >> BigInt(40 - 8 * i) & 0xffn).toString(16).padStart(2, "0");
+      const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+      let rand = "";
+      for (const b of randomBytes4(14)) rand += BASE62[b % 62];
+      const session = `ses_${hex}${rand}`;
+      extraHeaders = {
+        "user-agent": "opencode/latest/2.0.26/cli",
+        "x-opencode-client": "cli",
+        "x-opencode-session": session,
+        "x-opencode-session-id": session,
+        "x-session-affinity": session,
+        "x-session-id": session,
+        "x-opencode-project": "global"
+      };
+      tools = [
+        {
+          type: "function",
+          function: {
+            name: "read",
+            description: "Read the contents of a file or directory. Supports text files, images, and PDFs. Images and PDFs are presented directly to the model. Each text line is prefixed by its 1-based line number as <line>: <content>. The prefix is for reference and is not part of the file content. Directory entries are returned one per line. Use offset and limit to read large files or directories in sections. Prefer one larger read over many small slices, and use grep to find specific content in large files.",
+            parameters: {
+              type: "object",
+              properties: {
+                path: { type: "string", description: "File or directory to read" },
+                offset: { type: "integer", minimum: 0, description: "The line or directory entry to start reading from (1-based)" },
+                limit: { type: "integer", minimum: 0, description: "The maximum number of lines or directory entries to read (defaults to and capped at 2000)" }
+              },
+              required: ["path"],
+              additionalProperties: false
+            }
+          }
+        },
+        {
+          type: "function",
+          function: {
+            name: "shell",
+            description: "Execute a shell command and return its output. Commands run on Linux using bash. Quote file paths containing spaces or special characters. Prefer dedicated tools over shell commands when possible. When output is large, the full result is saved to a file and a truncated preview is returned. Rely on automatic truncation unless filtering the output is more useful. Commands accept an optional timeout, background commands have no timeout by default. Background commands return immediately, and you will be notified when they complete.",
+            parameters: {
+              type: "object",
+              properties: {
+                command: { type: "string", description: "Shell command string to execute" },
+                workdir: { type: "string", description: "Working directory to execute the command in. Defaults to the current working directory. When possible, avoid changing directories in the command and set the working directory here instead." },
+                timeout: { type: "integer", minimum: 0, description: "Timeout in milliseconds. Set to 0 to disable the timeout. Defaults to 120000 for foreground commands. Background commands have no timeout by default." },
+                background: { type: "boolean", description: "Run the command in the background and return immediately (useful for dev servers and long-running builds). You do not need to use '&' at the end of the command when using this parameter. You will be notified when it completes. DO NOT poll for completion." }
+              },
+              required: ["command"],
+              additionalProperties: false
+            }
+          }
+        }
+      ];
+    }
+    const messages = await buildOpencodeMessages(request, attachments);
+    const body = {
+      model: request.model,
+      messages,
+      stream: true,
+      ...typeof request.temperature === "number" ? { temperature: request.temperature } : {},
+      ...typeof request.maxTokens === "number" ? { max_tokens: request.maxTokens } : {},
+      ...request.reasoningEffort && request.purpose !== "compaction" && request.thinking !== false ? { reasoning_effort: request.reasoningEffort } : {},
+      ...tools ? { tools } : {}
+    };
+    const headers = {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+      Authorization: authHeader,
+      ...extraHeaders
+    };
+    const response = await fetchNativeResponse(
+      activeEndpoint,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal
+      },
+      {
+        providerId: PROVIDER_ID10,
+        timeoutMs,
+        fetchImpl
+      }
+    );
+    let text3 = "";
+    let textIndex = 0;
+    let textOpen = false;
+    let nextIndex = 1;
+    let reasoning = null;
+    let rawUsage = null;
+    let stop = "stop";
+    for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID10 })) {
+      if (event?.done) continue;
+      const parsed = event?.data;
+      if (!parsed || typeof parsed !== "object") continue;
+      if (parsed.usage) rawUsage = parsed.usage;
+      const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : null;
+      if (!choice) continue;
+      const delta = choice.delta ?? {};
+      const reasoningDelta = firstString9(delta.reasoning_content, delta.reasoning, delta.thought);
+      if (reasoningDelta) {
+        if (textOpen) {
+          yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+          textOpen = false;
+        }
+        if (!reasoning) {
+          reasoning = { index: nextIndex++, text: "" };
+          yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+        }
+        reasoning.text += reasoningDelta;
+        yield { type: "reasoning-delta", index: reasoning.index, text: reasoningDelta };
+      }
+      const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
+      if (content) {
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        if (!textOpen) {
+          textIndex = nextIndex++;
+          text3 = "";
+          textOpen = true;
+          yield { type: "block-start", index: textIndex, blockType: "text" };
+        }
+        text3 += content;
+        yield { type: "text-delta", index: textIndex, text: content };
+      }
+      if (choice.finish_reason) {
+        stop = choice.finish_reason;
+      }
+    }
+    if (reasoning) {
+      yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+    }
+    if (textOpen) {
+      yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+    }
+    if (rawUsage) {
+      yield {
+        type: "usage",
+        usage: normalizeUsage(rawUsage)
+      };
+    }
+    yield {
+      type: "finish",
+      reason: finishReason(stop),
+      ...rawUsage ? { usage: normalizeUsage(rawUsage) } : {}
+    };
+  };
+}
+
 // modules/provider-opencode/src/driver.mjs
+var PROVIDER_ID11 = "opencode";
+var DEFAULT_CATALOG_URL = "https://opencode.ai/zen/v1/models";
+var DEFAULT_ENDPOINT6 = "https://opencode.ai/inference/openai/v1/chat/completions";
 var BUILTIN_OPENCODE_FREE_MODELS = Object.freeze([
   {
     id: "big-pickle",
@@ -14100,9 +15046,287 @@ var BUILTIN_OPENCODE_FREE_MODELS = Object.freeze([
 function summarizeOpencodeCandidate(candidate2) {
   return candidate2?.displayName ?? candidate2?.email ?? candidate2?.accountId ?? "OpenCode Free";
 }
+function findOpencodeRegistryModel(id, registry) {
+  if (!id || !Array.isArray(registry) || registry.length === 0) return null;
+  const exact = registry.find((m) => m.id === id);
+  if (exact) return exact;
+  const cleanId = id.replace(/-free$/, "");
+  const cleanMatch = registry.find((m) => m.id === cleanId);
+  if (cleanMatch) return cleanMatch;
+  if (id.startsWith("deepseek-v4")) {
+    return registry.find((m) => m.id === "deepseek-v4-flash-free" || m.id === "deepseek-v4-flash");
+  }
+  if (id.startsWith("claude-sonnet") || id.startsWith("claude-opus") || id.startsWith("claude-fable") || id.startsWith("claude-haiku")) {
+    const family = id.split("-").slice(0, 2).join("-");
+    return registry.find((m) => m.id.startsWith(family) && m.thinkingLevelMap);
+  }
+  if (id.startsWith("glm-5")) {
+    return registry.find((m) => m.id === "glm-5.2" || m.id.startsWith("glm-5") && m.thinkingLevelMap);
+  }
+  if (id.startsWith("gemini-")) {
+    return registry.find((m) => m.provider === "opencode" && m.id.startsWith("gemini-") && m.thinkingLevelMap);
+  }
+  if (id.startsWith("grok-")) {
+    return registry.find((m) => m.id === "grok-4.5" || m.id.startsWith("grok-") && m.thinkingLevelMap);
+  }
+  if (id.startsWith("gpt-5") || id.startsWith("gpt-6")) {
+    return registry.find((m) => m.provider === "opencode" && m.id.startsWith("gpt-5") && m.thinkingLevelMap);
+  }
+  if (id.startsWith("qwen")) {
+    return registry.find((m) => m.provider === "opencode" && m.id.startsWith("qwen"));
+  }
+  if (id.startsWith("minimax")) {
+    return registry.find((m) => m.provider === "opencode" && m.id.startsWith("minimax"));
+  }
+  return null;
+}
+function parseOpencodeCatalog(data, { registry = [], installedIds = null } = {}) {
+  const models = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
+  if (!models.length) {
+    if (Array.isArray(installedIds) && installedIds.length > 0) {
+      const builtinMap2 = new Map(BUILTIN_OPENCODE_FREE_MODELS.map((m) => [m.id, m]));
+      const installedModels = installedIds.map((id) => {
+        const builtin = builtinMap2.get(id);
+        if (builtin) return builtin;
+        return {
+          id,
+          name: `${id} (Free)`,
+          contextWindow: 131072,
+          maxTokens: 8192
+        };
+      });
+      return { models: installedModels };
+    }
+    return { models: [...BUILTIN_OPENCODE_FREE_MODELS] };
+  }
+  const builtinMap = new Map(BUILTIN_OPENCODE_FREE_MODELS.map((m) => [m.id, m]));
+  const result = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const item of models) {
+    const id = stringValue(item?.id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const regModel = findOpencodeRegistryModel(id, registry);
+    const builtin = builtinMap.get(id);
+    const isFree = id.includes("-free") || id === "big-pickle";
+    const name2 = stripVendorPrefix(stringValue(item?.name) ?? regModel?.name ?? builtin?.name ?? (isFree ? `${id} (Free)` : id));
+    const contextWindow = Number.isInteger(item?.contextWindow) ? item.contextWindow : Number.isInteger(regModel?.contextWindow) ? regModel.contextWindow : builtin?.contextWindow ?? 131072;
+    const maxTokens = Number.isInteger(item?.maxTokens) ? Math.min(item.maxTokens, 16384) : Number.isInteger(regModel?.maxTokens) ? Math.min(regModel.maxTokens, 16384) : builtin?.maxTokens ?? 8192;
+    const reasoning = item?.reasoning ? resolveReasoningFromModel(item) : regModel ? resolveReasoningFromModel(regModel) : builtin?.reasoning;
+    result.push({
+      id,
+      name: name2,
+      contextWindow,
+      maxTokens,
+      // Publish the free tier so a spent account can still serve these models.
+      ...isFree ? { free: true } : {},
+      ...reasoning ? { reasoning } : {}
+    });
+  }
+  return { models: result.length > 0 ? result : [...BUILTIN_OPENCODE_FREE_MODELS] };
+}
+function createOpencodeCatalogLoader({
+  catalogUrl = DEFAULT_CATALOG_URL,
+  fetchImpl = fetch,
+  timeoutMs = 8e3,
+  cacheTtlMs = 6e4,
+  registryLoader = null
+} = {}) {
+  const validatedUrl = assertSecureEndpointUrl(catalogUrl, "OPENCODE_CATALOG_URL");
+  let cached = null;
+  let cachedAt = 0;
+  let pending = null;
+  return async function opencodeCatalogLoader({ force = false } = {}) {
+    const now = Date.now();
+    if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
+    if (pending) return pending;
+    pending = (async () => {
+      const registry = typeof registryLoader === "function" ? await registryLoader().catch(() => []) : [];
+      const cliPath = findOpencodeCliPath();
+      const installedIds = cliPath ? queryInstalledOpencodeCliModelIds(cliPath) : null;
+      if (catalogUrl === DEFAULT_CATALOG_URL && fetchImpl === fetch) {
+        cached = parseOpencodeCatalog(null, { registry, installedIds });
+        cachedAt = Date.now();
+        return cached;
+      }
+      try {
+        const data = await fetchJson(validatedUrl, {
+          headers: { Accept: "application/json" },
+          fetchImpl,
+          timeoutMs
+        });
+        cached = parseOpencodeCatalog(data, { registry, installedIds });
+      } catch {
+        cached = parseOpencodeCatalog(null, { registry, installedIds });
+      }
+      cachedAt = Date.now();
+      return cached;
+    })().finally(() => {
+      pending = null;
+    });
+    return pending;
+  };
+}
+var OpencodeDriver = class {
+  constructor({
+    endpoint: endpoint2 = DEFAULT_ENDPOINT6,
+    catalogUrl = DEFAULT_CATALOG_URL,
+    catalogLoader = null,
+    requestExecutor = null,
+    fetchImpl = fetch,
+    timeoutMs = 3e4,
+    registryLoader = null
+  } = {}) {
+    this.endpoint = endpoint2;
+    this.catalogUrl = catalogUrl;
+    this.fetchImpl = fetchImpl;
+    this.timeoutMs = timeoutMs;
+    this.catalogLoader = catalogLoader ?? createOpencodeCatalogLoader({
+      catalogUrl,
+      fetchImpl,
+      timeoutMs: 8e3,
+      registryLoader
+    });
+    this.requestExecutor = requestExecutor ?? createOpencodeNativeExecutor({
+      endpoint: endpoint2,
+      fetchImpl,
+      timeoutMs
+    });
+  }
+  async discover() {
+    return {
+      candidates: [
+        {
+          candidateId: "opencode-free",
+          accountId: "opencode-free",
+          displayName: "OpenCode Free",
+          email: "zen@opencode.ai",
+          subscription: {
+            plan: "Zen Free Rotation",
+            status: "active"
+          },
+          quota: {
+            remaining: 100,
+            limit: 100,
+            unit: "requests",
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+          },
+          source: "opencode_free_tier",
+          health: {
+            status: "healthy"
+          }
+        }
+      ],
+      source: "opencode_free_tier",
+      diagnostics: []
+    };
+  }
+  async importAccount(candidate2, context = {}) {
+    const accountId = candidate2?.accountId || "opencode-free";
+    const ref = createCredentialRef(PROVIDER_ID11, accountId);
+    if (context.secretStore) {
+      await context.secretStore.write(ref, {
+        type: "opencode_free",
+        access: "free-tier"
+      }).catch(() => {
+      });
+    }
+    return createAccountRecord({
+      accountId,
+      providerId: PROVIDER_ID11,
+      displayName: candidate2?.displayName || "OpenCode Free",
+      email: candidate2?.email || "zen@opencode.ai",
+      auth: {
+        kind: "opencode_free",
+        credentialRef: ref
+      },
+      subscription: {
+        plan: candidate2?.subscription?.plan || "Zen Free Rotation",
+        status: "active"
+      },
+      quota: createQuotaSnapshot(candidate2?.quota || {
+        remaining: 100,
+        limit: 100,
+        unit: "requests"
+      }),
+      health: {
+        status: "healthy"
+      }
+    });
+  }
+  async getActiveSession() {
+    return this.discover().then((res) => Array.isArray(res?.candidates) ? res.candidates[0] : Array.isArray(res) ? res[0] : null);
+  }
+  async refreshAccount(account) {
+    return {
+      quota: createQuotaSnapshot({
+        remaining: 100,
+        limit: 100,
+        unit: "requests",
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }),
+      health: {
+        status: "healthy",
+        lastCheckedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }
+    };
+  }
+  async getQuota() {
+    return createQuotaSnapshot({
+      remaining: 100,
+      limit: 100,
+      unit: "requests",
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  }
+  async getCatalog(context = {}) {
+    return this.catalogLoader({ force: Boolean(context.force) });
+  }
+  async invoke(request, invocation, context = {}) {
+    const executor = context.requestExecutor ?? this.requestExecutor;
+    let credential = null;
+    if (context.secretStore && invocation?.auth?.credentialRef) {
+      credential = await context.secretStore.read(invocation.auth.credentialRef).catch(() => null);
+    }
+    if (!credential) {
+      credential = invocation?.auth ?? { access: "free-tier" };
+    }
+    return executor({
+      request,
+      invocation,
+      context,
+      attachments: context.attachments ?? invocation?.attachments,
+      credential,
+      signal: context.signal ?? invocation?.signal
+    });
+  }
+  async stream(request, invocation, context = {}) {
+    return this.invoke(request, invocation, context);
+  }
+};
+function createOpencodeDriver(options = {}) {
+  return new OpencodeDriver(options);
+}
+
+// modules/provider-opencode/src/index.mjs
+function createOpencodeModule({ driver = {} } = {}) {
+  return defineProviderModule({
+    id: "opencode",
+    displayName: "OpenCode",
+    capabilities: [
+      PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
+      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP,
+      "quota",
+      "catalog",
+      "invoke",
+      "stream"
+    ],
+    driver
+  });
+}
 
 // modules/provider-kilo/src/driver.mjs
-var PROVIDER_ID10 = "kilo";
+var PROVIDER_ID12 = "kilo";
 var STANDARD_KILO_REASONING_EFFORTS = Object.freeze([
   { id: "low", name: "Low", description: "\u5FEB\u901F\u601D\u8003\uFF0C\u4FDD\u7559\u57FA\u7840\u63A8\u7406" },
   { id: "medium", name: "Medium", description: "\u6807\u51C6\u601D\u8003\uFF0C\u5E73\u8861\u63A8\u7406\u6DF1\u5EA6\u4E0E\u54CD\u5E94\u901F\u5EA6" },
@@ -14209,7 +15433,7 @@ var BUILTIN_KILO_FREE_MODELS = Object.freeze([
 ]);
 function summarizeKiloCandidate(candidate2) {
   return {
-    providerId: PROVIDER_ID10,
+    providerId: PROVIDER_ID12,
     candidateId: candidate2?.candidateId ?? "kilo-free",
     accountId: candidate2?.accountId ?? "kilo-free",
     displayName: candidate2?.displayName ?? "Kilo Free Tier",
@@ -14220,37 +15444,37 @@ function summarizeKiloCandidate(candidate2) {
 
 // modules/provider-commandcode/src/driver.mjs
 import { createHash as createHash10 } from "node:crypto";
-import { existsSync as existsSync5, readdirSync, readFileSync as readFileSync4 } from "node:fs";
-import { homedir as homedir12 } from "node:os";
-import { join as join13 } from "node:path";
+import { existsSync as existsSync6, readdirSync as readdirSync2, readFileSync as readFileSync4 } from "node:fs";
+import { homedir as homedir13 } from "node:os";
+import { join as join14 } from "node:path";
 
 // modules/provider-commandcode/src/native-transport.mjs
-import { createHash as createHash9, randomBytes as randomBytes4, randomUUID as randomUUID10 } from "node:crypto";
-import { existsSync as existsSync4, readFileSync as readFileSync3 } from "node:fs";
-import { homedir as homedir11 } from "node:os";
-import { join as join12 } from "node:path";
-function firstString9(...values) {
+import { createHash as createHash9, randomBytes as randomBytes5, randomUUID as randomUUID10 } from "node:crypto";
+import { existsSync as existsSync5, readFileSync as readFileSync3 } from "node:fs";
+import { homedir as homedir12 } from "node:os";
+import { join as join13 } from "node:path";
+function firstString10(...values) {
   for (const val of values) {
     if (typeof val === "string" && val.length > 0) return val;
   }
   return null;
 }
-var PROVIDER_ID11 = "commandcode";
+var PROVIDER_ID13 = "commandcode";
 var DEFAULT_COMMANDCODE_GENERATE_ENDPOINT = "https://api.commandcode.ai/alpha/generate";
 var DEFAULT_COMMANDCODE_WHOAMI_ENDPOINT = "https://api.commandcode.ai/alpha/whoami";
 var DEFAULT_COMMANDCODE_CREDITS_ENDPOINT = "https://api.commandcode.ai/alpha/billing/credits";
 var DEFAULT_COMMANDCODE_SUBSCRIPTIONS_ENDPOINT = "https://api.commandcode.ai/alpha/billing/subscriptions";
 var DEFAULT_COMMANDCODE_MODELS_ENDPOINT = "https://api.commandcode.ai/provider/v1/models?view=client";
 function findCommandCodeAuthFilePath() {
-  if (process.env.COMMAND_CODE_AUTH_PATH && existsSync4(process.env.COMMAND_CODE_AUTH_PATH)) {
+  if (process.env.COMMAND_CODE_AUTH_PATH && existsSync5(process.env.COMMAND_CODE_AUTH_PATH)) {
     return process.env.COMMAND_CODE_AUTH_PATH;
   }
-  const candidate2 = join12(homedir11(), ".commandcode", "auth.json");
-  if (existsSync4(candidate2)) return candidate2;
+  const candidate2 = join13(homedir12(), ".commandcode", "auth.json");
+  if (existsSync5(candidate2)) return candidate2;
   return null;
 }
 function extractCommandCodeAuth({ force = false } = {}) {
-  const envKey = firstString9(process.env.COMMAND_CODE_API_KEY, process.env.COMMANDCODE_API_KEY);
+  const envKey = firstString10(process.env.COMMAND_CODE_API_KEY, process.env.COMMANDCODE_API_KEY);
   if (envKey) {
     return {
       apiKey: envKey,
@@ -14314,7 +15538,7 @@ ${text3}` : text3;
       continue;
     }
     if (role === "assistant") {
-      let reasoningContent = firstString9(
+      let reasoningContent = firstString10(
         msg.reasoning_content,
         msg.reasoning,
         msg.thought,
@@ -14402,7 +15626,7 @@ ${text3}` : text3;
           const resolved = await resolveImageData(block, attachments);
           if (!resolved) {
             throw nativeProviderError(
-              PROVIDER_ID11,
+              PROVIDER_ID13,
               "\u56FE\u7247\u9644\u4EF6\u65E0\u6CD5\u8BFB\u53D6\uFF1A\u7F3A\u5C11 DSH \u9644\u4EF6\u670D\u52A1\u6216\u9644\u4EF6\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u7C98\u8D34\u56FE\u7247"
             );
           }
@@ -14504,7 +15728,7 @@ function createCommandCodeNativeExecutor({
     if (!apiKey) {
       const err = new Error("Command Code API Key \u672A\u914D\u7F6E\uFF0C\u8BF7\u5148\u8FD0\u884C cmd login \u6216\u5728\u9762\u677F\u4E2D\u8BBE\u7F6E API Key\u3002");
       err.code = "AUTH_REQUIRED";
-      err.providerId = PROVIDER_ID11;
+      err.providerId = PROVIDER_ID13;
       throw err;
     }
     const sessionId = deriveConversationSessionId(request, explicitSessionId);
@@ -14563,7 +15787,7 @@ function createCommandCodeNativeExecutor({
             signal
           },
           {
-            providerId: PROVIDER_ID11,
+            providerId: PROVIDER_ID13,
             timeoutMs,
             fetchImpl
           }
@@ -14580,7 +15804,7 @@ function createCommandCodeNativeExecutor({
               signal
             },
             {
-              providerId: PROVIDER_ID11,
+              providerId: PROVIDER_ID13,
               timeoutMs,
               fetchImpl
             }
@@ -14602,7 +15826,7 @@ function createCommandCodeNativeExecutor({
         onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
         onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "text", text: text3 } })
       });
-      for await (const event of readNdjsonLines(response, { signal, timeoutMs, providerId: PROVIDER_ID11 })) {
+      for await (const event of readNdjsonLines(response, { signal, timeoutMs, providerId: PROVIDER_ID13 })) {
         if (!event || typeof event !== "object") continue;
         if (event.type === "error") {
           const errObj = event.error || {};
@@ -14612,7 +15836,7 @@ function createCommandCodeNativeExecutor({
             shouldRetryReasoning = true;
             break;
           }
-          throw nativeProviderError(PROVIDER_ID11, msg, {
+          throw nativeProviderError(PROVIDER_ID13, msg, {
             status,
             code: errObj.type || "server_error"
           });
@@ -14780,11 +16004,11 @@ function createCommandCodeNativeExecutor({
     }
   }
   ;
-  return guardEmptyCompletion(commandCodeNativeExecutor, { providerId: PROVIDER_ID11 });
+  return guardEmptyCompletion(commandCodeNativeExecutor, { providerId: PROVIDER_ID13 });
 }
 
 // modules/provider-commandcode/src/driver.mjs
-var PROVIDER_ID12 = "commandcode";
+var PROVIDER_ID14 = "commandcode";
 function fingerprintApiKey(apiKey) {
   return createHash10("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
 }
@@ -14917,7 +16141,7 @@ var BUILTIN_COMMANDCODE_MODELS = Object.freeze([
 ]);
 function summarizeCommandCodeCandidate(candidate2) {
   return {
-    providerId: PROVIDER_ID12,
+    providerId: PROVIDER_ID14,
     candidateId: candidate2?.candidateId ?? "commandcode-default",
     accountId: candidate2?.accountId ?? "commandcode-default",
     displayName: candidate2?.displayName ?? "Command Code",
@@ -14928,18 +16152,18 @@ function summarizeCommandCodeCandidate(candidate2) {
   };
 }
 function findLocalCommandCodeCatalogFile() {
-  const dir = join13(homedir12(), ".commandcode", "cache", "model-catalog", "v1");
-  if (existsSync5(dir)) {
+  const dir = join14(homedir13(), ".commandcode", "cache", "model-catalog", "v1");
+  if (existsSync6(dir)) {
     try {
-      const files = readdirSync(dir).filter((f) => f.startsWith("catalog-") && f.endsWith(".json"));
+      const files = readdirSync2(dir).filter((f) => f.startsWith("catalog-") && f.endsWith(".json"));
       if (files.length > 0) {
-        return join13(dir, files[0]);
+        return join14(dir, files[0]);
       }
     } catch {
     }
   }
-  const devJson = join13(homedir12(), ".commandcode", "cache", "models-dev.json");
-  if (existsSync5(devJson)) return devJson;
+  const devJson = join14(homedir13(), ".commandcode", "cache", "models-dev.json");
+  if (existsSync6(devJson)) return devJson;
   return null;
 }
 var KNOWN_RETIRED_COMMANDCODE_MODELS = /* @__PURE__ */ new Set([
@@ -15182,7 +16406,7 @@ var CommandCodeDriver = class {
     const manual = candidate2?.source === "manual_api_key";
     const apiKey = candidate2?.apiKey || auth?.apiKey || "";
     const accountId = candidate2?.accountId || (manual ? `commandcode-${fingerprintApiKey(apiKey)}` : auth?.userId) || "commandcode-default";
-    const ref = createCredentialRef(PROVIDER_ID12, accountId);
+    const ref = createCredentialRef(PROVIDER_ID14, accountId);
     if (context.secretStore) {
       await context.secretStore.write(ref, {
         type: "commandcode_auth",
@@ -15195,7 +16419,7 @@ var CommandCodeDriver = class {
     }
     return createAccountRecord({
       accountId,
-      providerId: PROVIDER_ID12,
+      providerId: PROVIDER_ID14,
       displayName: candidate2?.displayName || "Command Code User",
       email: candidate2?.email || "user@commandcode.ai",
       auth: {
@@ -15389,29 +16613,29 @@ function createCommandCodeModule({ driver = {} } = {}) {
 import { createHash as createHash11 } from "node:crypto";
 
 // modules/provider-hermes/src/native-transport.mjs
-import { existsSync as existsSync6, readFileSync as readFileSync5, statSync as statSync2 } from "node:fs";
-import { homedir as homedir13 } from "node:os";
-import { join as join14 } from "node:path";
+import { existsSync as existsSync7, readFileSync as readFileSync5, statSync as statSync2 } from "node:fs";
+import { homedir as homedir14 } from "node:os";
+import { join as join15 } from "node:path";
 import { randomUUID as randomUUID11 } from "node:crypto";
-function firstString10(...values) {
+function firstString11(...values) {
   for (const val of values) {
     if (typeof val === "string" && val.length > 0) return val;
   }
   return null;
 }
-var PROVIDER_ID13 = "hermes";
+var PROVIDER_ID15 = "hermes";
 var DEFAULT_HERMES_CHAT_ENDPOINT = "https://inference-api.nousresearch.com/v1/chat/completions";
 var DEFAULT_HERMES_MODELS_ENDPOINT = "https://inference-api.nousresearch.com/v1/models";
 var cachedAuth = null;
 var cachedAuthMtime = 0;
 function findHermesAuthFilePath() {
-  if (process.env.HERMES_AUTH_PATH && existsSync6(process.env.HERMES_AUTH_PATH)) {
+  if (process.env.HERMES_AUTH_PATH && existsSync7(process.env.HERMES_AUTH_PATH)) {
     return process.env.HERMES_AUTH_PATH;
   }
-  const hermesPath = join14(homedir13(), ".hermes", "auth.json");
-  if (existsSync6(hermesPath)) return hermesPath;
-  const nousPath = join14(homedir13(), ".nous", "auth.json");
-  if (existsSync6(nousPath)) return nousPath;
+  const hermesPath = join15(homedir14(), ".hermes", "auth.json");
+  if (existsSync7(hermesPath)) return hermesPath;
+  const nousPath = join15(homedir14(), ".nous", "auth.json");
+  if (existsSync7(nousPath)) return nousPath;
   return null;
 }
 function extractHermesAuth({ force = false } = {}) {
@@ -15472,14 +16696,14 @@ function extractHermesAuth({ force = false } = {}) {
   }
   return null;
 }
-function contentPartText(part) {
+function contentPartText2(part) {
   if (typeof part === "string") return part;
   if (!part || typeof part !== "object") return "";
   if (typeof part.text === "string") return part.text;
   if (typeof part.content === "string") return part.content;
   return "";
 }
-async function openAiContent2(content, attachments = null) {
+async function openAiContent3(content, attachments = null) {
   if (typeof content === "string") {
     if (!Array.isArray(attachments) || attachments.length === 0) {
       return content;
@@ -15515,7 +16739,7 @@ async function openAiContent2(content, attachments = null) {
         } else if (part.type === "image_url") {
           parts.push(part);
         } else {
-          const text3 = contentPartText(part);
+          const text3 = contentPartText2(part);
           if (text3) parts.push({ type: "text", text: text3 });
         }
       }
@@ -15542,22 +16766,22 @@ async function buildHermesMessages(request = {}, attachments = null) {
     if (message?.role === "tool") {
       result.push({
         role: "tool",
-        tool_call_id: sanitizeToolCallId(firstString10(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
+        tool_call_id: sanitizeToolCallId(firstString11(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
         content: typeof message.content === "string" ? message.content : textFromContent(message.content ?? message.text ?? message.output ?? message.result)
       });
       continue;
     }
     const role = message?.role === "assistant" ? "assistant" : message?.role === "system" ? "system" : "user";
-    const content = await openAiContent2(message?.content ?? message?.text, attachments);
+    const content = await openAiContent3(message?.content ?? message?.text, attachments);
     const calls = [];
     if (Array.isArray(message?.content)) {
       for (const part of message.content) {
         if (part?.type === "tool-call" || part?.type === "tool_call") {
           calls.push({
-            id: sanitizeToolCallId(firstString10(part.id, part.toolCallId, `call_${calls.length}`)),
+            id: sanitizeToolCallId(firstString11(part.id, part.toolCallId, `call_${calls.length}`)),
             type: "function",
             function: {
-              name: firstString10(part.name, part.function?.name, "tool"),
+              name: firstString11(part.name, part.function?.name, "tool"),
               arguments: typeof (part.arguments ?? part.function?.arguments) === "string" ? part.arguments ?? part.function?.arguments : JSON.stringify(part.arguments ?? part.input ?? {})
             }
           });
@@ -15567,10 +16791,10 @@ async function buildHermesMessages(request = {}, attachments = null) {
     if (Array.isArray(message?.tool_calls)) {
       for (const tc of message.tool_calls) {
         calls.push({
-          id: sanitizeToolCallId(firstString10(tc.id, tc.toolCallId, `call_${calls.length}`)),
+          id: sanitizeToolCallId(firstString11(tc.id, tc.toolCallId, `call_${calls.length}`)),
           type: "function",
           function: {
-            name: firstString10(tc.name, tc.function?.name, "tool"),
+            name: firstString11(tc.name, tc.function?.name, "tool"),
             arguments: typeof (tc.arguments ?? tc.function?.arguments) === "string" ? tc.arguments ?? tc.function?.arguments : JSON.stringify(tc.arguments ?? tc.input ?? {})
           }
         });
@@ -15598,12 +16822,12 @@ async function buildHermesMessages(request = {}, attachments = null) {
 }
 function extractReasoningDelta(delta) {
   if (!delta || typeof delta !== "object") return null;
-  const direct = firstString10(delta.reasoning_content, delta.reasoning, delta.thought);
+  const direct = firstString11(delta.reasoning_content, delta.reasoning, delta.thought);
   if (direct) return direct;
   if (Array.isArray(delta.reasoning_details)) {
     for (const item of delta.reasoning_details) {
       if (item && item.type !== "reasoning.encrypted") {
-        const text3 = firstString10(item.text, item.content, item.summary);
+        const text3 = firstString11(item.text, item.content, item.summary);
         if (text3) return text3;
       }
     }
@@ -15617,7 +16841,7 @@ function createHermesNativeExecutor({
   timeoutMs = 18e4
 } = {}) {
   const validatedEndpoint = validateNativeEndpoint(endpoint2, {
-    providerId: PROVIDER_ID13,
+    providerId: PROVIDER_ID15,
     defaultEndpoint: DEFAULT_HERMES_CHAT_ENDPOINT
   });
   async function* runHermesAttempt(envelope2 = {}) {
@@ -15635,7 +16859,7 @@ function createHermesNativeExecutor({
     if (!token) {
       const err = new Error("Hermes API Key \u672A\u914D\u7F6E\uFF0C\u53EF\u5728 ~/.hermes/auth.json \u4E2D\u914D\u7F6E\u6216\u5728\u9762\u677F\u4E2D\u8BBE\u7F6E API Key\u3002");
       err.code = "AUTH_REQUIRED";
-      err.providerId = PROVIDER_ID13;
+      err.providerId = PROVIDER_ID15;
       throw err;
     }
     const messages = await buildHermesMessages(req, attachments);
@@ -15678,7 +16902,7 @@ function createHermesNativeExecutor({
           signal
         },
         {
-          providerId: PROVIDER_ID13,
+          providerId: PROVIDER_ID15,
           timeoutMs,
           fetchImpl
         }
@@ -15695,7 +16919,7 @@ function createHermesNativeExecutor({
             signal
           },
           {
-            providerId: PROVIDER_ID13,
+            providerId: PROVIDER_ID15,
             timeoutMs,
             fetchImpl
           }
@@ -15720,7 +16944,7 @@ function createHermesNativeExecutor({
       onTextDelta: (index, text3) => streamEvents.push({ type: "text-delta", index, text: text3 }),
       onTextBlockEnd: (index, text3) => streamEvents.push({ type: "block-end", index, block: { type: "text", text: text3 } })
     });
-    for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID13 })) {
+    for await (const event of readSseEvents(response, { signal, timeoutMs, providerId: PROVIDER_ID15 })) {
       if (event?.done) continue;
       const parsed = event?.data;
       if (!parsed || typeof parsed !== "object") continue;
@@ -15747,8 +16971,8 @@ function createHermesNativeExecutor({
           while (streamEvents.length > 0) yield streamEvents.shift();
           const state2 = {
             index: nextIndex++,
-            id: firstString10(call.id, `call_${key}_${randomUUID11().slice(0, 8)}`),
-            name: firstString10(call.function?.name, call.name, "tool"),
+            id: firstString11(call.id, `call_${key}_${randomUUID11().slice(0, 8)}`),
+            name: firstString11(call.function?.name, call.name, "tool"),
             arguments: ""
           };
           activeTools.set(key, state2);
@@ -15819,11 +17043,11 @@ function createHermesNativeExecutor({
     };
   }
   ;
-  return guardEmptyCompletion(runHermesAttempt, { providerId: PROVIDER_ID13 });
+  return guardEmptyCompletion(runHermesAttempt, { providerId: PROVIDER_ID15 });
 }
 
 // modules/provider-hermes/src/driver.mjs
-var PROVIDER_ID14 = "hermes";
+var PROVIDER_ID16 = "hermes";
 function fingerprintApiKey2(apiKey) {
   return createHash11("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
 }
@@ -15986,7 +17210,7 @@ function createHermesCatalogLoader({
       token = auth?.accounts?.[0]?.apiKey;
     }
     try {
-      assertSecureEndpointUrl(modelsUrl, { providerId: PROVIDER_ID14 });
+      assertSecureEndpointUrl(modelsUrl, { providerId: PROVIDER_ID16 });
       const headers = {
         Accept: "application/json",
         ...token ? { Authorization: `Bearer ${token}` } : {}
@@ -16011,7 +17235,7 @@ function createHermesCatalogLoader({
 }
 function summarizeHermesCandidate(candidate2) {
   return {
-    providerId: PROVIDER_ID14,
+    providerId: PROVIDER_ID16,
     candidateId: candidate2?.candidateId ?? "hermes-default",
     displayName: candidate2?.displayName ?? "Hermes Account",
     email: candidate2?.email ?? null,
@@ -16086,7 +17310,7 @@ var HermesDriver = class {
   async importAccount(candidate2, context = {}) {
     const manual = candidate2?.source === "manual_api_key";
     const accountId = candidate2?.accountId || (manual ? `hermes-${fingerprintApiKey2(candidate2?.apiKey)}` : null) || "hermes-default";
-    const ref = createCredentialRef(PROVIDER_ID14, accountId);
+    const ref = createCredentialRef(PROVIDER_ID16, accountId);
     if (context.secretStore) {
       await context.secretStore.write(ref, {
         type: "hermes_auth",
@@ -16100,7 +17324,7 @@ var HermesDriver = class {
     const amount = typeof candidate2?.balance?.amount === "number" && Number.isFinite(candidate2.balance.amount) ? candidate2.balance.amount : null;
     return createAccountRecord({
       accountId,
-      providerId: PROVIDER_ID14,
+      providerId: PROVIDER_ID16,
       displayName: candidate2?.displayName || "Hermes Account",
       email: candidate2?.email || null,
       auth: {
@@ -17306,7 +18530,7 @@ function createOpenRouterFreeNativeExecutor({
 }
 
 // modules/provider-openrouter-free/src/driver.mjs
-var PROVIDER_ID15 = "openrouter-free";
+var PROVIDER_ID17 = "openrouter-free";
 var OPENROUTER_KEYS_PAGE = "https://openrouter.ai/settings/keys";
 async function readSecret(secretStore, ref) {
   if (!secretStore || !ref) return null;
@@ -17341,7 +18565,7 @@ function createOpenRouterFreeCatalogLoader({
       forceRefresh: Boolean(context?.force)
     });
     return {
-      providerId: PROVIDER_ID15,
+      providerId: PROVIDER_ID17,
       source: "openrouter_live_free_catalog",
       fetchedAt: (/* @__PURE__ */ new Date()).toISOString(),
       models
@@ -17485,7 +18709,7 @@ var OpenRouterFreeDriver = class {
       return {
         candidateId: `openrouter-free:${accountId}`,
         accountId,
-        providerId: PROVIDER_ID15,
+        providerId: PROVIDER_ID17,
         displayName: item.label,
         email: item.maskedKey,
         status: "available",
@@ -17519,10 +18743,10 @@ var OpenRouterFreeDriver = class {
     }
     const fingerprint = candidate2.fingerprint ?? hashApiKeyFingerprint(apiKey);
     const masked = maskApiKey3(apiKey);
-    const credentialRef = createCredentialRef(PROVIDER_ID15, candidate2.accountId);
+    const credentialRef = createCredentialRef(PROVIDER_ID17, candidate2.accountId);
     await writeSecret(context.secretStore, credentialRef, {
       type: "openrouter_free_auth",
-      providerId: PROVIDER_ID15,
+      providerId: PROVIDER_ID17,
       accountId: candidate2.accountId,
       apiKey,
       label: candidate2.displayName ?? `OpenRouter Key (${masked})`,
@@ -17549,7 +18773,7 @@ var OpenRouterFreeDriver = class {
       };
     }
     return createAccountRecord({
-      providerId: PROVIDER_ID15,
+      providerId: PROVIDER_ID17,
       accountId: candidate2.accountId,
       displayName: candidate2.displayName || quotaInfo.keyLabel || `OpenRouter Key (${masked})`,
       email: candidate2.email || masked,
@@ -17596,7 +18820,7 @@ var OpenRouterFreeDriver = class {
     const account = await this.importAccount({
       candidateId: `openrouter-free:${accountId}`,
       accountId,
-      providerId: PROVIDER_ID15,
+      providerId: PROVIDER_ID17,
       displayName: customLabel || `OpenRouter Key (${masked})`,
       email: masked,
       source: "manual_api_key",
@@ -17614,7 +18838,7 @@ var OpenRouterFreeDriver = class {
     }
     return {
       status: "completed",
-      providerId: PROVIDER_ID15,
+      providerId: PROVIDER_ID17,
       instructions: "\u5DF2\u81EA\u52A8\u5BFC\u5165\u672C\u673A OpenRouter API Key\u3002",
       accounts
     };
@@ -17624,7 +18848,7 @@ var OpenRouterFreeDriver = class {
     if (active) return active;
     return {
       status: "opened",
-      providerId: PROVIDER_ID15,
+      providerId: PROVIDER_ID17,
       authorizationUrl: OPENROUTER_KEYS_PAGE,
       instructions: "\u8BF7\u5728\u4E0B\u65B9\u76F4\u63A5\u7C98\u8D34\u60A8\u7684 OpenRouter API Key\uFF08sk-or-v1-...\uFF09\uFF0C\u6216\u5728\u6253\u5F00\u7684 OpenRouter \u9875\u9762\u521B\u5EFA\u65B0 Key \u540E\u7C98\u8D34\u6DFB\u52A0\u3002"
     };
@@ -17779,10 +19003,10 @@ import { randomUUID as randomUUID14 } from "node:crypto";
 
 // modules/provider-trae-cn/src/native-transport.mjs
 import { createServer as createServer2 } from "node:http";
-import { randomBytes as randomBytes5, randomInt, randomUUID as randomUUID13 } from "node:crypto";
-var PROVIDER_ID16 = "trae-cn";
+import { randomBytes as randomBytes6, randomInt, randomUUID as randomUUID13 } from "node:crypto";
+var PROVIDER_ID18 = "trae-cn";
 var TRAE_CN_SITE = Object.freeze({
-  id: PROVIDER_ID16,
+  id: PROVIDER_ID18,
   name: "Trae CN",
   webHost: "https://www.trae.cn",
   authHost: "https://api.trae.cn",
@@ -18096,7 +19320,7 @@ var digits = (count) => Array.from(
 function newTraeDevice() {
   return {
     deviceId: digits(16),
-    machineId: randomBytes5(16).toString("hex")
+    machineId: randomBytes6(16).toString("hex")
   };
 }
 function traeWhen(value) {
@@ -18569,7 +19793,7 @@ function createTraeNativeExecutor({
     })();
   }
   ;
-  return guardEmptyCompletion(executeTrae, { providerId: PROVIDER_ID16 });
+  return guardEmptyCompletion(executeTrae, { providerId: PROVIDER_ID18 });
 }
 async function readTraeCredits({ credential, site = TRAE_CN_SITE, fetchImpl = fetch, timeoutMs = 2e4 } = {}) {
   const response = await fetchImpl(`${site.authHost}/trae/api/v2/pay/ide_user_ent_usage`, {
@@ -18672,7 +19896,7 @@ function accountIdFor(credential) {
 }
 function summarizeTraeCnCandidate(candidate2) {
   return {
-    providerId: PROVIDER_ID16,
+    providerId: PROVIDER_ID18,
     candidateId: candidate2?.candidateId ?? "trae-cn",
     accountId: candidate2?.accountId ?? "trae-cn",
     displayName: candidate2?.displayName ?? "Trae CN",
@@ -18739,7 +19963,7 @@ var TraeCnSubscriptionDriver = class {
       site: this.site,
       timeoutMs: this.signInTimeoutMs
     });
-    const sessionId = `${PROVIDER_ID16}:${randomUUID14()}`;
+    const sessionId = `${PROVIDER_ID18}:${randomUUID14()}`;
     const state = { status: "pending", credential: null, error: null };
     session.result.then((result) => {
       if (result?.ok) {
@@ -18755,7 +19979,7 @@ var TraeCnSubscriptionDriver = class {
     this.#sessions.set(sessionId, { session, state, startedAt: (/* @__PURE__ */ new Date()).toISOString() });
     return {
       status: "pending",
-      providerId: PROVIDER_ID16,
+      providerId: PROVIDER_ID18,
       sessionId,
       authorizationUrl: session.authorizationUrl,
       instructions: session.instructions,
@@ -18767,7 +19991,7 @@ var TraeCnSubscriptionDriver = class {
     if (!entry) {
       return {
         status: "failed",
-        providerId: PROVIDER_ID16,
+        providerId: PROVIDER_ID18,
         sessionId,
         diagnostic: "\u8FD9\u6B21\u767B\u5F55\u4F1A\u8BDD\u5DF2\u7ECF\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u53D1\u8D77\u767B\u5F55\u3002"
       };
@@ -18776,7 +20000,7 @@ var TraeCnSubscriptionDriver = class {
       this.#sessions.delete(sessionId);
       return {
         status: "failed",
-        providerId: PROVIDER_ID16,
+        providerId: PROVIDER_ID18,
         sessionId,
         diagnostic: entry.state.error
       };
@@ -18784,7 +20008,7 @@ var TraeCnSubscriptionDriver = class {
     if (entry.state.result) return entry.state.result;
     const credential = entry.state.credential;
     if (!credential) {
-      return { status: "pending", providerId: PROVIDER_ID16, sessionId };
+      return { status: "pending", providerId: PROVIDER_ID18, sessionId };
     }
     const accountId = accountIdFor(credential);
     const candidate2 = {
@@ -18797,7 +20021,7 @@ var TraeCnSubscriptionDriver = class {
     Object.defineProperty(candidate2, CREDENTIAL_SLOT6, { value: credential, enumerable: false });
     const completed = {
       status: "completed",
-      providerId: PROVIDER_ID16,
+      providerId: PROVIDER_ID18,
       sessionId,
       diagnostic: null,
       accounts: [candidate2]
@@ -18812,13 +20036,13 @@ var TraeCnSubscriptionDriver = class {
       entry.session.cancel();
       this.#sessions.delete(sessionId);
     }
-    return { status: "cancelled", providerId: PROVIDER_ID16, sessionId };
+    return { status: "cancelled", providerId: PROVIDER_ID18, sessionId };
   }
   async importAccount(candidate2, context = {}) {
     const credential = candidate2?.[CREDENTIAL_SLOT6];
     if (!credential) throw new Error("Trae CN \u7684\u767B\u5F55\u4FE1\u606F\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55");
     const accountId = candidate2?.accountId ?? accountIdFor(credential);
-    const ref = createCredentialRef(PROVIDER_ID16, accountId);
+    const ref = createCredentialRef(PROVIDER_ID18, accountId);
     if (!context.secretStore) {
       throw new Error("Trae CN \u9700\u8981\u5B89\u5168\u51ED\u636E\u5B58\u50A8\uFF0C\u4F46\u5F53\u524D\u73AF\u5883\u6CA1\u6709\u63D0\u4F9B secretStore");
     }
@@ -18840,7 +20064,7 @@ var TraeCnSubscriptionDriver = class {
       }
     }
     return createAccountRecord({
-      providerId: PROVIDER_ID16,
+      providerId: PROVIDER_ID18,
       accountId,
       credentialRef: ref,
       displayName: candidate2?.displayName ?? credential.name ?? "Trae CN",
@@ -18984,19 +20208,19 @@ function createTraeCnModule({ driver = {} } = {}) {
 import { createHash as createHash12 } from "node:crypto";
 
 // modules/provider-agentrouter/src/native-transport.mjs
-var PROVIDER_ID17 = "agentrouter";
+var PROVIDER_ID19 = "agentrouter";
 var DEFAULT_AGENTROUTER_ENDPOINT = "https://agentrouter.org/v1/chat/completions";
 var DEFAULT_AGENTROUTER_MODELS_ENDPOINT = "https://agentrouter.org/v1/models";
 var DEFAULT_AGENTROUTER_RESPONSES_ENDPOINT = "https://agentrouter.org/v1/responses";
 var DEFAULT_AGENTROUTER_USER_AGENT = "Cline/3.2.0";
-function firstString11(...values) {
+function firstString12(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
 }
-function toolCallPart3(part) {
+function toolCallPart4(part) {
   const type = String(part?.type ?? "").toLowerCase().replace(/[_-]/g, "");
   return type === "toolcall" || type === "functioncall" || type === "tooluse" ? part : null;
 }
-async function openAiContent3(content, attachments) {
+async function openAiContent4(content, attachments) {
   const values = Array.isArray(content) ? content : [content];
   const blocks = [];
   for (const part of values) {
@@ -19007,7 +20231,7 @@ async function openAiContent3(content, attachments) {
     if (!part || typeof part !== "object") continue;
     if (part.type === "image") {
       const image = await resolveImageData(part, attachments);
-      if (!image) throw nativeProviderError(PROVIDER_ID17, "image attachment could not be resolved");
+      if (!image) throw nativeProviderError(PROVIDER_ID19, "image attachment could not be resolved");
       blocks.push({ type: "image_url", image_url: { url: `data:${image.mediaType};base64,${image.data}` } });
       continue;
     }
@@ -19019,7 +20243,7 @@ ${textFromContent(part.content ?? part.output ?? part.result ?? part.text)}`
       });
       continue;
     }
-    if (toolCallPart3(part)) continue;
+    if (toolCallPart4(part)) continue;
     const text3 = textFromContent(part);
     if (text3) blocks.push({ type: "text", text: text3 });
   }
@@ -19035,17 +20259,17 @@ async function buildAgentRouterMessages(request, attachments) {
     if (role === "tool") {
       result.push({
         role: "tool",
-        tool_call_id: sanitizeToolCallId(firstString11(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
+        tool_call_id: sanitizeToolCallId(firstString12(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
         content: textFromContent(message.content ?? message.text ?? message.output ?? message.result)
       });
       continue;
     }
-    const content = await openAiContent3(message?.content ?? message?.text, attachments);
-    const calls = (Array.isArray(message?.content) ? message.content : [message?.content]).map(toolCallPart3).filter(Boolean).map((call, index) => ({
-      id: sanitizeToolCallId(firstString11(call.id, call.toolCallId, call.tool_call_id, `tool-${index}`)),
+    const content = await openAiContent4(message?.content ?? message?.text, attachments);
+    const calls = (Array.isArray(message?.content) ? message.content : [message?.content]).map(toolCallPart4).filter(Boolean).map((call, index) => ({
+      id: sanitizeToolCallId(firstString12(call.id, call.toolCallId, call.tool_call_id, `tool-${index}`)),
       type: "function",
       function: {
-        name: firstString11(call.name, call.function?.name, "tool"),
+        name: firstString12(call.name, call.function?.name, "tool"),
         arguments: typeof (call.arguments ?? call.function?.arguments) === "string" ? call.arguments ?? call.function.arguments : JSON.stringify(call.arguments ?? call.input ?? call.function?.arguments ?? {})
       }
     }));
@@ -19104,7 +20328,7 @@ async function* streamAgentRouterResponse(response) {
     const payload = event.data;
     if (!payload || typeof payload !== "object") continue;
     if (payload.error) {
-      throw nativeProviderError(PROVIDER_ID17, payload.error.message ?? "AgentRouter returned an error", {
+      throw nativeProviderError(PROVIDER_ID19, payload.error.message ?? "AgentRouter returned an error", {
         status: payload.error.code ?? payload.error.status,
         body: payload.error
       });
@@ -19157,8 +20381,8 @@ async function* streamAgentRouterResponse(response) {
         }
         const state2 = {
           index: nextIndex++,
-          id: firstString11(call.id, `tool-${key}`),
-          name: firstString11(call.function?.name, call.name, "tool"),
+          id: firstString12(call.id, `tool-${key}`),
+          name: firstString12(call.function?.name, call.name, "tool"),
           arguments: ""
         };
         tools.set(key, state2);
@@ -19176,7 +20400,7 @@ async function* streamAgentRouterResponse(response) {
   }
   if (!terminated) {
     throw nativeProviderError(
-      PROVIDER_ID17,
+      PROVIDER_ID19,
       "AgentRouter \u6D41\u5728\u6CA1\u6709 finish_reason \u6216 [DONE] \u7684\u60C5\u51B5\u4E0B\u7ED3\u675F\uFF0C\u54CD\u5E94\u53EF\u80FD\u88AB\u622A\u65AD",
       { code: "AGENTROUTER_TRUNCATED_STREAM" }
     );
@@ -19204,19 +20428,19 @@ async function buildAgentRouterResponsesInput(request, attachments) {
     if (role === "tool") {
       items.push({
         type: "function_call_output",
-        call_id: sanitizeToolCallId(firstString11(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
+        call_id: sanitizeToolCallId(firstString12(message.toolCallId, message.tool_call_id, message.id, "tool-result")),
         output: textFromContent(message.content ?? message.text ?? message.output ?? message.result)
       });
       continue;
     }
-    const calls = (Array.isArray(message?.content) ? message.content : [message?.content]).map(toolCallPart3).filter(Boolean).map((call, index) => ({
+    const calls = (Array.isArray(message?.content) ? message.content : [message?.content]).map(toolCallPart4).filter(Boolean).map((call, index) => ({
       type: "function_call",
-      call_id: sanitizeToolCallId(firstString11(call.id, call.toolCallId, call.tool_call_id, `tool-${index}`)),
-      name: firstString11(call.name, call.function?.name, "tool"),
+      call_id: sanitizeToolCallId(firstString12(call.id, call.toolCallId, call.tool_call_id, `tool-${index}`)),
+      name: firstString12(call.name, call.function?.name, "tool"),
       arguments: typeof (call.arguments ?? call.function?.arguments) === "string" ? call.arguments ?? call.function.arguments : JSON.stringify(call.arguments ?? call.input ?? call.function?.arguments ?? {})
     }));
     items.push(...calls);
-    const content = await openAiContent3(message?.content ?? message?.text, attachments);
+    const content = await openAiContent4(message?.content ?? message?.text, attachments);
     if (content.length > 0) {
       const mapped = content.map((part) => part.type === "image_url" ? { type: "input_image", image_url: part.image_url.url } : { type: role === "assistant" ? "output_text" : "input_text", text: part.text });
       items.push({ role: role === "assistant" ? "assistant" : "user", content: mapped });
@@ -19280,7 +20504,7 @@ async function* streamAgentRouterResponses(response) {
     const type = typeof payload.type === "string" ? payload.type : event.event ?? "";
     if (type === "response.error" || type === "response.failed" || payload.error) {
       const detail = payload.error?.message ?? payload.response?.error?.message ?? "AgentRouter returned an error";
-      throw nativeProviderError(PROVIDER_ID17, detail, { body: payload });
+      throw nativeProviderError(PROVIDER_ID19, detail, { body: payload });
     }
     if (payload.response?.usage) usage = normalizeUsage(payload.response.usage) ?? usage;
     if (payload.usage) usage = normalizeUsage(payload.usage) ?? usage;
@@ -19306,14 +20530,14 @@ async function* streamAgentRouterResponses(response) {
     const isFunctionCall = payload.item?.type === "function_call";
     if ((type === "response.output_item.added" || type === "response.output_item.done") && isFunctionCall) {
       const item = payload.item;
-      const itemKey = firstString11(item.id, item.call_id, `tool-${tools.size}`);
+      const itemKey = firstString12(item.id, item.call_id, `tool-${tools.size}`);
       let state = tools.get(itemKey);
       if (!state) {
         state = {
           index: nextIndex++,
           itemId: itemKey,
-          id: firstString11(item.call_id, item.id, itemKey),
-          name: firstString11(item.name, "tool"),
+          id: firstString12(item.call_id, item.id, itemKey),
+          name: firstString12(item.name, "tool"),
           arguments: ""
         };
         if (reasoning) {
@@ -19349,7 +20573,7 @@ async function* streamAgentRouterResponses(response) {
   }
   if (!terminated) {
     throw nativeProviderError(
-      PROVIDER_ID17,
+      PROVIDER_ID19,
       "AgentRouter\uFF08Responses\uFF09\u6D41\u5728\u6CA1\u6709\u5B8C\u6210\u4E8B\u4EF6\u7684\u60C5\u51B5\u4E0B\u7ED3\u675F\uFF0C\u54CD\u5E94\u53EF\u80FD\u88AB\u622A\u65AD",
       { code: "AGENTROUTER_TRUNCATED_STREAM" }
     );
@@ -19370,8 +20594,8 @@ function createAgentRouterNativeExecutor({
   fetchImpl = fetch,
   userAgent = process.env.DOCKYARD_AGENTROUTER_USER_AGENT || DEFAULT_AGENTROUTER_USER_AGENT
 } = {}) {
-  const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID17 });
-  const safeResponses = validateNativeEndpoint(responsesEndpoint, { providerId: PROVIDER_ID17 });
+  const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID19 });
+  const safeResponses = validateNativeEndpoint(responsesEndpoint, { providerId: PROVIDER_ID19 });
   const send = async (url, body, token, signal) => {
     const response = await fetchImpl(url, {
       method: "POST",
@@ -19390,9 +20614,9 @@ function createAgentRouterNativeExecutor({
   };
   const responsesOnly = /* @__PURE__ */ new Set();
   const executor = async ({ request = {}, credential, context = {} } = {}) => {
-    const token = firstString11(credential?.apiKey, credential?.access, env.AGENTROUTER_API_KEY);
+    const token = firstString12(credential?.apiKey, credential?.access, env.AGENTROUTER_API_KEY);
     if (!token) {
-      const error = nativeProviderError(PROVIDER_ID17, "AgentRouter API Key \u672A\u914D\u7F6E\uFF0C\u8BF7\u5728\u9762\u677F\u4E2D\u7C98\u8D34 sk- \u5F00\u5934\u7684 Key");
+      const error = nativeProviderError(PROVIDER_ID19, "AgentRouter API Key \u672A\u914D\u7F6E\uFF0C\u8BF7\u5728\u9762\u677F\u4E2D\u7C98\u8D34 sk- \u5F00\u5934\u7684 Key");
       error.code = "AUTH_REQUIRED";
       throw error;
     }
@@ -19401,7 +20625,7 @@ function createAgentRouterNativeExecutor({
       const response = await send(safeResponses, await buildAgentRouterResponsesRequest(request, context), token, context.signal);
       if (response.ok) return streamAgentRouterResponses(response);
       const detail2 = await response.text().catch(() => "");
-      throw nativeProviderError(PROVIDER_ID17, `AgentRouter \u62D2\u7EDD\u4E86\u8BF7\u6C42\uFF08${response.status}\uFF09\uFF1A${detail2.slice(0, 200)}`, {
+      throw nativeProviderError(PROVIDER_ID19, `AgentRouter \u62D2\u7EDD\u4E86\u8BF7\u6C42\uFF08${response.status}\uFF09\uFF1A${detail2.slice(0, 200)}`, {
         status: response.status
       });
     }
@@ -19413,19 +20637,19 @@ function createAgentRouterNativeExecutor({
       const responsesResponse = await send(safeResponses, await buildAgentRouterResponsesRequest(request, context), token, context.signal);
       if (responsesResponse.ok) return streamAgentRouterResponses(responsesResponse);
       const responsesDetail = await responsesResponse.text().catch(() => "");
-      throw nativeProviderError(PROVIDER_ID17, `AgentRouter \u62D2\u7EDD\u4E86\u8BF7\u6C42\uFF08${responsesResponse.status}\uFF09\uFF1A${responsesDetail.slice(0, 200)}`, {
+      throw nativeProviderError(PROVIDER_ID19, `AgentRouter \u62D2\u7EDD\u4E86\u8BF7\u6C42\uFF08${responsesResponse.status}\uFF09\uFF1A${responsesDetail.slice(0, 200)}`, {
         status: responsesResponse.status
       });
     }
-    throw nativeProviderError(PROVIDER_ID17, `AgentRouter \u62D2\u7EDD\u4E86\u8BF7\u6C42\uFF08${chatResponse.status}\uFF09\uFF1A${detail.slice(0, 200)}`, {
+    throw nativeProviderError(PROVIDER_ID19, `AgentRouter \u62D2\u7EDD\u4E86\u8BF7\u6C42\uFF08${chatResponse.status}\uFF09\uFF1A${detail.slice(0, 200)}`, {
       status: chatResponse.status
     });
   };
   executor.nativeTransport = "agentrouter-openai-completions";
-  return guardEmptyCompletion(executor, { providerId: PROVIDER_ID17 });
+  return guardEmptyCompletion(executor, { providerId: PROVIDER_ID19 });
 }
 var agentRouterNativeTransportConstants = Object.freeze({
-  providerId: PROVIDER_ID17,
+  providerId: PROVIDER_ID19,
   endpoint: DEFAULT_AGENTROUTER_ENDPOINT,
   modelsEndpoint: DEFAULT_AGENTROUTER_MODELS_ENDPOINT,
   responsesEndpoint: DEFAULT_AGENTROUTER_RESPONSES_ENDPOINT,
@@ -19433,7 +20657,7 @@ var agentRouterNativeTransportConstants = Object.freeze({
 });
 
 // modules/provider-agentrouter/src/driver.mjs
-var PROVIDER_ID18 = "agentrouter";
+var PROVIDER_ID20 = "agentrouter";
 var AGENTROUTER_REASONING = Object.freeze({
   efforts: [
     { id: "low", name: "Low" },
@@ -19491,7 +20715,7 @@ function createAgentRouterCatalogLoader({
     if (!token && Array.isArray(accounts) && accounts.length > 0) token = accounts[0]?.auth?.apiKey ?? null;
     if (token) {
       try {
-        assertSecureEndpointUrl(modelsUrl, { providerId: PROVIDER_ID18 });
+        assertSecureEndpointUrl(modelsUrl, { providerId: PROVIDER_ID20 });
         const { body } = await fetchJson(
           modelsUrl,
           {
@@ -19524,7 +20748,7 @@ function createAgentRouterCatalogLoader({
 }
 function summarizeAgentRouterCandidate(candidate2) {
   return {
-    providerId: PROVIDER_ID18,
+    providerId: PROVIDER_ID20,
     candidateId: candidate2?.candidateId ?? "agentrouter-default",
     displayName: candidate2?.displayName ?? "AgentRouter",
     email: candidate2?.email ?? null,
@@ -19560,7 +20784,7 @@ var AgentRouterDriver = class {
       candidates: [{
         candidateId: `agentrouter:${fingerprintApiKey3(envKey)}`,
         accountId: `agentrouter-${fingerprintApiKey3(envKey)}`,
-        providerId: PROVIDER_ID18,
+        providerId: PROVIDER_ID20,
         displayName: `AgentRouter Key (${maskApiKey4(envKey)})`,
         apiKey: envKey,
         subscription: { plan: "AgentRouter \u4F59\u989D\u8D26\u6237", status: "active" }
@@ -19570,11 +20794,11 @@ var AgentRouterDriver = class {
   async importAccount(candidate2, context = {}) {
     const apiKey = String(candidate2?.apiKey ?? "").trim();
     const accountId = candidate2?.accountId || `agentrouter-${fingerprintApiKey3(apiKey)}`;
-    const ref = createCredentialRef(PROVIDER_ID18, accountId);
+    const ref = createCredentialRef(PROVIDER_ID20, accountId);
     if (context.secretStore) {
       await context.secretStore.write(ref, {
         type: "agentrouter_api_key",
-        providerId: PROVIDER_ID18,
+        providerId: PROVIDER_ID20,
         apiKey,
         displayName: candidate2?.displayName || "AgentRouter"
       }).catch(() => {
@@ -19582,7 +20806,7 @@ var AgentRouterDriver = class {
     }
     return createAccountRecord({
       accountId,
-      providerId: PROVIDER_ID18,
+      providerId: PROVIDER_ID20,
       displayName: candidate2?.displayName || `AgentRouter Key (${maskApiKey4(apiKey)})`,
       email: candidate2?.email ?? null,
       auth: { kind: "api_key", credentialRef: ref },
@@ -19861,6 +21085,15 @@ function createDefaultProviderEntries(options = {}) {
       driver: options.cursorDriver
     },
     {
+      module: createOpencodeModule({
+        driver: options.opencodeDriver ?? createOpencodeDriver({
+          ...withRequestExecutor("opencode", options.opencode, requestExecutors),
+          ...catalogLoaders.opencode ? { catalogLoader: catalogLoaders.opencode } : {}
+        })
+      }),
+      driver: options.opencodeDriver
+    },
+    {
       module: createCommandCodeModule({
         driver: options.commandcodeDriver ?? createCommandCodeDriver({
           ...withRequestExecutor("commandcode", options.commandcode, requestExecutors),
@@ -19998,17 +21231,11 @@ var DockyardRuntime = class {
     if (this.#preparePromise) return this.#preparePromise;
     this.#preparePromise = (async () => {
       const state = await this.stateStore.load();
-      if (state?.pools?.opencode || state?.pools?.kilo || state?.modelSelection?.providers?.opencode || state?.modelSelection?.providers?.kilo) {
+      if (state?.pools?.kilo || state?.modelSelection?.providers?.kilo) {
         if (typeof this.stateStore.update === "function") {
           await this.stateStore.update((latest) => {
-            if (latest?.pools) {
-              delete latest.pools.opencode;
-              delete latest.pools.kilo;
-            }
-            if (latest?.modelSelection?.providers) {
-              delete latest.modelSelection.providers.opencode;
-              delete latest.modelSelection.providers.kilo;
-            }
+            if (latest?.pools) delete latest.pools.kilo;
+            if (latest?.modelSelection?.providers) delete latest.modelSelection.providers.kilo;
             return latest;
           }).catch(() => {
           });
@@ -20653,7 +21880,7 @@ var DockyardRuntime = class {
 // packages/dsh-plugin/src/codex-transport.mjs
 import { access, readFile as readFile7 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname as dirname8, join as join15, resolve } from "node:path";
+import { dirname as dirname8, join as join16, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 var activeCodexModels = /* @__PURE__ */ new Map();
 function recordCodexModels(models) {
@@ -20699,15 +21926,15 @@ async function findPackageRoot(startDirectory, packageName) {
   const packageParts = packageName.split("/");
   let current = resolve(startDirectory);
   while (true) {
-    const candidate2 = join15(current, "node_modules", ...packageParts);
-    if (await isFile2(join15(candidate2, "package.json"))) return candidate2;
+    const candidate2 = join16(current, "node_modules", ...packageParts);
+    if (await isFile2(join16(candidate2, "package.json"))) return candidate2;
     const parent = dirname8(current);
     if (parent === current) return null;
     current = parent;
   }
 }
 async function packageImportUrl(packageRoot, subpath = null) {
-  const packageJson = JSON.parse(await readFile7(join15(packageRoot, "package.json"), "utf8"));
+  const packageJson = JSON.parse(await readFile7(join16(packageRoot, "package.json"), "utf8"));
   const exports = packageJson.exports;
   let target = null;
   if (!subpath) {
@@ -20729,7 +21956,7 @@ async function packageImportUrl(packageRoot, subpath = null) {
   if (typeof target !== "string") {
     throw new Error(`Cannot resolve ${subpath ?? "."} from ${packageRoot}`);
   }
-  return pathToFileURL(join15(packageRoot, target)).href;
+  return pathToFileURL(join16(packageRoot, target)).href;
 }
 async function importFromDshInstall(moduleAnchor) {
   const anchor = moduleAnchor ?? process.env.DOCKYARD_DSH_CLI_PATH ?? process.argv[1] ?? import.meta.url;
@@ -21545,7 +22772,7 @@ function createDockyardCredentialStore(credentials, fallback = null) {
 // packages/dsh-plugin/src/native-key-pool-host.mjs
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAgentLoopRequest, markAgentLoopRequest } from "@deepseek-ai/dsh-llm";
-import { join as join16 } from "node:path";
+import { join as join17 } from "node:path";
 
 // packages/dsh-plugin/src/native-usage.mjs
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -21843,7 +23070,7 @@ var NativeKeyPoolHost = class {
     this.logger = logger ?? console;
     this.contextWindowOverrides = contextWindowOverrides;
     this.stateStore = stateStore ?? new JsonStateStore({
-      filePath: join16(defaultDockyardHome(), "native-key-pools.json")
+      filePath: join17(defaultDockyardHome(), "native-key-pools.json")
     });
     this.readyPromise = this.loadState();
   }
@@ -22210,7 +23437,7 @@ var NativeKeyPoolHost = class {
 // packages/dsh-plugin/src/vpn-ssrf-patch.mjs
 var import_ipaddr = __toESM(require_ipaddr(), 1);
 import { createRequire as createRequire2 } from "node:module";
-import { dirname as dirname9, join as join17 } from "node:path";
+import { dirname as dirname9, join as join18 } from "node:path";
 var isPatched = false;
 function patchFakeIpVpnSupport() {
   if (isPatched) return true;
@@ -22236,7 +23463,7 @@ function patchFakeIpVpnSupport() {
   ];
   if (typeof process?.execPath === "string") {
     try {
-      candidates.push(join17(dirname9(dirname9(process.execPath)), "Resources/app.asar/dsh/node_modules/ipaddr.js"));
+      candidates.push(join18(dirname9(dirname9(process.execPath)), "Resources/app.asar/dsh/node_modules/ipaddr.js"));
     } catch {
     }
   }
@@ -22292,6 +23519,7 @@ function apply(ctx, config = {}) {
       }),
       claude: runtimeOptions.requestExecutors?.claude ?? createClaudeNativeExecutor(runtimeOptions.claude ?? {}),
       cursor: runtimeOptions.requestExecutors?.cursor ?? createCursorNativeExecutor(runtimeOptions.cursor ?? {}),
+      opencode: runtimeOptions.requestExecutors?.opencode ?? createOpencodeNativeExecutor(runtimeOptions.opencode ?? {}),
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
       commandcode: runtimeOptions.requestExecutors?.commandcode ?? createCommandCodeNativeExecutor(runtimeOptions.commandcode ?? {}),
       hermes: runtimeOptions.requestExecutors?.hermes ?? createHermesNativeExecutor(runtimeOptions.hermes ?? {}),
@@ -22309,6 +23537,10 @@ function apply(ctx, config = {}) {
       }),
       claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
+      opencode: runtimeOptions.catalogLoaders?.opencode ?? createOpencodeCatalogLoader({
+        ...runtimeOptions.opencode ?? {},
+        registryLoader: modelRegistryLoader
+      }),
       commandcode: runtimeOptions.catalogLoaders?.commandcode ?? createCommandCodeCatalogLoader(runtimeOptions.commandcode ?? {}),
       hermes: runtimeOptions.catalogLoaders?.hermes ?? createHermesCatalogLoader(runtimeOptions.hermes ?? {}),
       "openrouter-free": runtimeOptions.catalogLoaders?.["openrouter-free"] ?? createOpenRouterFreeCatalogLoader(runtimeOptions["openrouter-free"] ?? runtimeOptions.openrouterFree ?? {}),
@@ -22439,8 +23671,8 @@ function apply(ctx, config = {}) {
                   res.end("Forbidden");
                   return;
                 }
-                const filePath = join18(process.cwd(), "artifacts", cleanPath);
-                if (!existsSync7(filePath)) {
+                const filePath = join19(process.cwd(), "artifacts", cleanPath);
+                if (!existsSync8(filePath)) {
                   res.writeHead(404);
                   res.end("Not Found");
                   return;

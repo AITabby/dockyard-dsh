@@ -1,10 +1,12 @@
-import { defineProviderModule } from "../../../packages/core/src/provider-module.mjs";
+import { PROVIDER_BEHAVIOR_CAPABILITIES, defineProviderModule } from "../../../packages/core/src/index.mjs";
 
 export function createOpencodeModule({ driver = {} } = {}) {
   return defineProviderModule({
     id: "opencode",
     displayName: "OpenCode",
     capabilities: [
+      PROVIDER_BEHAVIOR_CAPABILITIES.AUTO_PROVISION_FREE_ACCOUNT,
+      PROVIDER_BEHAVIOR_CAPABILITIES.CATALOG_WARMUP,
       "quota",
       "catalog",
       "invoke",
