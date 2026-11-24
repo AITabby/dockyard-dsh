@@ -748,6 +748,76 @@ export function collapseAntigravityTierFamilies(models, { defaultModelId = null 
 }
 
 /**
+ * Antigravity's "Orchestrator" entries are a client-side pairing rather than
+ * rows the account API returns: the official client plans on the strongest tier
+ * of a Gemini 4 family and hands the plan to a cheaper executor (Gemini 4
+ * Hydrogen). The account's own reply only proves which families it may use, so
+ * the entries are derived from that live list: an orchestrator appears exactly
+ * when the account can select both its planner and the executor.
+ */
+const ORCHESTRATOR_FAMILIES = Object.freeze([
+  { family: "gemini-4-neon", id: "gemini-pro-orchestrator-neon", label: "Neon" },
+  { family: "gemini-4-carbon", id: "gemini-pro-orchestrator", label: "Carbon" },
+  { family: "gemini-4-argon", id: "gemini-pro-orchestrator-argon", label: "Argon" },
+]);
+const ORCHESTRATOR_EXECUTOR_FAMILY = "gemini-4-hydrogen";
+
+/** The id that requests this family's strongest tier, or null when it has none. */
+function familyHighTierId(models, family) {
+  const row = models.find((model) => typeof model?.id === "string" && model.id.startsWith(`${family}-`));
+  if (!row) return null;
+  if (row.id.endsWith("-high")) return row.id;
+  const efforts = Array.isArray(row.reasoning?.efforts) ? row.reasoning.efforts : [];
+  return efforts.some((effort) => effort?.id === "high") ? `${family}-high` : null;
+}
+
+function catalogFamilyRow(models, family) {
+  return models.find((model) => typeof model?.id === "string" && model.id.startsWith(`${family}-`)) ?? null;
+}
+
+/**
+ * Add the account's Orchestrator entries to a collapsed catalog, keeping the
+ * official picker's order (right after the Gemini 4 families). Rows that are
+ * already present (the CLI catalog lists them itself) only gain the pairing.
+ */
+export function withAntigravityOrchestrators(models) {
+  const rows = (Array.isArray(models) ? models : []).filter(
+    (model) => model && typeof model.id === "string" && model.id.length > 0,
+  );
+  const executor = familyHighTierId(rows, ORCHESTRATOR_EXECUTOR_FAMILY);
+  if (!executor) return rows;
+
+  const additions = [];
+  for (const spec of ORCHESTRATOR_FAMILIES) {
+    const planner = familyHighTierId(rows, spec.family);
+    if (!planner) continue;
+    const existing = rows.find((model) => model.id === spec.id);
+    if (existing) {
+      existing.combo ??= { planner, executor };
+      continue;
+    }
+    const plannerRow = catalogFamilyRow(rows, spec.family);
+    additions.push({
+      id: spec.id,
+      name: `Orchestrator (${spec.label})`,
+      ...(Number.isFinite(plannerRow?.contextWindow) ? { contextWindow: plannerRow.contextWindow } : {}),
+      ...(Number.isFinite(plannerRow?.maxTokens) ? { maxTokens: plannerRow.maxTokens } : {}),
+      combo: { planner, executor },
+    });
+  }
+  if (additions.length === 0) return rows;
+
+  let index = rows.length;
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    if (typeof rows[i]?.id === "string" && rows[i].id.startsWith("gemini-4-")) {
+      index = i + 1;
+      break;
+    }
+  }
+  return [...rows.slice(0, index), ...additions, ...rows.slice(index)];
+}
+
+/**
  * Flatten fetchAvailableModels' map into catalog rows.
  *
  * The reply's `models` table is a superset of what the official client offers:
@@ -768,20 +838,19 @@ export function modelsFromFetchAvailableModels(raw) {
       }
     }
   }
-  // Rows the account cannot use right now (an exhausted quota, a model the
-  // official client greys out as "Unavailable") stay in the list so the picker
-  // can show them, but they are never selectable.
+  // A row the account cannot use (the official client greys it out, and the
+  // reply marks it `disabled`) is left out entirely: the directory mirrors the
+  // selected account's live, selectable list, so a model it does not serve
+  // never appears as an unselectable entry.
   const agentRows = Object.entries(table).filter(([id, info]) => (
-    typeof id === "string" && id.length > 0 && info && info.isInternal !== true
+    typeof id === "string" && id.length > 0 && info && info.isInternal !== true && info.disabled !== true
   ));
-  const enabledRows = agentRows.filter(([, info]) => info.disabled !== true);
-  const picked = order.length > 0 ? agentRows.filter(([id]) => order.includes(id)) : enabledRows;
-  const entries = picked.length > 0 ? picked : enabledRows;
+  const picked = order.length > 0 ? agentRows.filter(([id]) => order.includes(id)) : agentRows;
+  const entries = picked.length > 0 ? picked : agentRows;
   if (entries.length === 0) return null;
   const models = entries.map(([id, info]) => ({
     id,
     name: typeof info.displayName === "string" && info.displayName.trim() ? info.displayName.trim() : id,
-    ...(info.disabled === true ? { unavailable: true } : {}),
     ...(Number.isFinite(info.maxTokens) && info.maxTokens > 0 ? { contextWindow: info.maxTokens } : {}),
     ...(Number.isFinite(info.maxOutputTokens) && info.maxOutputTokens > 0 ? { maxTokens: info.maxOutputTokens } : {}),
     ...(info.supportsImages === true ? { inputModalities: ["text", "image"] } : {}),
@@ -791,9 +860,9 @@ export function modelsFromFetchAvailableModels(raw) {
     return index === -1 ? Number.MAX_SAFE_INTEGER : index;
   };
   models.sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
-  return collapseAntigravityTierFamilies(models, {
+  return withAntigravityOrchestrators(collapseAntigravityTierFamilies(models, {
     defaultModelId: typeof raw?.defaultAgentModelId === "string" ? raw.defaultAgentModelId : null,
-  });
+  }));
 }
 
 /** Resolve the Code Assist project for the selected OAuth session. */

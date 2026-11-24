@@ -58,6 +58,10 @@ The registered modules (see `packages/runtime/src/dockyard-runtime.mjs`) are `pr
 
 The module manifest contains only stable technical identity and capabilities. It contains no provider version or account data.
 
+#### Antigravity plan/execute models
+
+Antigravity's "Orchestrator" entries are not models the provider serves: the official client plans on the strongest tier of a Gemini 4 family and hands the plan to a cheaper executor. `provider-antigravity` reproduces that pairing locally. The account catalog derives an entry per family the account can actually select (`Orchestrator (Neon|Carbon|Argon)`) and carries the pairing as `combo: { planner, executor }`; an entry exists only when the account's live list offers both its planner and the executor, so a model the account cannot use never appears. At invocation the driver runs the planner with plan mode and a hand-off tool, intercepts the hand-off, and continues the same turn on the executor — see `modules/provider-antigravity/src/plan-execute.mjs`. Rows the account's live reply marks `disabled` are dropped rather than shown as unselectable, so the picker mirrors the selected account's live list.
+
 ### Host modules
 
 The macOS menu bar is a host. It presents live state and sends commands, but it does not implement provider OAuth or account selection. A future CLI or web host can consume the same runtime services.

@@ -133,15 +133,13 @@ test("only the rows the account's own picker offers become agent models", () => 
   });
   // Picker order, and only picker rows: no editor buffers, no tab previews, no
   // image generators, and no legacy aliases that duplicate another model name.
-  // A picker row the account cannot use stays, marked unavailable.
+  // A row the account cannot use is left out, so the directory mirrors the
+  // selected account's live, selectable list.
   assert.deepEqual(models.map((model) => model.id), [
     "gemini-3.8-flash-high",
     "claude-sonnet-4-6",
-    "gemini-4-argon-disabled",
   ]);
-  assert.equal(models.at(-1).name, "Gemini 4 Argon");
-  assert.equal(models.at(-1).unavailable, true);
-  assert.equal(models[0].unavailable, undefined);
+  assert.equal(models.every((model) => model.unavailable === undefined), true);
 });
 
 test("tiered families fold into one model with the tiers as efforts", () => {

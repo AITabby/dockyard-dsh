@@ -47,4 +47,14 @@ export {
   readAntigravityTokenFile,
   resolveAntigravityAccessToken,
   resolveAntigravityThinkingConfig,
+  withAntigravityOrchestrators,
 } from "./native-transport.mjs";
+
+export {
+  ORCHESTRATOR_PLAN_TOOL,
+  isOrchestratorContinuation,
+  orchestratorExecutionProtocol,
+  orchestratorPlanProtocol,
+  orchestratorPlanTool,
+  streamAntigravityOrchestrator,
+} from "./plan-execute.mjs";

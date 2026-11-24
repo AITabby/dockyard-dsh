@@ -38,7 +38,9 @@ import {
   readAntigravityTokenFile,
   resolveAntigravityAccessToken,
   resolveAntigravityClientSecret,
+  withAntigravityOrchestrators,
 } from "./native-transport.mjs";
+import { streamAntigravityOrchestrator } from "./plan-execute.mjs";
 
 const PROVIDER_ID = "antigravity";
 const DEFAULT_CLI = "agy";
@@ -567,7 +569,7 @@ export function parseAntigravityModelCatalog(output) {
   // The CLI returns one row per tier; fold them into one model per family so
   // the picker shows "Gemini 3.8 Flash" with a tier selector, like the official
   // client, instead of three near-identical entries.
-  return collapseAntigravityTierFamilies(rows);
+  return withAntigravityOrchestrators(collapseAntigravityTierFamilies(rows));
 }
 
 function registryModels(value) {
@@ -1785,6 +1787,9 @@ export class AntigravityOfficialSessionDriver {
     this.hasExplicitBrowserClient = Boolean(clientId && clientSecret);
     this.requestExecutor = requestExecutor;
     this.quotaReader = quotaReader;
+    // One plan/execute phase per DSH session: the planner's hand-off has to
+    // survive the tool round-trips that follow it inside the same turn.
+    this.orchestratorSessions = new Map();
     this.tokenResolver = tokenResolver;
     this.identityFromOfficialSession = identityFromOfficialSession;
     this.cliOAuthAuthorizer = createAntigravityOAuthAuthorizer({
@@ -1903,6 +1908,39 @@ export class AntigravityOfficialSessionDriver {
       timeoutMs,
       commandRunner,
     });
+  }
+
+  /**
+   * The plan/execute pairing of the selected model, when it is one of the
+   * derived "Orchestrator" entries. Reads the same cached catalog the model
+   * picker used; a cold cache is refreshed once so a selected orchestrator is
+   * never sent upstream as a raw id the provider does not serve.
+   */
+  async #orchestratorCombo(modelId, context = {}) {
+    if (typeof modelId !== "string" || !modelId.includes("orchestrator")) return null;
+    const read = async (force) => {
+      const catalog = await this.catalogLoader({
+        force,
+        accounts: context.accounts,
+        accountId: context.accountId ?? null,
+        secretStore: context.secretStore ?? null,
+      });
+      return (Array.isArray(catalog?.models) ? catalog.models : []).find((item) => item?.id === modelId) ?? null;
+    };
+    let entry = null;
+    try {
+      entry = await read(false);
+      if (!entry) entry = await read(true);
+    } catch {
+      entry = null;
+    }
+    const combo = entry?.combo;
+    if (combo && typeof combo.planner === "string" && typeof combo.executor === "string") return combo;
+    const error = new Error(
+      `Antigravity model ${modelId} is a plan/execute pairing, not a model the provider serves, and this account's live catalog no longer offers it. Refresh the model list and pick it again.`,
+    );
+    error.code = "MODEL_UNAVAILABLE";
+    throw error;
   }
 
   async #slash(command, signal) {
@@ -2687,6 +2725,27 @@ export class AntigravityOfficialSessionDriver {
           model: resolved.model,
           ...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: resolved.reasoningEffort }),
         };
+    // An "Orchestrator" pick is not a model the provider serves: it is the
+    // plan-then-execute pairing the official client runs. Reproduce it here.
+    const combo = await this.#orchestratorCombo(resolvedRequest.model, context);
+    if (combo) {
+      const sessionKey = context?.sessionId ?? context?.requestId ?? "default";
+      // Only the newest turns matter; keep the map from growing for the life of
+      // the process as sessions come and go.
+      if (this.orchestratorSessions.size > 64 && !this.orchestratorSessions.has(sessionKey)) {
+        const oldest = this.orchestratorSessions.keys().next().value;
+        this.orchestratorSessions.delete(oldest);
+      }
+      return streamAntigravityOrchestrator({
+        request: resolvedRequest,
+        invocation,
+        context,
+        executor,
+        combo,
+        state: this.orchestratorSessions,
+        sessionKey,
+      });
+    }
     return executor({ request: resolvedRequest, invocation, context });
   }
 

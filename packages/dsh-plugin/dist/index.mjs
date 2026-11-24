@@ -6804,6 +6804,56 @@ function collapseAntigravityTierFamilies(models, { defaultModelId = null } = {})
   }
   return result;
 }
+var ORCHESTRATOR_FAMILIES = Object.freeze([
+  { family: "gemini-4-neon", id: "gemini-pro-orchestrator-neon", label: "Neon" },
+  { family: "gemini-4-carbon", id: "gemini-pro-orchestrator", label: "Carbon" },
+  { family: "gemini-4-argon", id: "gemini-pro-orchestrator-argon", label: "Argon" }
+]);
+var ORCHESTRATOR_EXECUTOR_FAMILY = "gemini-4-hydrogen";
+function familyHighTierId(models, family) {
+  const row = models.find((model) => typeof model?.id === "string" && model.id.startsWith(`${family}-`));
+  if (!row) return null;
+  if (row.id.endsWith("-high")) return row.id;
+  const efforts = Array.isArray(row.reasoning?.efforts) ? row.reasoning.efforts : [];
+  return efforts.some((effort) => effort?.id === "high") ? `${family}-high` : null;
+}
+function catalogFamilyRow(models, family) {
+  return models.find((model) => typeof model?.id === "string" && model.id.startsWith(`${family}-`)) ?? null;
+}
+function withAntigravityOrchestrators(models) {
+  const rows = (Array.isArray(models) ? models : []).filter(
+    (model) => model && typeof model.id === "string" && model.id.length > 0
+  );
+  const executor = familyHighTierId(rows, ORCHESTRATOR_EXECUTOR_FAMILY);
+  if (!executor) return rows;
+  const additions = [];
+  for (const spec of ORCHESTRATOR_FAMILIES) {
+    const planner = familyHighTierId(rows, spec.family);
+    if (!planner) continue;
+    const existing = rows.find((model) => model.id === spec.id);
+    if (existing) {
+      existing.combo ??= { planner, executor };
+      continue;
+    }
+    const plannerRow = catalogFamilyRow(rows, spec.family);
+    additions.push({
+      id: spec.id,
+      name: `Orchestrator (${spec.label})`,
+      ...Number.isFinite(plannerRow?.contextWindow) ? { contextWindow: plannerRow.contextWindow } : {},
+      ...Number.isFinite(plannerRow?.maxTokens) ? { maxTokens: plannerRow.maxTokens } : {},
+      combo: { planner, executor }
+    });
+  }
+  if (additions.length === 0) return rows;
+  let index = rows.length;
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    if (typeof rows[i]?.id === "string" && rows[i].id.startsWith("gemini-4-")) {
+      index = i + 1;
+      break;
+    }
+  }
+  return [...rows.slice(0, index), ...additions, ...rows.slice(index)];
+}
 function modelsFromFetchAvailableModels(raw) {
   const table = raw?.models;
   if (!table || typeof table !== "object") return null;
@@ -6815,15 +6865,13 @@ function modelsFromFetchAvailableModels(raw) {
       }
     }
   }
-  const agentRows = Object.entries(table).filter(([id, info]) => typeof id === "string" && id.length > 0 && info && info.isInternal !== true);
-  const enabledRows = agentRows.filter(([, info]) => info.disabled !== true);
-  const picked = order.length > 0 ? agentRows.filter(([id]) => order.includes(id)) : enabledRows;
-  const entries = picked.length > 0 ? picked : enabledRows;
+  const agentRows = Object.entries(table).filter(([id, info]) => typeof id === "string" && id.length > 0 && info && info.isInternal !== true && info.disabled !== true);
+  const picked = order.length > 0 ? agentRows.filter(([id]) => order.includes(id)) : agentRows;
+  const entries = picked.length > 0 ? picked : agentRows;
   if (entries.length === 0) return null;
   const models = entries.map(([id, info]) => ({
     id,
     name: typeof info.displayName === "string" && info.displayName.trim() ? info.displayName.trim() : id,
-    ...info.disabled === true ? { unavailable: true } : {},
     ...Number.isFinite(info.maxTokens) && info.maxTokens > 0 ? { contextWindow: info.maxTokens } : {},
     ...Number.isFinite(info.maxOutputTokens) && info.maxOutputTokens > 0 ? { maxTokens: info.maxOutputTokens } : {},
     ...info.supportsImages === true ? { inputModalities: ["text", "image"] } : {}
@@ -6833,9 +6881,9 @@ function modelsFromFetchAvailableModels(raw) {
     return index === -1 ? Number.MAX_SAFE_INTEGER : index;
   };
   models.sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
-  return collapseAntigravityTierFamilies(models, {
+  return withAntigravityOrchestrators(collapseAntigravityTierFamilies(models, {
     defaultModelId: typeof raw?.defaultAgentModelId === "string" ? raw.defaultAgentModelId : null
-  });
+  }));
 }
 function createAntigravityProjectResolver({
   endpoint: endpoint2 = process.env.DOCKYARD_ANTIGRAVITY_PROJECT_ENDPOINT || DEFAULT_PROJECT_ENDPOINT,
@@ -7703,6 +7751,180 @@ var antigravityNativeTransportConstants = Object.freeze({
   quotaEndpoint: DEFAULT_QUOTA_ENDPOINT
 });
 
+// modules/provider-antigravity/src/plan-execute.mjs
+var ORCHESTRATOR_PLAN_TOOL = "exit_plan_mode";
+var MUTATING_TOOL_PATTERN = /^(write|write_file|edit|edit_file|multi_edit|multiedit|apply_patch|str_replace|notebook_edit|create_file|delete_file)$/iu;
+function toolName(tool) {
+  return tool?.name ?? tool?.function?.name ?? "";
+}
+function orchestratorPlanTool() {
+  return {
+    name: ORCHESTRATOR_PLAN_TOOL,
+    description: "Hand the finished plan to the execution model. Call this once the plan is complete. The execution model carries out the plan and cannot ask you questions, so the plan must be self-contained.",
+    parameters: {
+      type: "object",
+      properties: {
+        plan: {
+          type: "string",
+          description: "The complete plan: the decisions taken, the files and functions to change, the exact changes, how to verify the result, and the signs that the plan has gone wrong."
+        }
+      },
+      required: ["plan"]
+    }
+  };
+}
+function orchestratorPlanProtocol({ planner = null, executor = null } = {}) {
+  const plannerLabel = planner ? ` (${planner})` : "";
+  const executorLabel = executor ? ` (${executor})` : "";
+  return [
+    "<plan_execute_protocol>",
+    `This turn runs in two phases on two models. You are the planning model${plannerLabel}: the strongest and most expensive one.`,
+    "Plan mode is on. Investigate read-only: read code, search, and run commands that only observe. Do not modify files, and do not take any action whose effects leave the workspace.",
+    "",
+    "Match the depth of planning to the request. Many user messages are small follow-ups whose steps the conversation has already settled: for those, hand off a one- or two-sentence plan instead of investigating.",
+    "",
+    "When the task does need a plan:",
+    "- Make every decision the task needs: how to read anything ambiguous, the design, the APIs, the order of work, and how the result will be verified.",
+    "- Write the plan for an engineer who is competent but less capable than you and who cannot ask you questions: name files, functions and exact changes; give the verification commands and what their output must show; record the pitfalls you noticed.",
+    '- End the plan with a short "Re-plan if:" list - the specific signs, for this task, that the plan has turned out wrong.',
+    "",
+    `Then call \`${ORCHESTRATOR_PLAN_TOOL}\` with the complete plan. That is the hand-off: a faster, cheaper execution model${executorLabel} starts a new turn with your plan, and nothing you know that is not in the plan or already in the conversation survives it.`,
+    "",
+    "Do not call the hand-off tool when the request needs nothing done - a question, a review, an explanation. Answer it directly instead. Anything that does something (an edit, or an action with effects outside the workspace) goes to the execution model, however small.",
+    "</plan_execute_protocol>"
+  ].join("\n");
+}
+function orchestratorExecutionProtocol({ plan, planner = null } = {}) {
+  const plannerLabel = planner ? ` by the planning model (${planner})` : "";
+  return [
+    "<plan_execute_protocol>",
+    `A stronger planning model${plannerLabel} planned this work in the previous phase and handed it to you to carry out.`,
+    "You have the full tool set, including the editing tools. Follow the plan; adapt it only where it is clearly wrong for what you find, and say what you changed and why.",
+    "When the plan is carried out, verify the result the way the plan says to, then answer the user.",
+    "",
+    "<plan>",
+    String(plan ?? "").trim(),
+    "</plan>",
+    "</plan_execute_protocol>"
+  ].join("\n");
+}
+function isToolResultPart2(part) {
+  return part?.type === "tool-result" || part?.type === "tool_result";
+}
+function isOrchestratorContinuation(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  const last = list.at(-1);
+  if (!last) return false;
+  const values = Array.isArray(last.content) ? last.content : [last.content];
+  return values.some(isToolResultPart2);
+}
+function collectToolCalls(chunks) {
+  const calls = [];
+  for (const chunk of chunks) {
+    if (chunk?.type !== "block-end") continue;
+    const block = chunk.block;
+    if (block?.type !== "tool-call") continue;
+    calls.push(block);
+  }
+  return calls;
+}
+function planFromCall(call) {
+  let args = call?.arguments;
+  if (typeof args === "string") {
+    try {
+      args = JSON.parse(args);
+    } catch {
+      return String(args).trim() || null;
+    }
+  }
+  const plan = args?.plan ?? args?.plan_text ?? args?.markdown ?? args?.content;
+  if (typeof plan !== "string") return null;
+  const trimmed = plan.trim();
+  return trimmed || null;
+}
+function planReasoningChunks(plan) {
+  const index = 0;
+  return [
+    { type: "block-start", index, blockType: "reasoning" },
+    { type: "reasoning-delta", index, text: `Plan
+
+${plan}` },
+    { type: "block-end", index, block: { type: "reasoning", text: `Plan
+
+${plan}` } }
+  ];
+}
+function withSystem(request, addition) {
+  const base = typeof request.system === "string" && request.system.length > 0 ? request.system : "";
+  return base ? `${base}
+
+${addition}` : addition;
+}
+function planningRequest(request, combo) {
+  const tools = (Array.isArray(request.tools) ? request.tools : []).filter((tool) => !MUTATING_TOOL_PATTERN.test(toolName(tool)));
+  return {
+    ...request,
+    model: combo.planner,
+    system: withSystem(request, orchestratorPlanProtocol({ planner: combo.planner, executor: combo.executor })),
+    tools: [...tools, orchestratorPlanTool()]
+  };
+}
+function executionRequest(request, combo, plan) {
+  return {
+    ...request,
+    model: combo.executor,
+    system: withSystem(request, orchestratorExecutionProtocol({ plan, planner: combo.planner }))
+  };
+}
+async function* streamAntigravityOrchestrator({
+  request,
+  invocation,
+  context = {},
+  executor,
+  combo,
+  state,
+  sessionKey = "default"
+}) {
+  const session = state.get(sessionKey) ?? { phase: "planning", plan: null };
+  state.set(sessionKey, session);
+  if (!isOrchestratorContinuation(request.messages)) {
+    session.phase = "planning";
+    session.plan = null;
+  }
+  if (session.phase === "executing" && session.plan) {
+    const stream = await executor({
+      request: executionRequest(request, combo, session.plan),
+      invocation,
+      context
+    });
+    yield* stream;
+    return;
+  }
+  const planned = [];
+  const plannerStream = await executor({
+    request: planningRequest(request, combo),
+    invocation,
+    context
+  });
+  for await (const chunk of plannerStream) planned.push(chunk);
+  const calls = collectToolCalls(planned);
+  const handOff = calls.find((call) => call.name === ORCHESTRATOR_PLAN_TOOL);
+  const plan = handOff ? planFromCall(handOff) : null;
+  if (!plan) {
+    yield* planned;
+    return;
+  }
+  session.plan = plan;
+  session.phase = "executing";
+  yield* planReasoningChunks(plan);
+  const executed = await executor({
+    request: executionRequest(request, combo, plan),
+    invocation,
+    context
+  });
+  yield* executed;
+}
+
 // modules/provider-antigravity/src/driver.mjs
 var PROVIDER_ID3 = "antigravity";
 var DEFAULT_CLI = "agy";
@@ -8050,7 +8272,7 @@ function parseAntigravityModelCatalog(output) {
     const [id, ...nameParts] = line.split("	");
     return { id, name: nameParts.join("	") || id };
   }).filter((model) => model.id);
-  return collapseAntigravityTierFamilies(rows);
+  return withAntigravityOrchestrators(collapseAntigravityTierFamilies(rows));
 }
 function registryModels(value) {
   if (Array.isArray(value)) return value;
@@ -8798,6 +9020,7 @@ var AntigravityOfficialSessionDriver = class {
     this.hasExplicitBrowserClient = Boolean(clientId && clientSecret);
     this.requestExecutor = requestExecutor;
     this.quotaReader = quotaReader;
+    this.orchestratorSessions = /* @__PURE__ */ new Map();
     this.tokenResolver = tokenResolver;
     this.identityFromOfficialSession = identityFromOfficialSession;
     this.cliOAuthAuthorizer = createAntigravityOAuthAuthorizer({
@@ -8898,6 +9121,38 @@ var AntigravityOfficialSessionDriver = class {
       timeoutMs,
       commandRunner
     });
+  }
+  /**
+   * The plan/execute pairing of the selected model, when it is one of the
+   * derived "Orchestrator" entries. Reads the same cached catalog the model
+   * picker used; a cold cache is refreshed once so a selected orchestrator is
+   * never sent upstream as a raw id the provider does not serve.
+   */
+  async #orchestratorCombo(modelId, context = {}) {
+    if (typeof modelId !== "string" || !modelId.includes("orchestrator")) return null;
+    const read = async (force) => {
+      const catalog = await this.catalogLoader({
+        force,
+        accounts: context.accounts,
+        accountId: context.accountId ?? null,
+        secretStore: context.secretStore ?? null
+      });
+      return (Array.isArray(catalog?.models) ? catalog.models : []).find((item) => item?.id === modelId) ?? null;
+    };
+    let entry = null;
+    try {
+      entry = await read(false);
+      if (!entry) entry = await read(true);
+    } catch {
+      entry = null;
+    }
+    const combo = entry?.combo;
+    if (combo && typeof combo.planner === "string" && typeof combo.executor === "string") return combo;
+    const error = new Error(
+      `Antigravity model ${modelId} is a plan/execute pairing, not a model the provider serves, and this account's live catalog no longer offers it. Refresh the model list and pick it again.`
+    );
+    error.code = "MODEL_UNAVAILABLE";
+    throw error;
   }
   async #slash(command, signal) {
     const result = await this.commandRunner(this.cliPath, ["-p", command, "--output-format", "json"], {
@@ -9567,6 +9822,23 @@ var AntigravityOfficialSessionDriver = class {
       model: resolved.model,
       ...resolved.reasoningEffort === void 0 ? {} : { reasoningEffort: resolved.reasoningEffort }
     };
+    const combo = await this.#orchestratorCombo(resolvedRequest.model, context);
+    if (combo) {
+      const sessionKey = context?.sessionId ?? context?.requestId ?? "default";
+      if (this.orchestratorSessions.size > 64 && !this.orchestratorSessions.has(sessionKey)) {
+        const oldest = this.orchestratorSessions.keys().next().value;
+        this.orchestratorSessions.delete(oldest);
+      }
+      return streamAntigravityOrchestrator({
+        request: resolvedRequest,
+        invocation,
+        context,
+        executor,
+        combo,
+        state: this.orchestratorSessions,
+        sessionKey
+      });
+    }
     return executor({ request: resolvedRequest, invocation, context });
   }
   async stream(request, invocation, context = {}) {
@@ -15787,8 +16059,8 @@ ${text3}` : text3;
           } else if (block.type === "tool_use" || block.type === "tool-call") {
             const rawId = block.id || block.toolCallId || `call_${randomUUID10().slice(0, 8)}`;
             const toolCallId = sanitizeToolCallId(rawId);
-            const toolName = block.name || block.toolName || "tool";
-            toolNameById.set(toolCallId, toolName);
+            const toolName2 = block.name || block.toolName || "tool";
+            toolNameById.set(toolCallId, toolName2);
             const rawInput = block.arguments ?? block.input ?? block.args ?? {};
             let input = rawInput;
             if (typeof rawInput === "string") {
@@ -15801,7 +16073,7 @@ ${text3}` : text3;
             content.push({
               type: "tool-call",
               toolCallId,
-              toolName,
+              toolName: toolName2,
               input: input && typeof input === "object" ? input : {}
             });
           }
@@ -15831,7 +16103,7 @@ ${text3}` : text3;
     if (role === "tool") {
       const rawId = msg.tool_call_id || msg.toolCallId;
       const toolCallId = sanitizeToolCallId(rawId || "unknown");
-      const toolName = msg.name || msg.toolName || (toolCallId ? toolNameById.get(toolCallId) : null) || "unknown";
+      const toolName2 = msg.name || msg.toolName || (toolCallId ? toolNameById.get(toolCallId) : null) || "unknown";
       const text3 = typeof msg.content === "string" ? msg.content : textFromContent(msg.content);
       wireMessages.push({
         role: "tool",
@@ -15839,7 +16111,7 @@ ${text3}` : text3;
           {
             type: "tool-result",
             toolCallId: toolCallId || "unknown",
-            toolName,
+            toolName: toolName2,
             output: { type: "text", value: text3 || "" }
           }
         ]
