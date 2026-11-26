@@ -89,8 +89,8 @@ test("a live catalog read wins and keeps the advertised context windows", async 
       sentUa = init.headers["user-agent"];
       return new Response(JSON.stringify({
         data: [
-          { id: "gpt-6.1-sol" },
-          { id: "gpt-6-astra" },
+          { id: "gpt-6.2-sol" },
+          { id: "gpt-6.2-astra" },
           { id: "brand-new-model" },
         ],
       }), { status: 200 });
@@ -99,10 +99,33 @@ test("a live catalog read wins and keeps the advertised context windows", async 
   const catalog = await loader({ credential: { apiKey: "sk-test" } });
   assert.equal(sentUa, DEFAULT_AGENTROUTER_USER_AGENT, "the models read needs the client string too");
   const byId = new Map(catalog.models.map((model) => [model.id, model]));
-  assert.equal(byId.get("gpt-6.1-sol").contextWindow, 1_000_000);
-  assert.equal(byId.get("gpt-6-astra").contextWindow, 400_000);
+  assert.equal(byId.get("gpt-6.2-sol").contextWindow, 128_000);
   // A model we have no advertisement for still shows up, with a safe default.
   assert.equal(byId.get("brand-new-model").contextWindow, 128_000);
+});
+
+test("a rotated model id keeps its tier picker, and unknown families stay plain", () => {
+  // The service rotates ids (gpt-6.1-sol -> gpt-6.2-sol) and never declares
+  // reasoning support in its OpenAI-compatible list, so the tier picker has to
+  // follow the family rather than a fixed id table.
+  const parsed = parseAgentRouterCatalog({
+    data: [
+      { id: "gpt-6.2-sol" },
+      { id: "gpt-6.2-astra" },
+      { id: "gpt-7.1-sol" },
+      { id: "brand-new-model" },
+      { id: "gpt-4.1" },
+    ],
+  });
+  const byId = new Map(parsed.models.map((model) => [model.id, model]));
+  for (const id of ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-7.1-sol"]) {
+    assert.deepEqual(byId.get(id).reasoning.efforts.map((effort) => effort.id), ["low", "medium", "high"], id);
+    assert.equal(byId.get(id).reasoning.defaultEffort, "medium", id);
+  }
+  // An unsupported `reasoning` field fails the whole request, so a model whose
+  // family we do not recognise declares no tiers.
+  assert.equal(byId.get("brand-new-model").reasoning, undefined);
+  assert.equal(byId.get("gpt-4.1").reasoning, undefined);
 });
 
 test("parsing ignores entries without an id", () => {

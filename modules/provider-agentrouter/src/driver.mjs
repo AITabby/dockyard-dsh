@@ -16,11 +16,12 @@ import {
 
 const PROVIDER_ID = "agentrouter";
 
-/** The three models the service advertises; the live list wins when reachable. */
 /**
+ * The models the service advertises today; the live list wins when reachable.
+ *
  * These are GPT-6-class reasoning models, so the panel offers the standard
- * three levels. The transport maps DSH's extra levels (xhigh/max) down to high
- * and drops the parameter entirely if a model happens to refuse it.
+ * three levels. The transport maps DSH's extra levels (xhigh/max) down to high,
+ * and the family rule below keeps the picker working when the ids rotate.
  */
 const AGENTROUTER_REASONING = Object.freeze({
   efforts: [
@@ -31,10 +32,26 @@ const AGENTROUTER_REASONING = Object.freeze({
   defaultEffort: "medium",
 });
 
+/**
+ * The service never declares reasoning support in its OpenAI-compatible model
+ * list, and it rotates ids without notice (`gpt-6.1-sol` became `gpt-6.2-sol`),
+ * so an exact-id table goes stale and the panel silently loses its tier picker
+ * while the model itself still accepts the Responses `reasoning.effort` field
+ * (the gateway rejects an unknown effort with "Supported values are: none,
+ * minimal, low, medium, high, xhigh, max"). Everything it serves is a
+ * GPT-5/6-class reasoning model; stay conservative for anything else, because
+ * an unsupported `reasoning` field fails the whole request.
+ */
+const AGENTROUTER_REASONING_FAMILY = /^(?:gpt-[5-9](?:[.-]|$)|o[1-9](?:[.-]|$))/iu;
+
+function agentRouterReasoningFor(id, known) {
+  if (known?.reasoning) return known.reasoning;
+  return AGENTROUTER_REASONING_FAMILY.test(id) ? AGENTROUTER_REASONING : null;
+}
+
 export const BUILTIN_AGENTROUTER_MODELS = Object.freeze([
-  { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", contextWindow: 1_000_000, maxTokens: 128_000, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
-  { id: "gpt-6-astra", name: "GPT-6 Astra", contextWindow: 400_000, maxTokens: 128_000, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
-  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", contextWindow: 272_000, maxTokens: 128_000, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
+  { id: "gpt-6.2-sol", name: "GPT-6.2 Sol", contextWindow: 128_000, maxTokens: 32_768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
+  { id: "gpt-6.2-astra", name: "GPT-6.2 Astra", contextWindow: 128_000, maxTokens: 32_768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
 ]);
 
 function fingerprintApiKey(apiKey) {
@@ -57,13 +74,14 @@ export function parseAgentRouterCatalog(data) {
     if (!id || seen.has(id)) continue;
     seen.add(id);
     const known = builtinById.get(id) ?? null;
+    const reasoning = agentRouterReasoningFor(id, known);
     models.push({
       id,
       name: typeof item?.name === "string" && item.name.length > 0 ? item.name : id,
       contextWindow: known?.contextWindow ?? resolveContextWindowFromModel(item, 128_000),
       maxTokens: known?.maxTokens ?? resolveMaxTokensFromModel(item, 32_768),
       inputModalities: ["text"],
-      ...(known?.reasoning ? { reasoning: known.reasoning } : {}),
+      ...(reasoning ? { reasoning } : {}),
     });
   }
   return models.length > 0 ? { models, source: "agentrouter_live_catalog" } : null;

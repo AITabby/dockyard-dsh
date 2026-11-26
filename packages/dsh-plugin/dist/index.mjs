@@ -21206,10 +21206,14 @@ var AGENTROUTER_REASONING = Object.freeze({
   ],
   defaultEffort: "medium"
 });
+var AGENTROUTER_REASONING_FAMILY = /^(?:gpt-[5-9](?:[.-]|$)|o[1-9](?:[.-]|$))/iu;
+function agentRouterReasoningFor(id, known) {
+  if (known?.reasoning) return known.reasoning;
+  return AGENTROUTER_REASONING_FAMILY.test(id) ? AGENTROUTER_REASONING : null;
+}
 var BUILTIN_AGENTROUTER_MODELS = Object.freeze([
-  { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", contextWindow: 1e6, maxTokens: 128e3, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
-  { id: "gpt-6-astra", name: "GPT-6 Astra", contextWindow: 4e5, maxTokens: 128e3, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
-  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", contextWindow: 272e3, maxTokens: 128e3, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING }
+  { id: "gpt-6.2-sol", name: "GPT-6.2 Sol", contextWindow: 128e3, maxTokens: 32768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
+  { id: "gpt-6.2-astra", name: "GPT-6.2 Astra", contextWindow: 128e3, maxTokens: 32768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING }
 ]);
 function fingerprintApiKey3(apiKey) {
   return createHash12("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
@@ -21229,13 +21233,14 @@ function parseAgentRouterCatalog(data) {
     if (!id || seen.has(id)) continue;
     seen.add(id);
     const known = builtinById.get(id) ?? null;
+    const reasoning = agentRouterReasoningFor(id, known);
     models.push({
       id,
       name: typeof item?.name === "string" && item.name.length > 0 ? item.name : id,
       contextWindow: known?.contextWindow ?? resolveContextWindowFromModel(item, 128e3),
       maxTokens: known?.maxTokens ?? resolveMaxTokensFromModel(item, 32768),
       inputModalities: ["text"],
-      ...known?.reasoning ? { reasoning: known.reasoning } : {}
+      ...reasoning ? { reasoning } : {}
     });
   }
   return models.length > 0 ? { models, source: "agentrouter_live_catalog" } : null;
