@@ -99,7 +99,9 @@ test("a live catalog read wins and keeps the advertised context windows", async 
   const catalog = await loader({ credential: { apiKey: "sk-test" } });
   assert.equal(sentUa, DEFAULT_AGENTROUTER_USER_AGENT, "the models read needs the client string too");
   const byId = new Map(catalog.models.map((model) => [model.id, model]));
-  assert.equal(byId.get("gpt-6.2-sol").contextWindow, 128_000);
+  // The service never declares a context window; the measured 1M-class value
+  // for the served models comes from the advertisement table.
+  assert.equal(byId.get("gpt-6.2-sol").contextWindow, 1_000_000);
   // A model we have no advertisement for still shows up, with a safe default.
   assert.equal(byId.get("brand-new-model").contextWindow, 128_000);
 });

@@ -21212,8 +21212,8 @@ function agentRouterReasoningFor(id, known) {
   return AGENTROUTER_REASONING_FAMILY.test(id) ? AGENTROUTER_REASONING : null;
 }
 var BUILTIN_AGENTROUTER_MODELS = Object.freeze([
-  { id: "gpt-6.2-sol", name: "GPT-6.2 Sol", contextWindow: 128e3, maxTokens: 32768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
-  { id: "gpt-6.2-astra", name: "GPT-6.2 Astra", contextWindow: 128e3, maxTokens: 32768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING }
+  { id: "gpt-6.2-sol", name: "GPT-6.2 Sol", contextWindow: 1e6, maxTokens: 32768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
+  { id: "gpt-6.2-astra", name: "GPT-6.2 Astra", contextWindow: 1e6, maxTokens: 32768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING }
 ]);
 function fingerprintApiKey3(apiKey) {
   return createHash12("sha256").update(String(apiKey)).digest("hex").slice(0, 16);

@@ -22,6 +22,12 @@ const PROVIDER_ID = "agentrouter";
  * These are GPT-6-class reasoning models, so the panel offers the standard
  * three levels. The transport maps DSH's extra levels (xhigh/max) down to high,
  * and the family rule below keeps the picker working when the ids rotate.
+ *
+ * The live list never declares a context window, so these values were measured
+ * against the API (2026-11-27): a 401k-token input is accepted, a 1,049k-token
+ * input is rejected with `context_length_exceeded`. 1,000,000 is the round
+ * figure inside that bracket and stays below the real limit either way, which
+ * matters because the request fails outright when the input is too large.
  */
 const AGENTROUTER_REASONING = Object.freeze({
   efforts: [
@@ -50,8 +56,8 @@ function agentRouterReasoningFor(id, known) {
 }
 
 export const BUILTIN_AGENTROUTER_MODELS = Object.freeze([
-  { id: "gpt-6.2-sol", name: "GPT-6.2 Sol", contextWindow: 128_000, maxTokens: 32_768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
-  { id: "gpt-6.2-astra", name: "GPT-6.2 Astra", contextWindow: 128_000, maxTokens: 32_768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
+  { id: "gpt-6.2-sol", name: "GPT-6.2 Sol", contextWindow: 1_000_000, maxTokens: 32_768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
+  { id: "gpt-6.2-astra", name: "GPT-6.2 Astra", contextWindow: 1_000_000, maxTokens: 32_768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
 ]);
 
 function fingerprintApiKey(apiKey) {
