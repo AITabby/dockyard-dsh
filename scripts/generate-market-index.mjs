@@ -90,14 +90,14 @@ const iconDataUrl = `data:image/png;base64,${iconBuf.toString("base64")}`;
 const packageVersion = JSON.parse(
   readFileSync(resolve(rootDir, "packages/dsh-plugin/package.json"), "utf8"),
 ).version;
-// During a release the index is generated from the just-created release commit
-// and amended into it, so allow pinning the exact final SHA explicitly.
+// Pin the release commit explicitly when generating the separate market index commit.
 const currentCommit = (process.env.DOCKYARD_RELEASE_COMMIT || execSync("git rev-parse HEAD", { cwd: rootDir, encoding: "utf8" }).trim());
 
 const RELEASE_HISTORY = [
   // 0.1.17 was never published: its local commit embedded OAuth credentials and
   // was rewritten into the 0.1.18 release before being pushed. Do not list a
   // version whose commit does not exist on the remote.
+  { version: "0.1.42", publishTimestamp: 1795497165, commit: "c08752d38c23ffa786fa04c61a0c32678447a5fd" },
   { version: "0.1.41", publishTimestamp: 1794852704, commit: "32348b0e69541d67d7199609797ecb9a368c3a06" },
   { version: "0.1.40", publishTimestamp: 1794840691, commit: "85a8a59c9bb035bc046ee0cff9645b5801490eca" },
   { version: "0.1.39", publishTimestamp: 1794825319, commit: "e062beafd031c28433e242bcae3e5842155684c9" },

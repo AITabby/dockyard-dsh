@@ -21211,9 +21211,10 @@ function agentRouterReasoningFor(id, known) {
   if (known?.reasoning) return known.reasoning;
   return AGENTROUTER_REASONING_FAMILY.test(id) ? AGENTROUTER_REASONING : null;
 }
+var GPT_6_2_CONTEXT_FALLBACK = 4e5;
 var BUILTIN_AGENTROUTER_MODELS = Object.freeze([
-  { id: "gpt-6.2-sol", name: "GPT-6.2 Sol", contextWindow: 1e6, maxTokens: 32768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
-  { id: "gpt-6.2-astra", name: "GPT-6.2 Astra", contextWindow: 1e6, maxTokens: 32768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING }
+  { id: "gpt-6.2-sol", name: "GPT-6.2 Sol", contextWindow: GPT_6_2_CONTEXT_FALLBACK, maxTokens: 32768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
+  { id: "gpt-6.2-astra", name: "GPT-6.2 Astra", contextWindow: GPT_6_2_CONTEXT_FALLBACK, maxTokens: 32768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING }
 ]);
 function fingerprintApiKey3(apiKey) {
   return createHash12("sha256").update(String(apiKey)).digest("hex").slice(0, 16);
@@ -21237,8 +21238,8 @@ function parseAgentRouterCatalog(data) {
     models.push({
       id,
       name: typeof item?.name === "string" && item.name.length > 0 ? item.name : id,
-      contextWindow: known?.contextWindow ?? resolveContextWindowFromModel(item, 128e3),
-      maxTokens: known?.maxTokens ?? resolveMaxTokensFromModel(item, 32768),
+      contextWindow: resolveContextWindowFromModel(item, known?.contextWindow ?? 128e3),
+      maxTokens: resolveMaxTokensFromModel(item, known?.maxTokens ?? 32768),
       inputModalities: ["text"],
       ...reasoning ? { reasoning } : {}
     });

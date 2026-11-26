@@ -16,19 +16,7 @@ import {
 
 const PROVIDER_ID = "agentrouter";
 
-/**
- * The models the service advertises today; the live list wins when reachable.
- *
- * These are GPT-6-class reasoning models, so the panel offers the standard
- * three levels. The transport maps DSH's extra levels (xhigh/max) down to high,
- * and the family rule below keeps the picker working when the ids rotate.
- *
- * The live list never declares a context window, so these values were measured
- * against the API (2026-11-27): a 401k-token input is accepted, a 1,049k-token
- * input is rejected with `context_length_exceeded`. 1,000,000 is the round
- * figure inside that bracket and stays below the real limit either way, which
- * matters because the request fails outright when the input is too large.
- */
+/** The three reasoning levels exposed by the AgentRouter transport. */
 const AGENTROUTER_REASONING = Object.freeze({
   efforts: [
     { id: "low", name: "Low" },
@@ -39,14 +27,9 @@ const AGENTROUTER_REASONING = Object.freeze({
 });
 
 /**
- * The service never declares reasoning support in its OpenAI-compatible model
- * list, and it rotates ids without notice (`gpt-6.1-sol` became `gpt-6.2-sol`),
- * so an exact-id table goes stale and the panel silently loses its tier picker
- * while the model itself still accepts the Responses `reasoning.effort` field
- * (the gateway rejects an unknown effort with "Supported values are: none,
- * minimal, low, medium, high, xhigh, max"). Everything it serves is a
- * GPT-5/6-class reasoning model; stay conservative for anything else, because
- * an unsupported `reasoning` field fails the whole request.
+ * The current model list omits reasoning support. Recognize reasoning families
+ * so a change like gpt-6.1-sol to gpt-6.2-sol does not hide the tier picker.
+ * Requests using low/medium/high were accepted for both GPT-6.2 models.
  */
 const AGENTROUTER_REASONING_FAMILY = /^(?:gpt-[5-9](?:[.-]|$)|o[1-9](?:[.-]|$))/iu;
 
@@ -55,9 +38,14 @@ function agentRouterReasoningFor(id, known) {
   return AGENTROUTER_REASONING_FAMILY.test(id) ? AGENTROUTER_REASONING : null;
 }
 
+// The live list omits context limits. AgentRouter accepted 400,011 input
+// tokens on Sol and 401,011 on Astra (2026-11-27). Use a budget within both
+// measurements, not an estimate of the maximum upstream context window.
+const GPT_6_2_CONTEXT_FALLBACK = 400_000;
+
 export const BUILTIN_AGENTROUTER_MODELS = Object.freeze([
-  { id: "gpt-6.2-sol", name: "GPT-6.2 Sol", contextWindow: 1_000_000, maxTokens: 32_768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
-  { id: "gpt-6.2-astra", name: "GPT-6.2 Astra", contextWindow: 1_000_000, maxTokens: 32_768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
+  { id: "gpt-6.2-sol", name: "GPT-6.2 Sol", contextWindow: GPT_6_2_CONTEXT_FALLBACK, maxTokens: 32_768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
+  { id: "gpt-6.2-astra", name: "GPT-6.2 Astra", contextWindow: GPT_6_2_CONTEXT_FALLBACK, maxTokens: 32_768, inputModalities: ["text"], reasoning: AGENTROUTER_REASONING },
 ]);
 
 function fingerprintApiKey(apiKey) {
@@ -84,8 +72,8 @@ export function parseAgentRouterCatalog(data) {
     models.push({
       id,
       name: typeof item?.name === "string" && item.name.length > 0 ? item.name : id,
-      contextWindow: known?.contextWindow ?? resolveContextWindowFromModel(item, 128_000),
-      maxTokens: known?.maxTokens ?? resolveMaxTokensFromModel(item, 32_768),
+      contextWindow: resolveContextWindowFromModel(item, known?.contextWindow ?? 128_000),
+      maxTokens: resolveMaxTokensFromModel(item, known?.maxTokens ?? 32_768),
       inputModalities: ["text"],
       ...(reasoning ? { reasoning } : {}),
     });
