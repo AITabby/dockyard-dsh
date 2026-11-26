@@ -99,6 +99,18 @@
       },
       "versions": [
         {
+          "version": "0.1.43",
+          "publishTimestamp": 1795719329,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/AITabby/dockyard-dsh",
+            "commit": "207ecdfc26754983b050a218bcd8c472783251e5"
+          },
+          "engines": {
+            "dsh": ">=0.1.0"
+          }
+        },
+        {
           "version": "0.1.42",
           "publishTimestamp": 1795497165,
           "source": {
